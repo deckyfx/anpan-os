@@ -6,14 +6,15 @@ interface DialogProps {
   children: React.ReactNode;
   footer?: React.ReactNode;
   onClose: () => void;
-  /** "md" (default, max-w-lg) | "lg" (max-w-3xl) | "xl" (max-w-5xl) */
-  size?: "md" | "lg" | "xl";
+  /** "md" (default, max-w-lg) | "lg" (max-w-3xl) | "xl" (max-w-5xl) | "2xl" (max-w-7xl) */
+  size?: "md" | "lg" | "xl" | "2xl";
 }
 
 const SIZE_CLASS: Record<NonNullable<DialogProps["size"]>, string> = {
-  md: "max-w-lg",
-  lg: "max-w-3xl",
-  xl: "max-w-5xl",
+  md:  "max-w-lg",
+  lg:  "max-w-3xl",
+  xl:  "max-w-5xl",
+  "2xl": "max-w-7xl",
 };
 
 export function Dialog({ open, title, children, footer, onClose, size = "md" }: DialogProps) {

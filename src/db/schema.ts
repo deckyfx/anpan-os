@@ -30,6 +30,8 @@ export const stacks = sqliteTable("stacks", {
   scheme:      text("scheme").default("http"),
   indexPath:   text("index_path").default("/"),
   mainService: text("main_service"),
+  /** Custom host/address for the web UI (e.g. "npm.home.lan"). Blank = use current browser host. */
+  address:     text("address"),
   /** Freeform markdown/text note for this stack. */
   note:        text("note"),
   /** true = installed via this app or imported from CasaOS; false = discovered from Docker only. */

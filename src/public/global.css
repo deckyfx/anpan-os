@@ -2,6 +2,19 @@
 @import "plyr/dist/plyr.css";
 @import "viewerjs/dist/viewer.css";
 
+/* Self-hosted fonts */
+@import "@fontsource/inter/400.css";
+@import "@fontsource/inter/500.css";
+@import "@fontsource/inter/600.css";
+@import "@fontsource/fira-code/400.css";
+@import "@fontsource/fira-code/500.css";
+
+/* Tailwind v4 font theme overrides */
+@theme {
+  --font-sans: "Inter", ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --font-mono: "Fira Code", ui-monospace, "SFMono-Regular", Menlo, Monaco, Consolas, monospace;
+}
+
 @layer base {
   button, a {
     cursor: pointer;

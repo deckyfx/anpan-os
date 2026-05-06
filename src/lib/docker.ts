@@ -220,6 +220,57 @@ export class DockerClient {
   static getInfo(): Promise<DockerResult<DockerInfo>> {
     return dockerFetch<DockerInfo>("/info");
   }
+
+  /** List all containers (including stopped) that belong to a compose project. */
+  static async listProjectContainers(projectName: string): Promise<DockerResult<DockerContainer[]>> {
+    // Fetch all and filter client-side — same pattern as listStacks().
+    // Docker's server-side label filter syntax is unreliable over the Unix socket.
+    const result = await dockerFetch<DockerContainer[]>("/containers/json?all=1");
+    if (!result.ok) return result;
+    return {
+      ok: true,
+      data: result.data.filter(c => c.Labels?.["com.docker.compose.project"] === projectName),
+    };
+  }
+
+  /** Force-remove a container (stops it first if running). `v=1` removes anonymous volumes. */
+  static removeContainer(id: string): Promise<{ ok: boolean; error?: string }> {
+    return dockerAction(`/containers/${id}?force=true&v=1`, "DELETE");
+  }
+
+  /** List named volumes belonging to a compose project. */
+  static async listProjectVolumes(projectName: string): Promise<DockerResult<{ Volumes: Array<{ Name: string }> | null }>> {
+    const result = await dockerFetch<{ Volumes: Array<{ Name: string; Labels: Record<string, string> | null }> | null }>("/volumes");
+    if (!result.ok) return result;
+    return {
+      ok: true,
+      data: {
+        Volumes: (result.data.Volumes ?? []).filter(
+          v => v.Labels?.["com.docker.compose.project"] === projectName,
+        ),
+      },
+    };
+  }
+
+  /** Remove a named volume. */
+  static removeVolume(name: string): Promise<{ ok: boolean; error?: string }> {
+    return dockerAction(`/volumes/${encodeURIComponent(name)}`, "DELETE");
+  }
+
+  /** List networks belonging to a compose project. */
+  static async listProjectNetworks(projectName: string): Promise<DockerResult<Array<{ Id: string; Name: string }>>> {
+    const result = await dockerFetch<Array<{ Id: string; Name: string; Labels: Record<string, string> | null }>>("/networks");
+    if (!result.ok) return result;
+    return {
+      ok: true,
+      data: result.data.filter(n => n.Labels?.["com.docker.compose.project"] === projectName),
+    };
+  }
+
+  /** Remove a network. */
+  static removeNetwork(id: string): Promise<{ ok: boolean; error?: string }> {
+    return dockerAction(`/networks/${id}`, "DELETE");
+  }
 }
 
 /** Strip Docker multiplexed stream headers (8 bytes per frame). */

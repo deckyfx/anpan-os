@@ -43,6 +43,13 @@
       "when": 1778073039251,
       "tag": "0005_previous_goliath",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1778075410543,
+      "tag": "0006_common_zemo",
+      "breakpoints": true
     }
   ]
 }

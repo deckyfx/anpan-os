@@ -34,6 +34,7 @@ export class StackStore {
           scheme:      sql`COALESCE(${stacks.scheme},      excluded.scheme)`,
           indexPath:   sql`COALESCE(${stacks.indexPath},   excluded.index_path)`,
           mainService: sql`COALESCE(${stacks.mainService}, excluded.main_service)`,
+          address:     sql`COALESCE(${stacks.address},     excluded.address)`,
           updatedAt:   new Date(),
         },
       })
@@ -49,5 +50,9 @@ export class StackStore {
       .where(eq(stacks.id, id))
       .returning();
     return result[0] ?? null;
+  }
+
+  static async delete(id: string): Promise<void> {
+    await db.delete(stacks).where(eq(stacks.id, id));
   }
 }

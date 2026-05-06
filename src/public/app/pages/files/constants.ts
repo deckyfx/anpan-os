@@ -1,0 +1,52 @@
+export const IMAGE_EXTS   = new Set(["jpg","jpeg","png","gif","webp","svg","ico","bmp","tiff","avif"]);
+export const VIDEO_EXTS   = new Set(["mp4","webm","mkv","mov","avi","flv","wmv"]);
+export const AUDIO_EXTS   = new Set(["mp3","wav","ogg","flac","aac","m4a","opus"]);
+export const ARCHIVE_EXTS = new Set(["zip","tar","gz","bz2","xz","rar","7z","tgz","zst"]);
+
+export interface BadgeStyle { bg: string; fg: string; label: string }
+
+export const CODE_BADGES: Record<string, BadgeStyle> = {
+  ts:    { bg: "#3178c6", fg: "#fff", label: "TS"   },
+  tsx:   { bg: "#3178c6", fg: "#fff", label: "TSX"  },
+  mts:   { bg: "#3178c6", fg: "#fff", label: "MTS"  },
+  cts:   { bg: "#3178c6", fg: "#fff", label: "CTS"  },
+  js:    { bg: "#f7df1e", fg: "#000", label: "JS"   },
+  jsx:   { bg: "#f7df1e", fg: "#000", label: "JSX"  },
+  mjs:   { bg: "#f7df1e", fg: "#000", label: "MJS"  },
+  rs:    { bg: "#ce422b", fg: "#fff", label: "RS"   },
+  go:    { bg: "#00acd7", fg: "#fff", label: "GO"   },
+  py:    { bg: "#3572a5", fg: "#fff", label: "PY"   },
+  rb:    { bg: "#cc342d", fg: "#fff", label: "RB"   },
+  java:  { bg: "#b07219", fg: "#fff", label: "JV"   },
+  kt:    { bg: "#a97bff", fg: "#fff", label: "KT"   },
+  cs:    { bg: "#178600", fg: "#fff", label: "C#"   },
+  cpp:   { bg: "#f34b7d", fg: "#fff", label: "C++"  },
+  c:     { bg: "#555599", fg: "#fff", label: "C"    },
+  php:   { bg: "#4f5d95", fg: "#fff", label: "PHP"  },
+  swift: { bg: "#fa7343", fg: "#fff", label: "SW"   },
+  dart:  { bg: "#00b4ab", fg: "#fff", label: "DT"   },
+  vue:   { bg: "#41b883", fg: "#fff", label: "VUE"  },
+  svelte:{ bg: "#ff3e00", fg: "#fff", label: "SV"   },
+  scala: { bg: "#c22d40", fg: "#fff", label: "SC"   },
+  hs:    { bg: "#5e5086", fg: "#fff", label: "HS"   },
+  lua:   { bg: "#000080", fg: "#fff", label: "LUA"  },
+  r:     { bg: "#198ce7", fg: "#fff", label: "R"    },
+  zig:   { bg: "#ec915c", fg: "#fff", label: "ZIG"  },
+  sh:    { bg: "#4eaa25", fg: "#fff", label: "SH"   },
+  bash:  { bg: "#4eaa25", fg: "#fff", label: "SH"   },
+  zsh:   { bg: "#4eaa25", fg: "#fff", label: "SH"   },
+  fish:  { bg: "#4eaa25", fg: "#fff", label: "SH"   },
+  sql:   { bg: "#e38c00", fg: "#fff", label: "SQL"  },
+  graphql:{ bg: "#e10098", fg: "#fff", label: "GQL" },
+  gql:   { bg: "#e10098", fg: "#fff", label: "GQL"  },
+  prisma:{ bg: "#0c344b", fg: "#fff", label: "PR"   },
+  html:  { bg: "#e44d26", fg: "#fff", label: "HTM"  },
+  css:   { bg: "#264de4", fg: "#fff", label: "CSS"  },
+  scss:  { bg: "#cc6699", fg: "#fff", label: "SCSS" },
+  json:  { bg: "#40474f", fg: "#fff", label: "JSON" },
+  yaml:  { bg: "#cb171e", fg: "#fff", label: "YAML" },
+  yml:   { bg: "#cb171e", fg: "#fff", label: "YAML" },
+  toml:  { bg: "#9c4221", fg: "#fff", label: "TOML" },
+  md:    { bg: "#083fa1", fg: "#fff", label: "MD"   },
+  mdx:   { bg: "#083fa1", fg: "#fff", label: "MDX"  },
+};

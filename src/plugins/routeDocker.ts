@@ -1,7 +1,31 @@
 import { Elysia, t } from "elysia";
+import { join } from "node:path";
 import { authGuard } from "./authGuard";
 import { DockerClient } from "../lib/docker";
 import { StackStore } from "../stores/stack-store";
+import { config } from "../config";
+
+type ComposeOrigin = "managed" | "casaos" | null;
+
+/** Cheaply detect where the compose file for a stack lives. */
+async function detectOrigin(name: string, managed: boolean): Promise<ComposeOrigin> {
+  if (managed) return "managed";
+  const casaosPath = `/var/lib/casaos/apps/${name}/docker-compose.yml`;
+  try {
+    if (await Bun.file(casaosPath).exists()) return "casaos";
+  } catch { /* directory not readable — fall through */ }
+  // Fallback: try a quick sudo -n stat (handles root-owned CasaOS dirs)
+  const stat = await Bun.$`sudo -n stat ${casaosPath}`.quiet().nothrow();
+  if (stat.exitCode === 0) return "casaos";
+  // Check managed folder as secondary (in case managed flag isn't set yet)
+  const managedPath = join(config.composeFolder, name, "docker-compose.yml");
+  if (managedPath.startsWith(config.composeFolder)) {
+    try {
+      if (await Bun.file(managedPath).exists()) return "managed";
+    } catch { /* ignore */ }
+  }
+  return null;
+}
 
 /**
  * Docker management routes — all protected by auth guard.
@@ -35,13 +59,14 @@ export function dockerPlugin(jwtSecret: string) {
         StackStore.upsert({ id: s.name, ...(s.icon ? { icon: s.icon } : {}) }),
       ));
 
-      // Merge live Docker state with DB metadata
+      // Merge live Docker state with DB metadata + compose origin
       const allMeta = await StackStore.findAll();
       const metaMap = new Map(allMeta.map(m => [m.id, m]));
 
-      return result.data.map(s => ({
-        ...s,
-        meta: metaMap.get(s.name) ?? null,
+      return Promise.all(result.data.map(async s => {
+        const meta   = metaMap.get(s.name) ?? null;
+        const origin = await detectOrigin(s.name, meta?.managed ?? false);
+        return { ...s, meta, origin };
       }));
     })
 
@@ -54,18 +79,76 @@ export function dockerPlugin(jwtSecret: string) {
       },
       {
         body: t.Object({
-          title:       t.Optional(t.String()),
-          icon:        t.Optional(t.String()),
-          tagline:     t.Optional(t.String()),
-          portMap:     t.Optional(t.String()),
-          scheme:      t.Optional(t.String()),
-          indexPath:   t.Optional(t.String()),
-          mainService: t.Optional(t.String()),
+          title:       t.Optional(t.Nullable(t.String())),
+          icon:        t.Optional(t.Nullable(t.String())),
+          tagline:     t.Optional(t.Nullable(t.String())),
+          portMap:     t.Optional(t.Nullable(t.String())),
+          scheme:      t.Optional(t.Nullable(t.String())),
+          indexPath:   t.Optional(t.Nullable(t.String())),
+          mainService: t.Optional(t.Nullable(t.String())),
+          address:     t.Optional(t.Nullable(t.String())),
           note:        t.Optional(t.Nullable(t.String())),
           orderNo:     t.Optional(t.Nullable(t.Number())),
         }),
       },
     )
+
+    // Paths that are NOT system mounts and should be surfaced to the user before deletion
+    .get("/stacks/:name/binds", async ({ params, set }) => {
+      const containers = await DockerClient.listProjectContainers(params.name);
+      if (!containers.ok) { set.status = 502; return { error: containers.error }; }
+
+      const SKIP = new Set(["/var/run/docker.sock", "/etc/localtime", "/etc/timezone", "/etc/hosts", "/etc/hostname"]);
+      const paths = new Set<string>();
+
+      await Promise.all(containers.data.map(async (c) => {
+        const r = await DockerClient.inspectContainer(c.Id);
+        if (!r.ok) return;
+        for (const m of r.data.Mounts) {
+          if (m.Type === "bind" && !SKIP.has(m.Source)) paths.add(m.Source);
+        }
+      }));
+
+      return { paths: [...paths].sort() };
+    })
+
+    // Destroy a stack: containers → named volumes → networks → DB row.
+    // Bind-mounted host paths are intentionally left untouched.
+    .delete("/stacks/:name", async ({ params, set }) => {
+      const containers = await DockerClient.listProjectContainers(params.name);
+      if (!containers.ok) { set.status = 502; return { error: containers.error }; }
+
+      // Collect bind paths before removal so we can return them
+      const SKIP = new Set(["/var/run/docker.sock", "/etc/localtime", "/etc/timezone", "/etc/hosts", "/etc/hostname"]);
+      const hostPaths = new Set<string>();
+      const inspected = await Promise.all(containers.data.map(c => DockerClient.inspectContainer(c.Id)));
+      for (const r of inspected) {
+        if (!r.ok) continue;
+        for (const m of r.data.Mounts) {
+          if (m.Type === "bind" && !SKIP.has(m.Source)) hostPaths.add(m.Source);
+        }
+      }
+
+      // 1. Remove containers (force-stops running ones, removes anonymous volumes)
+      await Promise.all(containers.data.map(c => DockerClient.removeContainer(c.Id)));
+
+      // 2. Remove named volumes
+      const vols = await DockerClient.listProjectVolumes(params.name);
+      if (vols.ok && vols.data.Volumes) {
+        await Promise.all(vols.data.Volumes.map(v => DockerClient.removeVolume(v.Name)));
+      }
+
+      // 3. Remove networks (the default compose bridge network)
+      const nets = await DockerClient.listProjectNetworks(params.name);
+      if (nets.ok) {
+        await Promise.all(nets.data.map(n => DockerClient.removeNetwork(n.Id)));
+      }
+
+      // 4. Remove DB metadata row
+      await StackStore.delete(params.name);
+
+      return { ok: true, hostPaths: [...hostPaths].sort() };
+    })
 
     .get("/containers/:id", async ({ params, set }) => {
       const result = await DockerClient.inspectContainer(params.id);

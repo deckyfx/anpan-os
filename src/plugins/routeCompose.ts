@@ -94,6 +94,25 @@ export function composePlugin(jwtSecret: string) {
       return { logs: result.stdout.toString() };
     })
 
+    .get(
+      "/fetch",
+      async ({ query, set }) => {
+        try {
+          const res = await fetch(query.url, { headers: { "Accept": "text/plain,text/yaml,*/*" } });
+          if (!res.ok) {
+            set.status = 502;
+            return { error: `Remote returned ${res.status} ${res.statusText}` };
+          }
+          const text = await res.text();
+          return new Response(text, { headers: { "Content-Type": "text/plain; charset=utf-8" } });
+        } catch (err) {
+          set.status = 502;
+          return { error: err instanceof Error ? err.message : String(err) };
+        }
+      },
+      { query: t.Object({ url: t.String({ minLength: 1 }) }) },
+    )
+
     .get("/stacks/:name/file", async ({ params, set }) => {
       const { name } = params;
       if (!STACK_NAME_RE.test(name)) {

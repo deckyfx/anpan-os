@@ -1,6 +1,6 @@
 import { Elysia, t } from "elysia";
 import { resolve, join, basename, extname } from "node:path";
-import { readdir, stat, mkdir, rename, rm } from "node:fs/promises";
+import { readdir, stat, mkdir, rename, rm, chmod } from "node:fs/promises";
 import { homedir } from "node:os";
 import { authGuard } from "./authGuard";
 import { config } from "../config";
@@ -15,6 +15,9 @@ interface FileEntry {
   size:     number;
   modified: number;
   ext:      string;
+  mode:     string; // octal string e.g. "755"
+  uid:      number;
+  gid:      number;
 }
 
 // ─── Path security ────────────────────────────────────────────────────────────
@@ -77,6 +80,9 @@ async function listDir(dirPath: string): Promise<FileEntry[]> {
         size:     s.isDirectory() ? 0 : s.size,
         modified: s.mtimeMs,
         ext,
+        mode:     (s.mode & 0o777).toString(8).padStart(3, "0"),
+        uid:      s.uid,
+        gid:      s.gid,
       });
     } catch {
       // Skip entries that can't be stat'd (broken symlinks, permission errors, etc.)
@@ -207,6 +213,22 @@ export function filesPlugin(jwtSecret: string) {
       query: t.Object({ path: t.String() }),
       body:  t.Object({ file: t.File() }),
     })
+
+    // POST /api/files/chmod
+    .post("/chmod", async ({ body }) => {
+      let resolved: string;
+      try { resolved = guardPath(body.path); } catch { return forbidden(); }
+      const mode = parseInt(body.mode, 8);
+      if (isNaN(mode) || mode < 0 || mode > 0o777) {
+        return Response.json({ error: "Invalid mode" }, { status: 400 });
+      }
+      try {
+        await chmod(resolved, mode);
+        return { ok: true };
+      } catch {
+        return serverError();
+      }
+    }, { body: t.Object({ path: t.String(), mode: t.String() }) })
 
     // POST /api/files/zip
     .post("/zip", async ({ body }) => {
