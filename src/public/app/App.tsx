@@ -1,30 +1,17 @@
-import React, { useEffect, useState } from "react";
-import type { View, AuthStatus } from "./types";
+import React, { useState } from "react";
 import { useRouter }   from "./router";
 import { SetupPage }   from "./pages/SetupPage";
 import { LoginPage }   from "./pages/LoginPage";
 import { HomePage }    from "./pages/HomePage";
 import { FilesPage }   from "./pages/FilesPage";
+import { useAuthStore } from "./stores/authStore";
 
 export function App() {
-  const [view, setView]         = useState<View>("loading");
-  const [username, setUsername] = useState("");
-  const { path, navigate }      = useRouter();
+  const { view, username, checkAuth, login, logout } = useAuthStore();
+  const { path, navigate } = useRouter();
 
-  useEffect(() => {
-    fetch("/api/auth/status")
-      .then((r) => r.json() as Promise<AuthStatus>)
-      .then(({ initialized, authenticated }) => {
-        if (authenticated) {
-          setView("app");
-        } else if (initialized) {
-          setView("login");
-        } else {
-          setView("setup");
-        }
-      })
-      .catch(() => setView("login"));
-  }, []);
+  // Lazy-init: run once on first render, no useEffect needed.
+  useState(() => { void checkAuth(); });
 
   if (view === "loading") {
     return (
@@ -35,27 +22,16 @@ export function App() {
   }
 
   if (view === "setup") {
-    return (
-      <SetupPage
-        onSuccess={(u) => { setUsername(u); setView("app"); }}
-      />
-    );
+    return <SetupPage onSuccess={(u) => login(u)} />;
   }
 
   if (view === "login") {
-    return (
-      <LoginPage
-        onSuccess={(u) => { setUsername(u); setView("app"); }}
-      />
-    );
+    return <LoginPage onSuccess={(u) => login(u)} />;
   }
-
-  // Authenticated — render page based on path
-  const onLogout = () => { setUsername(""); setView("login"); };
 
   if (path.startsWith("/files")) {
     return <FilesPage onNavigate={navigate} />;
   }
 
-  return <HomePage username={username} onLogout={onLogout} onNavigate={navigate} />;
+  return <HomePage username={username} onLogout={logout} onNavigate={navigate} />;
 }

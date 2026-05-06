@@ -1,35 +1,31 @@
-import React, { useEffect, useState } from "react";
+import { useState } from "react";
 import { Dialog } from "../../components/Dialog";
 import type { Stack } from "./types";
+import { api } from "../../lib/api";
 
-export function DeleteStackDialog({ stack, open, onClose, onDeleted }: {
-  stack: Stack | null;
-  open: boolean;
+// Inner component is keyed by stack.name — mounts fresh each time, loads data
+// on first render via lazy useState, no useEffect needed.
+function DeleteStackDialogInner({ stack, onClose, onDeleted }: {
+  stack: Stack;
   onClose: () => void;
   onDeleted: () => void;
 }) {
-  const [hostPaths,  setHostPaths]  = useState<string[]>([]);
-  const [pathsLoading, setPathsLoading] = useState(false);
-  const [busy,       setBusy]       = useState(false);
-  const [error,      setError]      = useState("");
+  const [hostPaths,    setHostPaths]    = useState<string[]>([]);
+  const [pathsLoading, setPathsLoading] = useState(true);
+  const [busy,         setBusy]         = useState(false);
+  const [error,        setError]        = useState("");
 
-  useEffect(() => {
-    if (!stack || !open) return;
-    setHostPaths([]);
-    setError("");
-    setPathsLoading(true);
-    fetch(`/api/docker/stacks/${encodeURIComponent(stack.name)}/binds`)
-      .then(r => r.json())
-      .then((d: unknown) => {
-        if (d && typeof d === "object" && "paths" in d && Array.isArray((d as { paths: unknown }).paths)) {
-          setHostPaths((d as { paths: string[] }).paths);
+  // Lazy-init: fetch bind paths once on mount, no useEffect needed.
+  useState(() => {
+    api.api.docker.stacks({ name: stack.name }).binds.get()
+      .then(({ data }) => {
+        if (data && typeof data === "object" && "paths" in data && Array.isArray((data as { paths: unknown }).paths)) {
+          setHostPaths((data as { paths: string[] }).paths);
         }
       })
       .catch(() => {})
       .finally(() => setPathsLoading(false));
-  }, [stack?.name, open]);
-
-  if (!stack) return null;
+  });
 
   const title = stack.meta?.title ?? stack.name;
 
@@ -37,10 +33,9 @@ export function DeleteStackDialog({ stack, open, onClose, onDeleted }: {
     setBusy(true);
     setError("");
     try {
-      const res = await fetch(`/api/docker/stacks/${encodeURIComponent(stack.name)}`, { method: "DELETE" });
-      if (!res.ok) {
-        const d = await res.json().catch(() => ({})) as { error?: string };
-        setError(d.error ?? `Server error ${res.status}`);
+      const { error: err2 } = await api.api.docker.stacks({ name: stack.name }).delete();
+      if (err2) {
+        setError((err2.value as { error?: string })?.error ?? "Server error");
         return;
       }
       onDeleted();
@@ -54,7 +49,7 @@ export function DeleteStackDialog({ stack, open, onClose, onDeleted }: {
 
   return (
     <Dialog
-      open={open}
+      open
       title={`Delete "${title}"`}
       onClose={onClose}
       size="md"
@@ -132,4 +127,14 @@ export function DeleteStackDialog({ stack, open, onClose, onDeleted }: {
       </div>
     </Dialog>
   );
+}
+
+export function DeleteStackDialog({ stack, open, onClose, onDeleted }: {
+  stack: Stack | null;
+  open: boolean;
+  onClose: () => void;
+  onDeleted: () => void;
+}) {
+  if (!open || !stack) return null;
+  return <DeleteStackDialogInner key={stack.name} stack={stack} onClose={onClose} onDeleted={onDeleted} />;
 }

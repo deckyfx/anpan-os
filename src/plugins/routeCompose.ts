@@ -32,7 +32,6 @@ export function composePlugin(jwtSecret: string) {
 
         const stackDir = join(config.composeFolder, name);
 
-        // Guard against path traversal
         if (!stackDir.startsWith(config.composeFolder)) {
           set.status = 422;
           return { error: "Invalid stack name" };
@@ -41,18 +40,69 @@ export function composePlugin(jwtSecret: string) {
         try {
           mkdirSync(stackDir, { recursive: true });
           await Bun.write(join(stackDir, "docker-compose.yml"), content);
-
-          const result = await Bun.$`${bins.docker} compose up -d`.cwd(stackDir).nothrow();
-          if (result.exitCode !== 0) {
-            return { ok: false, error: result.stderr.toString() };
-          }
-          // Mark as managed so it appears in the Managed section
-          await StackStore.upsert({ id: name, managed: true });
-          return { ok: true };
         } catch (err) {
           set.status = 500;
           return { error: err instanceof Error ? err.message : String(err) };
         }
+
+        const proc = Bun.spawn([bins.docker, "compose", "up", "-d"], {
+          cwd: stackDir,
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+
+        const enc = new TextEncoder();
+
+        const stream = new ReadableStream<Uint8Array>({
+          async start(controller) {
+            const send = (data: object) =>
+              controller.enqueue(enc.encode(`data: ${JSON.stringify(data)}\n\n`));
+
+            async function drain(readable: ReadableStream<Uint8Array>) {
+              const reader = readable.getReader();
+              const dec = new TextDecoder();
+              let buf = "";
+              try {
+                while (true) {
+                  const { done, value } = await reader.read();
+                  if (done) break;
+                  buf += dec.decode(value, { stream: true });
+                  const lines = buf.split("\n");
+                  buf = lines.pop() ?? "";
+                  for (const line of lines) {
+                    if (line.trim()) send({ log: line });
+                  }
+                }
+                if (buf.trim()) send({ log: buf });
+              } finally {
+                reader.releaseLock();
+              }
+            }
+
+            const [, , exitCode] = await Promise.all([
+              drain(proc.stdout),
+              drain(proc.stderr),
+              proc.exited,
+            ]);
+
+            if (exitCode === 0) {
+              try { await StackStore.upsert({ id: name, managed: true }); } catch { /* non-critical */ }
+              send({ ok: true });
+            } else {
+              send({ ok: false, error: `docker compose exited with code ${exitCode}` });
+            }
+
+            controller.close();
+          },
+        });
+
+        return new Response(stream, {
+          headers: {
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+          },
+        });
       },
       {
         body: t.Object({
@@ -94,23 +144,23 @@ export function composePlugin(jwtSecret: string) {
       return { logs: result.stdout.toString() };
     })
 
-    .get(
+    .post(
       "/fetch",
-      async ({ query, set }) => {
+      async ({ body, set }) => {
         try {
-          const res = await fetch(query.url, { headers: { "Accept": "text/plain,text/yaml,*/*" } });
+          const res = await fetch(body.url, { headers: { "Accept": "text/plain,text/yaml,*/*" } });
           if (!res.ok) {
             set.status = 502;
             return { error: `Remote returned ${res.status} ${res.statusText}` };
           }
-          const text = await res.text();
-          return new Response(text, { headers: { "Content-Type": "text/plain; charset=utf-8" } });
+          const content = await res.text();
+          return { content };
         } catch (err) {
           set.status = 502;
           return { error: err instanceof Error ? err.message : String(err) };
         }
       },
-      { query: t.Object({ url: t.String({ minLength: 1 }) }) },
+      { body: t.Object({ url: t.String({ minLength: 1 }) }) },
     )
 
     .get("/stacks/:name/file", async ({ params, set }) => {

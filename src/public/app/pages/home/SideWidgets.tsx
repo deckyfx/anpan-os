@@ -1,15 +1,22 @@
-import React, { useEffect, useState } from "react";
+import { useState } from "react";
+import { create } from "zustand";
 import type { SystemStats } from "./types";
 import { toGB } from "./utils";
 
+// Single interval-driven store — shared across all ClockWidget mounts.
+const useClockStore = create<{ now: Date }>(() => ({ now: new Date() }));
+let clockStarted = false;
+function ensureClockStarted() {
+  if (clockStarted) return;
+  clockStarted = true;
+  setInterval(() => useClockStore.setState({ now: new Date() }), 1000);
+}
+
 export function ClockWidget() {
-  const [now, setNow] = useState(new Date());
+  // Kick off the interval once; no useEffect needed.
+  useState(() => { ensureClockStarted(); });
 
-  useEffect(() => {
-    const id = setInterval(() => setNow(new Date()), 1000);
-    return () => clearInterval(id);
-  }, []);
-
+  const now = useClockStore((s) => s.now);
   const timeStr = now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
   const dateStr = now.toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" });
 

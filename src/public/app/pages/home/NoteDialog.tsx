@@ -1,35 +1,26 @@
-import React, { useEffect, useState } from "react";
+import { useState } from "react";
 import { Dialog } from "../../components/Dialog";
 import type { Stack } from "./types";
+import { api } from "../../lib/api";
 
-export function NoteDialog({ stack, open, onClose, onSaved }: {
-  stack: Stack | null;
-  open: boolean;
+// Inner component receives a guaranteed non-null stack and is keyed by stack.name,
+// so React remounts it whenever the target stack changes — no useEffect needed.
+function NoteDialogInner({ stack, onClose, onSaved }: {
+  stack: Stack;
   onClose: () => void;
   onSaved: () => void;
 }) {
-  const [note,  setNote]  = useState("");
+  const [note,  setNote]  = useState(stack.meta?.note ?? "");
   const [busy,  setBusy]  = useState(false);
   const [error, setError] = useState("");
-
-  useEffect(() => {
-    if (stack) setNote(stack.meta?.note ?? "");
-  }, [stack?.meta?.note, stack?.name]);
-
-  if (!stack) return null;
 
   const handleSave = async () => {
     setBusy(true);
     setError("");
     try {
-      const res = await fetch(`/api/docker/stacks/${encodeURIComponent(stack.name)}`, {
-        method:  "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ note: note || null }),
-      });
-      if (!res.ok) {
-        const d = await res.json() as { error?: string };
-        setError(d.error ?? `Server error ${res.status}`);
+      const { error: err } = await api.api.docker.stacks({ name: stack.name }).patch({ note: note || null });
+      if (err) {
+        setError((err.value as { error?: string })?.error ?? "Server error");
         return;
       }
       onSaved();
@@ -43,7 +34,7 @@ export function NoteDialog({ stack, open, onClose, onSaved }: {
 
   return (
     <Dialog
-      open={open}
+      open
       title={`Note — ${stack.meta?.title ?? stack.name}`}
       onClose={onClose}
       size="md"
@@ -75,4 +66,14 @@ export function NoteDialog({ stack, open, onClose, onSaved }: {
       )}
     </Dialog>
   );
+}
+
+export function NoteDialog({ stack, open, onClose, onSaved }: {
+  stack: Stack | null;
+  open: boolean;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  if (!open || !stack) return null;
+  return <NoteDialogInner key={stack.name} stack={stack} onClose={onClose} onSaved={onSaved} />;
 }

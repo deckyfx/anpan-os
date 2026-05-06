@@ -1,5 +1,6 @@
 import React from "react";
 import { LogOut } from "lucide-react";
+import { api } from "../../lib/api";
 
 export function TopBar({ username, version, onLogout }: {
   username: string;
@@ -7,7 +8,7 @@ export function TopBar({ username, version, onLogout }: {
   onLogout: () => void;
 }) {
   const handleLogout = async () => {
-    await fetch("/api/auth/logout", { method: "POST" });
+    await api.api.auth.logout.post();
     onLogout();
   };
 

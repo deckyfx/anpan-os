@@ -20,7 +20,7 @@ bind = "local"   # "local" = 127.0.0.1 only | "public" = 0.0.0.0 (all interfaces
 # jwt_secret   = ""   # randomly generated on first run
 
 [compose]
-folder = "/var/lib/anpan-os/composes"
+# folder = "/var/lib/anpan-os/composes"   # defaults to $HOME/.anpanos/composes
 
 [files]
 root = "/"   # root path the file manager is allowed to browse
@@ -120,9 +120,9 @@ class Config {
     return this.data.auth;
   }
 
-  /** Compose stacks folder — defaults to /var/lib/anpan-os/composes. */
+  /** Compose stacks folder — defaults to RUNTIME_CONFIG_DIR/composes. */
   get composeFolder(): string {
-    return this.data.compose.folder ?? "/var/lib/anpan-os/composes";
+    return this.data.compose.folder ?? join(envConfig.RUNTIME_CONFIG_DIR, "composes");
   }
 
   /** Root path the file manager is allowed to browse — defaults to "/". */

@@ -28,7 +28,8 @@
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
     "viewerjs": "^1.11.7",
-    "yaml": "^2.8.4"
+    "yaml": "^2.8.4",
+    "zustand": "^5.0.13"
   },
   "devDependencies": {
     "@types/bun": "latest",

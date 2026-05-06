@@ -60,7 +60,7 @@ function ImageViewer({ src, name }: { src: string; name: string }) {
       className="relative w-full rounded overflow-hidden bg-gray-950"
       style={{ height: "65vh" }}
     >
-      <img src={src} alt={name} />
+      <img src={src} alt={name} className="hidden" />
     </div>
   );
 }

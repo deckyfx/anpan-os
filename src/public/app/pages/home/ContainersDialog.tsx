@@ -1,6 +1,7 @@
-import React, { useEffect, useState } from "react";
+import React, { useState } from "react";
 import { Dialog } from "../../components/Dialog";
 import type { ContainerDetail, Stack } from "./types";
+import { api } from "../../lib/api";
 
 // ─── KV display helpers ───────────────────────────────────────────────────────
 
@@ -93,28 +94,24 @@ function ContainerPanel({ detail }: { detail: ContainerDetail }) {
   );
 }
 
-// ─── Dialog ───────────────────────────────────────────────────────────────────
+// ─── Inner dialog — keyed by stack.name, loads data once on mount ────────────
 
-export function ContainersDialog({ stack, open, onClose }: {
-  stack: Stack | null;
-  open: boolean;
+function ContainersDialogInner({ stack, onClose }: {
+  stack: Stack;
   onClose: () => void;
 }) {
   const [containers, setContainers] = useState<Record<string, ContainerDetail>>({});
-  const [loading,    setLoading]    = useState(false);
+  const [loading,    setLoading]    = useState(true);
   const [activeIdx,  setActiveIdx]  = useState(0);
 
-  useEffect(() => {
-    if (!open || !stack) return;
+  // Lazy-init: fetch all container details once on mount, no useEffect needed.
+  useState(() => {
     const ids = stack.services.map(s => s.id);
-    if (ids.length === 0) return;
-    setLoading(true);
-    setActiveIdx(0);
+    if (ids.length === 0) { setLoading(false); return; }
     Promise.all(
       ids.map(id =>
-        fetch(`/api/docker/containers/${id}`)
-          .then(r => r.json() as Promise<ContainerDetail>)
-          .then(d => [id, d] as [string, ContainerDetail])
+        api.api.docker.containers({ id }).get()
+          .then(({ data }) => data ? [id, data as ContainerDetail] as [string, ContainerDetail] : null)
           .catch(() => null)
       )
     ).then(results => {
@@ -124,16 +121,14 @@ export function ContainersDialog({ stack, open, onClose }: {
       }
       setContainers(map);
     }).finally(() => setLoading(false));
-  }, [open, stack]);
-
-  if (!stack) return null;
+  });
 
   const activeSvc = stack.services[activeIdx];
   const detail    = activeSvc ? containers[activeSvc.id] : undefined;
 
   return (
     <Dialog
-      open={open}
+      open
       title={`Containers — ${stack.name}`}
       onClose={onClose}
       size="xl"
@@ -189,4 +184,15 @@ export function ContainersDialog({ stack, open, onClose }: {
       )}
     </Dialog>
   );
+}
+
+// ─── Public component ─────────────────────────────────────────────────────────
+
+export function ContainersDialog({ stack, open, onClose }: {
+  stack: Stack | null;
+  open: boolean;
+  onClose: () => void;
+}) {
+  if (!open || !stack) return null;
+  return <ContainersDialogInner key={stack.name} stack={stack} onClose={onClose} />;
 }

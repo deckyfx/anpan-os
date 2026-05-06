@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useState } from "react";
 import {
   Play, Square, RotateCw, ScrollText, StickyNote,
   Settings2, Boxes, FileDown, PackagePlus, Trash2,
@@ -21,16 +21,6 @@ interface TileMenuProps {
 }
 
 function TileMenu({ stack, onAction, onClose }: TileMenuProps) {
-  const ref = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    const onClick = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
-    };
-    document.addEventListener("mousedown", onClick);
-    return () => document.removeEventListener("mousedown", onClick);
-  }, [onClose]);
-
   const allRunning = stack.state === "running";
   const allStopped = stack.state === "stopped";
   const act = (a: StackAction) => { onAction(a); onClose(); };
@@ -38,10 +28,11 @@ function TileMenu({ stack, onAction, onClose }: TileMenuProps) {
   const item = "w-full flex items-center gap-2.5 px-3 py-1.5 rounded-lg hover:bg-gray-700 text-gray-200 transition-colors";
 
   return (
-    <div
-      ref={ref}
-      className="absolute top-8 right-0 z-20 w-52 bg-gray-800 border border-gray-700 rounded-xl shadow-2xl p-1 text-sm"
-    >
+    <>
+      <div className="fixed inset-0 z-10" onClick={onClose} />
+      <div
+        className="absolute top-8 right-0 z-20 w-52 bg-gray-800 border border-gray-700 rounded-xl shadow-2xl p-1 text-sm"
+      >
       {!allRunning && (
         <button className={item} onClick={() => act("start")}>
           <Play size={14} className="text-green-400 shrink-0" /> Start
@@ -89,7 +80,8 @@ function TileMenu({ stack, onAction, onClose }: TileMenuProps) {
       >
         <Trash2 size={14} className="shrink-0" /> Delete Stack…
       </button>
-    </div>
+      </div>
+    </>
   );
 }
 

@@ -1,7 +1,8 @@
-import React, { useEffect, useState } from "react";
+import { useState } from "react";
 import { Dialog } from "../../components/Dialog";
 import type { ComposeOrigin, Stack } from "./types";
 import { stackStateColor } from "./utils";
+import { api } from "../../lib/api";
 
 const ORIGIN_LABEL: Record<NonNullable<ComposeOrigin>, { label: string; cls: string }> = {
   managed: { label: "⚙ Managed by anpan-os", cls: "text-amber-400 bg-amber-500/10 border-amber-500/20" },
@@ -40,11 +41,10 @@ const DETAIL_TABS: { id: DetailTab; label: string }[] = [
   { id: "docker", label: "Docker"     },
 ];
 
-// ─── Component ────────────────────────────────────────────────────────────────
+// ─── Inner component — keyed by stack.name so state initializes fresh each time ──
 
-export function StackDetailDialog({ stack, open, onClose, onSaved }: {
+function StackDetailDialogInner({ stack, onClose, onSaved }: {
   stack: Stack;
-  open: boolean;
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -61,38 +61,22 @@ export function StackDetailDialog({ stack, open, onClose, onSaved }: {
   const [busy,      setBusy]      = useState(false);
   const [saveError, setSaveError] = useState("");
 
-  useEffect(() => {
-    setTitle(m?.title     ?? "");
-    setIcon(m?.icon       ?? "");
-    setTagline(m?.tagline ?? "");
-    setAddress(m?.address ?? "");
-    setPortMap(m?.portMap ?? "");
-    setScheme(m?.scheme   ?? "http");
-    setIndexPath(m?.indexPath ?? "/");
-    setNote(m?.note       ?? "");
-  }, [m?.title, m?.icon, m?.tagline, m?.address, m?.portMap, m?.scheme, m?.indexPath, m?.note]);
-
   const handleSave = async () => {
     setBusy(true);
     setSaveError("");
     try {
-      const res = await fetch(`/api/docker/stacks/${encodeURIComponent(stack.name)}`, {
-        method:  "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          title:     title     || null,
-          icon:      icon      || null,
-          tagline:   tagline   || null,
-          address:   address   || null,
-          portMap:   portMap   || null,
-          scheme:    scheme    || null,
-          indexPath: indexPath || null,
-          note:      note      || null,
-        }),
+      const { error: err } = await api.api.docker.stacks({ name: stack.name }).patch({
+        title:     title     || null,
+        icon:      icon      || null,
+        tagline:   tagline   || null,
+        address:   address   || null,
+        portMap:   portMap   || null,
+        scheme:    scheme    || null,
+        indexPath: indexPath || null,
+        note:      note      || null,
       });
-      if (!res.ok) {
-        const d = await res.json() as { error?: string };
-        setSaveError(d.error ?? `Server error ${res.status}`);
+      if (err) {
+        setSaveError((err.value as { error?: string })?.error ?? "Server error");
         return;
       }
       onSaved();
@@ -124,7 +108,7 @@ export function StackDetailDialog({ stack, open, onClose, onSaved }: {
   );
 
   return (
-    <Dialog open={open} title={m?.title ?? stack.name} onClose={onClose} size="xl" footer={footer}>
+    <Dialog open title={m?.title ?? stack.name} onClose={onClose} size="xl" footer={footer}>
       {/* Tab bar */}
       <div className="flex gap-1 mb-5 border-b border-gray-800 -mt-1">
         {DETAIL_TABS.map(t => (
@@ -246,4 +230,16 @@ export function StackDetailDialog({ stack, open, onClose, onSaved }: {
       )}
     </Dialog>
   );
+}
+
+// ─── Public component — renders nothing when closed ──────────────────────────
+
+export function StackDetailDialog({ stack, open, onClose, onSaved }: {
+  stack: Stack;
+  open: boolean;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  if (!open) return null;
+  return <StackDetailDialogInner key={stack.name} stack={stack} onClose={onClose} onSaved={onSaved} />;
 }

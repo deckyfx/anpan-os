@@ -1,12 +1,13 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
+import { useFileStore } from "../stores/fileStore";
 import { ChevronLeft, ChevronRight, FolderUp, House, LayoutDashboard, LayoutGrid, List,
          FolderOpen, Pencil, Download, Archive, PackageOpen, ShieldCheck, Info,
          Trash2, FolderPlus, Upload } from "lucide-react";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { Dialog }        from "../components/Dialog";
-import type { FileEntry, ViewMode, UploadItem, CtxMenu, SambaShare } from "./files/types";
+import type { FileEntry } from "./files/types";
 import { ARCHIVE_EXTS }  from "./files/constants";
-import { formatSize, formatDate, normalizePath, parentPath } from "./files/helpers";
+import { formatSize, formatDate, parentPath } from "./files/helpers";
 import { FileIcon }      from "./files/FileIcon";
 import { CtxItem, CtxSep } from "./files/ContextMenu";
 import { FilePreview }   from "./files/FilePreview";
@@ -14,356 +15,58 @@ import { FilePreview }   from "./files/FilePreview";
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }) {
-  // ── File browser state ────────────────────────────────────────────────────
-  const [currentPath, setCurrentPath]   = useState<string>("/");
-  const [addressValue, setAddressValue] = useState<string>("/");
-  const [entries, setEntries]           = useState<FileEntry[]>([]);
-  const [loadingDir, setLoadingDir]     = useState(false);
-  const [navError, setNavError]         = useState("");
+  const {
+    // Nav
+    currentPath, addressValue, entries, loadingDir, navError, navHistory, homePath,
+    navigateTo, goBack, goForward, setAddressValue, setNavError,
+    // Preview
+    drawerEntry, fileContent, fileBinary, saving, saveMsg,
+    setDrawerEntry, setFileContent, openFile, saveFile,
+    // Rename
+    renamingPath, renameValue, setRenamingPath, setRenameValue, commitRename,
+    // Delete
+    deleteTarget, setDeleteTarget, confirmDelete,
+    // New folder
+    creatingFolder, newFolderName, setCreatingFolder, setNewFolderName, commitNewFolder,
+    // View / selection
+    viewMode, setViewMode, selectedPaths, toggleSelect, toggleSelectAll,
+    // Context menu
+    ctxMenu, setCtxMenu,
+    // Upload
+    uploadItems, setUploadItems, handleUpload,
+    // ChMod
+    chmodTarget, chmodValue, setChmodTarget, setChmodValue, handleChmod,
+    // Info
+    infoTarget, setInfoTarget,
+    // Archive
+    archiveDialog, archiveName, archivePaths,
+    setArchiveDialog, setArchiveName, setArchivePaths, handleArchive, handleExtract,
+    // Samba
+    shares, sambaOpen, removeShareTarget, addShareOpen, newShare, reloadingSmbd,
+    setSambaOpen, setRemoveShareTarget, setAddShareOpen, setNewShare,
+    addShare, removeShare, reloadSmbd,
+    // Init
+    initialize,
+  } = useFileStore();
 
-  // ── Navigation history ────────────────────────────────────────────────────
-  const [navHistory, setNavHistory] = useState<{ stack: string[]; idx: number }>({ stack: [], idx: -1 });
-  const canBack    = navHistory.idx > 0;
-  const canForward = navHistory.idx < navHistory.stack.length - 1;
+  // Lazy-init: load home dir + shares once, no useEffect needed.
+  useState(() => { initialize(); });
 
-  // ── Home path ─────────────────────────────────────────────────────────────
-  const [homePath, setHomePath] = useState<string>("/");
-
-  // ── Preview dialog ────────────────────────────────────────────────────────
-  const [drawerEntry, setDrawerEntry] = useState<FileEntry | null>(null);
-  const [fileContent, setFileContent] = useState("");
-  const [fileBinary, setFileBinary]   = useState(false);
-  const [saving, setSaving]           = useState(false);
-  const [saveMsg, setSaveMsg]         = useState("");
-
-  // ── Rename ────────────────────────────────────────────────────────────────
-  const [renamingPath, setRenamingPath] = useState<string | null>(null);
-  const [renameValue, setRenameValue]   = useState("");
-
-  // ── Delete ────────────────────────────────────────────────────────────────
-  const [deleteTarget, setDeleteTarget] = useState<FileEntry | null>(null);
-
-  // ── New folder ────────────────────────────────────────────────────────────
-  const [creatingFolder, setCreatingFolder] = useState(false);
-  const [newFolderName, setNewFolderName]   = useState("");
-
-  // ── View mode ─────────────────────────────────────────────────────────────
-  const [viewMode, setViewMode] = useState<ViewMode>("list");
-
-  // ── Selection ─────────────────────────────────────────────────────────────
-  const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
-
-  // ── Context menu ──────────────────────────────────────────────────────────
-  const [ctxMenu, setCtxMenu] = useState<CtxMenu | null>(null);
-
-  // ── Upload ────────────────────────────────────────────────────────────────
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [uploadItems, setUploadItems] = useState<UploadItem[]>([]);
   const uploadDialogOpen = uploadItems.length > 0;
 
-  // ── ChMod ─────────────────────────────────────────────────────────────────
-  const [chmodTarget, setChmodTarget] = useState<FileEntry | null>(null);
-  const [chmodValue,  setChmodValue]  = useState("");
-
-  // ── Info ──────────────────────────────────────────────────────────────────
-  const [infoTarget, setInfoTarget] = useState<FileEntry | null>(null);
-
-  // ── Archive ───────────────────────────────────────────────────────────────
-  const [archiveDialog, setArchiveDialog] = useState(false);
-  const [archiveName,   setArchiveName]   = useState("");
-  const [archivePaths,  setArchivePaths]  = useState<string[]>([]);
-
-  // ── Samba ─────────────────────────────────────────────────────────────────
-  const [shares, setShares]                 = useState<SambaShare[]>([]);
-  const [sambaOpen, setSambaOpen]           = useState(false);
-  const [removeShareTarget, setRemoveShareTarget] = useState<SambaShare | null>(null);
-  const [addShareOpen, setAddShareOpen]     = useState(false);
-  const [newShare, setNewShare]             = useState({ name: "", path: "/", comment: "", readOnly: false });
-  const [reloadingSmbd, setReloadingSmbd]   = useState(false);
-
-  // ── Directory loading ─────────────────────────────────────────────────────
-
-  const loadDirContent = useCallback(async (path: string): Promise<boolean> => {
-    const trimmed = normalizePath(path.trim());
-    if (!trimmed) return false;
-    setLoadingDir(true);
-    try {
-      const res = await fetch(`/api/files/list?path=${encodeURIComponent(trimmed)}`);
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({})) as { error?: string };
-        setNavError(body.error ?? `Cannot open "${trimmed}" (${res.status})`);
-        return false;
-      }
-      const data = await res.json() as FileEntry[];
-      data.sort((a, b) => {
-        if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
-        return a.name.localeCompare(b.name);
-      });
-      setEntries(data);
-      setCurrentPath(trimmed);
-      setAddressValue(trimmed);
-      setSelectedPaths(new Set());
-      return true;
-    } catch (e) {
-      setNavError(String(e));
-      return false;
-    } finally {
-      setLoadingDir(false);
-    }
-  }, []);
-
-  const navigateTo = useCallback(async (path: string) => {
-    const trimmed = normalizePath(path.trim());
-    const ok = await loadDirContent(trimmed);
-    if (!ok) return;
-    setNavHistory((prev) => {
-      if (prev.stack[prev.idx] === trimmed) return prev;
-      const stack = [...prev.stack.slice(0, prev.idx + 1), trimmed];
-      return { stack, idx: stack.length - 1 };
-    });
-  }, [loadDirContent]);
-
-  const goBack = useCallback(() => {
-    setNavHistory((prev) => {
-      if (prev.idx <= 0) return prev;
-      const newIdx = prev.idx - 1;
-      const target = prev.stack[newIdx];
-      if (target !== undefined) void loadDirContent(target);
-      return { ...prev, idx: newIdx };
-    });
-  }, [loadDirContent]);
-
-  const goForward = useCallback(() => {
-    setNavHistory((prev) => {
-      if (prev.idx >= prev.stack.length - 1) return prev;
-      const newIdx = prev.idx + 1;
-      const target = prev.stack[newIdx];
-      if (target !== undefined) void loadDirContent(target);
-      return { ...prev, idx: newIdx };
-    });
-  }, [loadDirContent]);
-
-  // ── Effects ───────────────────────────────────────────────────────────────
-
-  useEffect(() => {
-    fetch("/api/files/home")
-      .then((r) => r.json() as Promise<{ path: string }>)
-      .then(({ path }) => { setHomePath(path); return navigateTo(path); })
-      .catch(() => navigateTo("/"));
-  }, []);
-
-  const loadShares = useCallback(async () => {
-    try {
-      const res = await fetch("/api/samba/shares");
-      if (res.ok) setShares(await res.json() as SambaShare[]);
-    } catch { /* ignore */ }
-  }, []);
-
-  useEffect(() => { loadShares(); }, []);
-
-  useEffect(() => {
-    if (!ctxMenu) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setCtxMenu(null); };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [ctxMenu]);
-
-  // ── File actions ──────────────────────────────────────────────────────────
-
-  async function openFile(entry: FileEntry) {
-    setDrawerEntry(entry);
-    setFileContent("");
-    setFileBinary(false);
-    setSaveMsg("");
-    try {
-      const res = await fetch(`/api/files/read?path=${encodeURIComponent(entry.path)}`);
-      if (res.ok) {
-        const data = await res.json() as { content: string; binary: boolean };
-        setFileBinary(data.binary);
-        setFileContent(data.binary ? "" : data.content);
-      }
-    } catch { /* show download-only view */ }
-  }
-
-  async function saveFile() {
-    if (!drawerEntry) return;
-    setSaving(true); setSaveMsg("");
-    try {
-      const res = await fetch("/api/files/write", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: drawerEntry.path, content: fileContent }),
-      });
-      setSaveMsg(res.ok ? "Saved" : "Error saving");
-    } catch { setSaveMsg("Error saving"); }
-    finally { setSaving(false); }
-  }
-
-  async function commitRename(entry: FileEntry) {
-    if (!renameValue.trim() || renameValue === entry.name) { setRenamingPath(null); return; }
-    const to = (currentPath.endsWith("/") ? currentPath : currentPath + "/") + renameValue.trim();
-    try {
-      const res = await fetch("/api/files/rename", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ from: entry.path, to }),
-      });
-      if (res.ok) await loadDirContent(currentPath);
-    } catch { /* ignore */ }
-    setRenamingPath(null);
-  }
-
-  async function confirmDelete() {
-    if (!deleteTarget) return;
-    try {
-      await fetch("/api/files/delete", {
-        method: "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: deleteTarget.path }),
-      });
-      await loadDirContent(currentPath);
-    } catch { /* ignore */ }
-    setDeleteTarget(null);
-  }
-
-  async function commitNewFolder() {
-    if (!newFolderName.trim()) { setCreatingFolder(false); return; }
-    const path = (currentPath.endsWith("/") ? currentPath : currentPath + "/") + newFolderName.trim();
-    try {
-      const res = await fetch("/api/files/mkdir", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path }),
-      });
-      if (res.ok) await loadDirContent(currentPath);
-    } catch { /* ignore */ }
-    setCreatingFolder(false);
-    setNewFolderName("");
-  }
-
-  // ── Upload (XHR for progress) ─────────────────────────────────────────────
-
-  function handleUpload(files: FileList | null) {
-    if (!files?.length) return;
-    const fileArray  = Array.from(files);
-    const uploadPath = currentPath;
-    setUploadItems(fileArray.map(f => ({ name: f.name, loaded: 0, total: f.size, done: false, error: false })));
-    let idx = 0;
-    function next() {
-      if (idx >= fileArray.length) {
-        setTimeout(() => { void loadDirContent(uploadPath); setUploadItems([]); }, 800);
-        return;
-      }
-      const file = fileArray[idx]!; const i = idx++;
-      const xhr = new XMLHttpRequest(); const fd = new FormData();
-      fd.append("file", file);
-      xhr.upload.onprogress = (e) => {
-        if (!e.lengthComputable) return;
-        setUploadItems(p => p.map((it, j) => j === i ? { ...it, loaded: e.loaded, total: e.total } : it));
-      };
-      xhr.onload = () => {
-        const ok = xhr.status >= 200 && xhr.status < 300;
-        setUploadItems(p => p.map((it, j) => j === i ? { ...it, loaded: it.total, done: true, error: !ok } : it));
-        next();
-      };
-      xhr.onerror = () => {
-        setUploadItems(p => p.map((it, j) => j === i ? { ...it, done: true, error: true } : it));
-        next();
-      };
-      xhr.open("POST", `/api/files/upload?path=${encodeURIComponent(uploadPath)}`);
-      xhr.send(fd);
-    }
-    next();
-  }
-
-  // ── ChMod / Archive / Extract ─────────────────────────────────────────────
-
-  async function handleChmod() {
-    if (!chmodTarget) return;
-    try {
-      const res = await fetch("/api/files/chmod", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: chmodTarget.path, mode: chmodValue }),
-      });
-      if (res.ok) { await loadDirContent(currentPath); setChmodTarget(null); }
-    } catch { /* ignore */ }
-  }
-
-  async function handleArchive() {
-    if (!archivePaths.length) return;
-    const dest = (currentPath.endsWith("/") ? currentPath : currentPath + "/") + archiveName;
-    try {
-      await fetch("/api/files/zip", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ paths: archivePaths, dest }),
-      });
-      await loadDirContent(currentPath);
-    } catch { /* ignore */ }
-    setArchiveDialog(false);
-  }
-
-  async function handleExtract(entry: FileEntry) {
-    try {
-      await fetch("/api/files/unzip", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: entry.path, dest: currentPath }),
-      });
-      await loadDirContent(currentPath);
-    } catch { /* ignore */ }
-  }
-
-  // ── Samba ─────────────────────────────────────────────────────────────────
-
-  async function addShare() {
-    if (!newShare.name.trim() || !newShare.path.trim()) return;
-    try {
-      const res = await fetch("/api/samba/shares", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(newShare),
-      });
-      if (res.ok) { await loadShares(); setAddShareOpen(false); setNewShare({ name: "", path: currentPath, comment: "", readOnly: false }); }
-    } catch { /* ignore */ }
-  }
-
-  async function removeShare() {
-    if (!removeShareTarget) return;
-    try {
-      const res = await fetch(`/api/samba/shares/${encodeURIComponent(removeShareTarget.name)}`, { method: "DELETE" });
-      if (res.ok) await loadShares();
-    } catch { /* ignore */ }
-    setRemoveShareTarget(null);
-  }
-
-  async function reloadSmbd() {
-    setReloadingSmbd(true);
-    try { await fetch("/api/samba/reload", { method: "POST" }); } catch { /* ignore */ }
-    setReloadingSmbd(false);
-  }
-
-  // ── Selection helpers ─────────────────────────────────────────────────────
-
-  function toggleSelect(path: string) {
-    setSelectedPaths(prev => { const s = new Set(prev); s.has(path) ? s.delete(path) : s.add(path); return s; });
-  }
-
-  function toggleSelectAll() {
-    const allSelected = entries.length > 0 && entries.every(e => selectedPaths.has(e.path));
-    setSelectedPaths(allSelected ? new Set() : new Set(entries.map(e => e.path)));
-  }
+  const canBack    = navHistory.idx > 0;
+  const canForward = navHistory.idx < navHistory.stack.length - 1;
 
   // ── Row helpers ───────────────────────────────────────────────────────────
 
   function handleRowClick(e: React.MouseEvent, entry: FileEntry) {
     if (renamingPath === entry.path) return;
     if (e.ctrlKey || e.metaKey) {
-      setSelectedPaths(prev => { const s = new Set(prev); s.has(entry.path) ? s.delete(entry.path) : s.add(entry.path); return s; });
+      toggleSelect(entry.path);
       return;
     }
-    setSelectedPaths(new Set());
+    useFileStore.setState({ selectedPaths: new Set() });
     if (entry.isDir) void navigateTo(entry.path);
     else void openFile(entry);
   }
@@ -374,7 +77,9 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
   }
 
   function openCtxArchive(entry: FileEntry) {
-    const paths = selectedPaths.size > 1 && selectedPaths.has(entry.path) ? Array.from(selectedPaths) : [entry.path];
+    const paths = selectedPaths.size > 1 && selectedPaths.has(entry.path)
+      ? Array.from(selectedPaths)
+      : [entry.path];
     setArchivePaths(paths);
     setArchiveName((paths.length === 1 ? entry.name.replace(/\.[^.]+$/, "") : "archive") + ".zip");
     setArchiveDialog(true);
@@ -441,7 +146,7 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
         </button>
 
         {/* View mode toggle */}
-        <button onClick={() => setViewMode(v => v === "list" ? "grid" : "list")}
+        <button onClick={() => setViewMode(viewMode === "list" ? "grid" : "list")}
           title={viewMode === "list" ? "Grid view" : "List view"}
           className="p-1.5 rounded-lg text-gray-400 hover:text-white hover:bg-gray-800 transition-colors shrink-0">
           {viewMode === "list" ? <LayoutGrid size={16} /> : <List size={16} />}
@@ -499,14 +204,14 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
       {/* Samba section */}
       <div className="border-t border-gray-800 px-5 py-3">
         <button
-          onClick={() => setSambaOpen((v) => !v)}
+          onClick={() => setSambaOpen(!sambaOpen)}
           className="flex items-center gap-2 text-sm text-gray-400 hover:text-white transition-colors w-full text-left"
         >
           <span className={`transition-transform ${sambaOpen ? "rotate-90" : ""}`}>›</span>
           <span>Samba Shares</span>
           <span className="flex-1 border-t border-gray-800 ml-2" />
           <button
-            onClick={(e) => { e.stopPropagation(); setNewShare((n) => ({ ...n, path: currentPath })); setAddShareOpen(true); }}
+            onClick={(e) => { e.stopPropagation(); setNewShare({ ...newShare, path: currentPath }); setAddShareOpen(true); }}
             className="text-xs px-2 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-300 hover:text-white transition-colors"
           >+</button>
         </button>
@@ -559,12 +264,12 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
               {(["name","path","comment"] as const).map((field) => (
                 <label key={field} className="block">
                   <span className="text-xs text-gray-400 block mb-1 capitalize">{field === "comment" ? "Comment (optional)" : field === "name" ? "Share Name" : "Path"}</span>
-                  <input value={newShare[field]} onChange={(e) => setNewShare((n) => ({ ...n, [field]: e.target.value }))}
+                  <input value={newShare[field]} onChange={(e) => setNewShare({ ...newShare, [field]: e.target.value })}
                     className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-blue-500" />
                 </label>
               ))}
               <label className="flex items-center gap-2 text-sm text-gray-300">
-                <input type="checkbox" checked={newShare.readOnly} onChange={(e) => setNewShare((n) => ({ ...n, readOnly: e.target.checked }))} />
+                <input type="checkbox" checked={newShare.readOnly} onChange={(e) => setNewShare({ ...newShare, readOnly: e.target.checked })} />
                 Read only
               </label>
             </div>
@@ -685,11 +390,17 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
         </div>
       </Dialog>
 
-      {/* Context menu */}
+      {/* Context menu — escape handled by onKeyDown on the backdrop (no useEffect) */}
       {ctxMenu && (
         <>
-          <div className="fixed inset-0 z-90" onClick={() => setCtxMenu(null)}
-            onContextMenu={(e) => { e.preventDefault(); setCtxMenu(null); }} />
+          <div
+            className="fixed inset-0 z-90"
+            tabIndex={-1}
+            ref={(el) => el?.focus()}
+            onClick={() => setCtxMenu(null)}
+            onKeyDown={(e) => { if (e.key === "Escape") setCtxMenu(null); }}
+            onContextMenu={(e) => { e.preventDefault(); setCtxMenu(null); }}
+          />
           <div
             className="fixed z-91 min-w-42 bg-gray-800 border border-gray-700 rounded-lg shadow-2xl py-1 overflow-hidden"
             style={{ left: Math.min(ctxMenu.x, window.innerWidth - 180), top: Math.min(ctxMenu.y, window.innerHeight - 260) }}
@@ -758,18 +469,17 @@ function ListingTable(props: RowProps) {
   const someSelected = entries.some(e => selectedPaths.has(e.path));
   const anySelected  = selectedPaths.size > 0;
 
-  const headerCheckRef = useRef<HTMLInputElement>(null);
-  useEffect(() => {
-    if (headerCheckRef.current) headerCheckRef.current.indeterminate = someSelected && !allSelected;
-  }, [someSelected, allSelected]);
-
   return (
     <table className="w-full text-sm">
       <thead>
         <tr className="text-left text-gray-600 text-xs uppercase tracking-wide">
           <th className="pb-2 pr-3 w-8">
-            <input ref={headerCheckRef} type="checkbox" checked={allSelected} onChange={onToggleSelectAll}
-              className="w-3.5 h-3.5 rounded accent-blue-500 cursor-pointer" />
+            {/* Callback ref sets indeterminate directly — no useRef + useEffect needed */}
+            <input
+              ref={(el) => { if (el) el.indeterminate = someSelected && !allSelected; }}
+              type="checkbox" checked={allSelected} onChange={onToggleSelectAll}
+              className="w-3.5 h-3.5 rounded accent-blue-500 cursor-pointer"
+            />
           </th>
           <th className="pb-2 pr-4 font-medium">Name</th>
           <th className="pb-2 pr-4 font-medium w-16">Type</th>

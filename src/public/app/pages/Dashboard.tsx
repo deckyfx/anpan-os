@@ -1,8 +1,9 @@
 import React from "react";
+import { api } from "../lib/api";
 
 export function Dashboard({ username, onLogout }: { username: string; onLogout: () => void }) {
   async function handleLogout() {
-    await fetch("/api/auth/logout", { method: "POST" });
+    await api.api.auth.logout.post();
     onLogout();
   }
 

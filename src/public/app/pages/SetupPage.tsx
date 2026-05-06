@@ -3,6 +3,7 @@ import { AuthCard } from "../components/AuthCard";
 import { Field } from "../components/Field";
 import { SubmitButton } from "../components/SubmitButton";
 import { ErrorMsg } from "../components/ErrorMsg";
+import { api } from "../lib/api";
 
 export function SetupPage({ onSuccess }: { onSuccess: (username: string) => void }) {
   const [username, setUsername] = useState("");
@@ -16,15 +17,10 @@ export function SetupPage({ onSuccess }: { onSuccess: (username: string) => void
     setLoading(true);
 
     try {
-      const res = await fetch("/api/auth/setup", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username, password }),
-      });
-      const data = await res.json() as { ok?: boolean; error?: string };
-      if (!res.ok) {
-        setError(data.error ?? "Setup failed");
-      } else {
+      const { data, error: err } = await api.api.auth.setup.post({ username, password });
+      if (err) {
+        setError((err.value as { error?: string })?.error ?? "Setup failed");
+      } else if (data) {
         onSuccess(username);
       }
     } catch {

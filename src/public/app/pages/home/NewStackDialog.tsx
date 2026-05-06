@@ -1,16 +1,17 @@
-import React, { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Editor, { type OnMount } from "@monaco-editor/react";
 import type { editor } from "monaco-editor";
 import { Link, Loader2 } from "lucide-react";
 import { Dialog } from "../../components/Dialog";
+import { api } from "../../lib/api";
 
 const NAME_RE = /^[a-zA-Z0-9_-]+$/;
 
 const PLACEHOLDER = `services:
-  myservice:
-    image: nginx:alpine
+  whoami:
+    image: traefik/whoami
     ports:
-      - "8080:80"
+      - "8088:80"
     restart: unless-stopped
 `;
 
@@ -19,23 +20,29 @@ export function NewStackDialog({ open, onClose, onInstalled }: {
   onClose: () => void;
   onInstalled: () => void;
 }) {
-  const [name,        setName]        = useState("");
-  const [content,     setContent]     = useState("");
-  const [busy,        setBusy]        = useState(false);
-  const [error,       setError]       = useState("");
-  const [fetchUrl,    setFetchUrl]    = useState("");
-  const [fetchBusy,   setFetchBusy]   = useState(false);
-  const [fetchError,  setFetchError]  = useState("");
+  const [name,       setName]       = useState("");
+  const [content,    setContent]    = useState(PLACEHOLDER);
+  const [busy,       setBusy]       = useState(false);
+  const [error,      setError]      = useState("");
+  const [fetchUrl,   setFetchUrl]   = useState("");
+  const [fetchBusy,  setFetchBusy]  = useState(false);
+  const [fetchError, setFetchError] = useState("");
+  const [log,        setLog]        = useState<string[]>([]);
+  const [tab,        setTab]        = useState<"compose" | "log">("compose");
 
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
+  const logRef    = useRef<HTMLPreElement | null>(null);
 
-  const handleEditorMount: OnMount = (ed) => {
-    editorRef.current = ed;
-  };
+  const handleEditorMount: OnMount = (ed) => { editorRef.current = ed; };
+
+  useEffect(() => {
+    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
+  }, [log]);
 
   const reset = () => {
     setName(""); setContent(""); setError("");
     setFetchUrl(""); setFetchError(""); setBusy(false);
+    setLog([]); setTab("compose");
   };
   const handleClose = () => { reset(); onClose(); };
 
@@ -45,18 +52,12 @@ export function NewStackDialog({ open, onClose, onInstalled }: {
     setFetchBusy(true);
     setFetchError("");
     try {
-      const res = await fetch(`/api/compose/fetch?url=${encodeURIComponent(url)}`);
-      const text = await res.text();
-      if (!res.ok) {
-        // Try to parse as JSON error
-        try {
-          const d = JSON.parse(text) as { error?: string };
-          setFetchError(d.error ?? `Error ${res.status}`);
-        } catch {
-          setFetchError(`Error ${res.status}`);
-        }
+      const { data, error } = await api.api.compose.fetch.post({ url });
+      if (error) {
+        setFetchError((error.value as { error?: string })?.error ?? String(error.status));
         return;
       }
+      const text = (data as { content?: string })?.content ?? "";
       setContent(text);
       editorRef.current?.setValue(text);
     } catch (err) {
@@ -71,19 +72,50 @@ export function NewStackDialog({ open, onClose, onInstalled }: {
     if (!content.trim())     { setError("Compose content cannot be empty."); return; }
     setBusy(true);
     setError("");
+    setLog([]);
+    setTab("log");
     try {
-      const res  = await fetch("/api/compose/stacks", {
-        method:  "POST",
+      // SSE stream — Eden Treaty can't consume streaming responses
+      const res = await fetch("/api/compose/stacks", {
+        method: "POST",
         headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ name, content }),
+        body: JSON.stringify({ name, content }),
       });
-      const data = await res.json() as { ok?: boolean; error?: string };
-      if (!res.ok || !data.ok) {
-        setError(data.error ?? `Server error ${res.status}`);
-      } else {
-        reset();
-        onInstalled();
-        onClose();
+
+      if (!res.ok || !res.body) {
+        const d = await res.json().catch(() => ({})) as { error?: string };
+        setError(d.error ?? `Server error ${res.status}`);
+        return;
+      }
+
+      const reader = res.body.getReader();
+      const dec = new TextDecoder();
+      let buf = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        const parts = buf.split("\n\n");
+        buf = parts.pop() ?? "";
+        for (const chunk of parts) {
+          const line = chunk.startsWith("data: ") ? chunk.slice(6) : chunk;
+          if (!line.trim()) continue;
+          try {
+            const msg = JSON.parse(line) as { log?: string; ok?: boolean; error?: string };
+            if (msg.log !== undefined) {
+              setLog(prev => [...prev, msg.log!]);
+            } else if (msg.ok) {
+              reset();
+              onInstalled();
+              onClose();
+              return;
+            } else if (msg.error) {
+              setError(msg.error);
+              return;
+            }
+          } catch { /* skip malformed SSE line */ }
+        }
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -98,6 +130,11 @@ export function NewStackDialog({ open, onClose, onInstalled }: {
       title="New Stack"
       onClose={handleClose}
       size="2xl"
+      notification={error ? (
+        <p className="text-red-400 text-sm bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2 whitespace-pre-wrap">
+          {error}
+        </p>
+      ) : undefined}
       footer={
         <>
           <button onClick={handleClose} className="px-4 py-2 text-sm text-gray-400 hover:text-white transition-colors">
@@ -108,69 +145,80 @@ export function NewStackDialog({ open, onClose, onInstalled }: {
             disabled={busy}
             className="px-4 py-2 text-sm bg-amber-500 hover:bg-amber-400 text-black font-semibold rounded-lg transition-colors disabled:opacity-50"
           >
-            {busy ? "Installing…" : "Install"}
+            {busy ? <><Loader2 size={13} className="inline animate-spin mr-1" />Installing…</> : "Install"}
           </button>
         </>
       }
     >
       <div className="space-y-4">
 
-        {/* Stack name */}
-        <div>
-          <label className="block text-xs text-gray-500 mb-1.5 uppercase tracking-widest font-semibold">Stack name</label>
-          <input
-            type="text"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="my-stack"
-            className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-amber-500"
-          />
-        </div>
-
-        {/* URL fetcher */}
-        <div>
-          <label className="block text-xs text-gray-500 mb-1.5 uppercase tracking-widest font-semibold">Fetch from URL</label>
-          <div className="flex gap-2">
-            <div className="relative flex-1">
-              <Link size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 pointer-events-none" />
-              <input
-                type="url"
-                value={fetchUrl}
-                onChange={(e) => setFetchUrl(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter") void handleFetch(); }}
-                placeholder="https://raw.githubusercontent.com/…/docker-compose.yml"
-                className="w-full bg-gray-800 border border-gray-700 rounded-lg pl-8 pr-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-amber-500"
-              />
-            </div>
-            <button
-              onClick={() => void handleFetch()}
-              disabled={fetchBusy || !fetchUrl.trim()}
-              className="flex items-center gap-1.5 px-4 py-2 text-sm bg-gray-700 hover:bg-gray-600 text-gray-200 rounded-lg transition-colors disabled:opacity-40 shrink-0"
-            >
-              {fetchBusy
-                ? <><Loader2 size={13} className="animate-spin" /> Fetching…</>
-                : "Fetch"}
-            </button>
+        {/* Stack name + URL fetcher in one row */}
+        <div className="flex gap-3 items-end">
+          <div className="w-48 shrink-0">
+            <label className="block text-xs text-gray-500 mb-1.5 uppercase tracking-widest font-semibold">Stack name</label>
+            <input
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="my-stack"
+              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-amber-500"
+            />
           </div>
-          {fetchError && (
-            <p className="mt-1.5 text-red-400 text-xs">{fetchError}</p>
-          )}
+          <div className="flex-1">
+            <label className="block text-xs text-gray-500 mb-1.5 uppercase tracking-widest font-semibold">Fetch from URL</label>
+            <div className="flex gap-2">
+              <div className="relative flex-1">
+                <Link size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 pointer-events-none" />
+                <input
+                  type="url"
+                  value={fetchUrl}
+                  onChange={(e) => setFetchUrl(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") void handleFetch(); }}
+                  placeholder="https://raw.githubusercontent.com/…/docker-compose.yml"
+                  className="w-full bg-gray-800 border border-gray-700 rounded-lg pl-8 pr-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-amber-500"
+                />
+              </div>
+              <button
+                onClick={() => void handleFetch()}
+                disabled={fetchBusy || !fetchUrl.trim()}
+                className="flex items-center gap-1.5 px-4 py-2 text-sm bg-gray-700 hover:bg-gray-600 text-gray-200 rounded-lg transition-colors disabled:opacity-40 shrink-0"
+              >
+                {fetchBusy ? <><Loader2 size={13} className="animate-spin" /> Fetching…</> : "Fetch"}
+              </button>
+            </div>
+            {fetchError && <p className="mt-1.5 text-red-400 text-xs">{fetchError}</p>}
+          </div>
         </div>
 
-        {/* Monaco editor */}
-        <div>
-          <label className="block text-xs text-gray-500 mb-1.5 uppercase tracking-widest font-semibold">docker-compose.yml</label>
+        {/* Tab bar */}
+        <div className="flex items-center gap-1 border-b border-gray-700">
+          {(["compose", "log"] as const).map(t => (
+            <button
+              key={t}
+              onClick={() => setTab(t)}
+              className={`px-4 py-1.5 text-xs font-medium rounded-t-md transition-colors
+                ${tab === t
+                  ? "bg-gray-800 text-white border border-b-0 border-gray-700"
+                  : "text-gray-500 hover:text-gray-300"
+                }`}
+            >
+              {t === "compose" ? "docker-compose.yml" : "Install log"}
+            </button>
+          ))}
+        </div>
+
+        {/* Editor — hidden when log tab active, kept mounted to preserve content */}
+        <div style={{ display: tab === "compose" ? "block" : "none" }}>
           <div className="rounded-lg overflow-hidden border border-gray-700">
             <Editor
-              height="480px"
+              height="360px"
               defaultLanguage="yaml"
               theme="vs-dark"
               value={content}
-              defaultValue={PLACEHOLDER}
               onMount={handleEditorMount}
               onChange={(val) => setContent(val ?? "")}
               loading={
-                <div className="h-120 bg-[#1e1e1e] flex items-center justify-center text-gray-600 text-sm">
+                <div className="h-96 bg-[#1e1e1e] flex items-center justify-center text-gray-600 text-sm">
                   Loading editor…
                 </div>
               }
@@ -190,11 +238,19 @@ export function NewStackDialog({ open, onClose, onInstalled }: {
           </div>
         </div>
 
-        {error && (
-          <p className="text-red-400 text-sm bg-red-500/10 border border-red-500/20 rounded-lg p-3 whitespace-pre-wrap">
-            {error}
-          </p>
+        {/* Log panel — same height as editor */}
+        {tab === "log" && (
+          <pre
+            ref={logRef}
+            className="h-90 bg-black rounded-lg border border-gray-700 p-3 text-xs text-green-400 font-mono overflow-y-auto whitespace-pre-wrap"
+          >
+            {log.length === 0
+              ? <span className="text-gray-600">Waiting for output…</span>
+              : log.join("\n")
+            }
+          </pre>
         )}
+
       </div>
     </Dialog>
   );

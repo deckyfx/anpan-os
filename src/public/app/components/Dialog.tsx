@@ -5,6 +5,8 @@ interface DialogProps {
   title: string;
   children: React.ReactNode;
   footer?: React.ReactNode;
+  /** Rendered between scrollable body and footer — always visible, not scrolled. */
+  notification?: React.ReactNode;
   onClose: () => void;
   /** "md" (default, max-w-lg) | "lg" (max-w-3xl) | "xl" (max-w-5xl) | "2xl" (max-w-7xl) */
   size?: "md" | "lg" | "xl" | "2xl";
@@ -17,7 +19,7 @@ const SIZE_CLASS: Record<NonNullable<DialogProps["size"]>, string> = {
   "2xl": "max-w-7xl",
 };
 
-export function Dialog({ open, title, children, footer, onClose, size = "md" }: DialogProps) {
+export function Dialog({ open, title, children, footer, notification, onClose, size = "md" }: DialogProps) {
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
@@ -47,6 +49,12 @@ export function Dialog({ open, title, children, footer, onClose, size = "md" }: 
         <div className="px-5 py-4 overflow-y-auto flex-1">
           {children}
         </div>
+
+        {notification && (
+          <div className="px-5 py-3 border-t border-gray-800/60">
+            {notification}
+          </div>
+        )}
 
         {footer && (
           <div className="px-5 py-4 border-t border-gray-800 flex justify-end gap-2">

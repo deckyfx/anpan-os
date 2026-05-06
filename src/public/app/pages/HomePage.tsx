@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
+import { useStacksStore }    from "../stores/stacksStore";
 
 import { TopBar }            from "./home/TopBar";
 import { BottomBar }         from "./home/BottomBar";
@@ -11,170 +12,50 @@ import { LogsDialog }        from "./home/LogsDialog";
 import { NewStackDialog }    from "./home/NewStackDialog";
 import { DeleteStackDialog } from "./home/DeleteStackDialog";
 
-import type { Stack, SystemStats, StackAction, SortMode } from "./home/types";
+import type { Stack } from "./home/types";
 
 export function HomePage({ username, onLogout, onNavigate }: {
   username: string;
   onLogout: () => void;
   onNavigate: (path: string) => void;
 }) {
-  const [stacks,         setStacks]         = useState<Stack[]>([]);
-  const [stats,          setStats]          = useState<SystemStats | null>(null);
-  const [version,        setVersion]        = useState("…");
-  const [sortMode,       setSortMode]       = useState<SortMode>("custom");
-  const [newStackOpen,   setNewStackOpen]   = useState(false);
-  const [logsFor,        setLogsFor]        = useState<Stack | null>(null);
-  const [logText,        setLogText]        = useState("");
-  const [logsLoading,    setLogsLoading]    = useState(false);
-  const [actionBusy,     setActionBusy]     = useState<string | null>(null);
-  const [detailStack,    setDetailStack]    = useState<Stack | null>(null);
-  const [containersStack, setContainersStack] = useState<Stack | null>(null);
-  const [noteStack,      setNoteStack]      = useState<Stack | null>(null);
-  const [deleteStack,    setDeleteStack]    = useState<Stack | null>(null);
-  // Drag state
-  const [dragSrcIdx,     setDragSrcIdx]     = useState<number | null>(null);
-  const [dragOverIdx,    setDragOverIdx]    = useState<number | null>(null);
+  const {
+    stacks, stats, version,
+    sortMode, setSortMode,
+    dragSrcIdx, dragOverIdx, setDragSrcIdx, setDragOverIdx,
+    newStackOpen, setNewStackOpen,
+    detailStack, setDetailStack,
+    containersStack, setContainersStack,
+    noteStack, setNoteStack,
+    deleteStack, setDeleteStack,
+    logsFor, logText, logsLoading,
+    actionBusy,
+    initialize, loadStacks, stackAction, handleDrop,
+  } = useStacksStore();
 
-  // ── Data loading ──────────────────────────────────────────────────────────
+  // Lazy-init: starts polling, loads stacks + stats. Runs once per mount.
+  useState(() => { initialize(); });
 
-  const loadStacks = useCallback(async () => {
-    const res = await fetch("/api/docker/stacks");
-    if (!res.ok) return;
-    setStacks(await res.json() as Stack[]);
-  }, []);
+  const [filter, setFilter] = useState("");
 
-  const loadStats = useCallback(async () => {
-    const res = await fetch("/api/system/stats");
-    if (!res.ok) return;
-    setStats(await res.json() as SystemStats);
-  }, []);
-
-  useEffect(() => {
-    void loadStacks();
-    void loadStats();
-    fetch("/api/system/info")
-      .then((r) => r.json())
-      .then((d: unknown) => {
-        if (d && typeof d === "object" && "version" in d)
-          setVersion(String((d as { version: unknown }).version));
-      })
-      .catch(() => {});
-    const id = setInterval(() => { void loadStacks(); void loadStats(); }, 30_000);
-    return () => clearInterval(id);
-  }, [loadStacks, loadStats]);
-
-  // ── Sorted stacks ─────────────────────────────────────────────────────────
+  // ── Sorted + filtered stacks ──────────────────────────────────────────────
 
   const displayedStacks = useMemo<Stack[]>(() => {
-    if (sortMode === "name") {
-      return [...stacks].sort((a, b) =>
-        (a.meta?.title ?? a.name).localeCompare(b.meta?.title ?? b.name)
-      );
-    }
-    return [...stacks].sort((a, b) => {
-      const oa = a.meta?.orderNo ?? 9999;
-      const ob = b.meta?.orderNo ?? 9999;
-      if (oa !== ob) return oa - ob;
-      return a.name.localeCompare(b.name);
-    });
-  }, [stacks, sortMode]);
-
-  // ── Stack actions ─────────────────────────────────────────────────────────
-
-  const openLogs = async (stack: Stack) => {
-    setLogsFor(stack);
-    setLogText("");
-    setLogsLoading(true);
-    try {
-      const target = stack.services.find((s) => s.state === "running") ?? stack.services[0];
-      if (!target) { setLogText("(no services)"); return; }
-      const res  = await fetch(`/api/docker/containers/${target.id}/logs?tail=100`);
-      const data = await res.json() as { logs?: string; error?: string };
-      setLogText(data.logs ?? data.error ?? "(empty)");
-    } finally {
-      setLogsLoading(false);
-    }
-  };
-
-  const downloadCompose = async (stack: Stack) => {
-    const res = await fetch(`/api/compose/stacks/${encodeURIComponent(stack.name)}/file`);
-    if (!res.ok) {
-      const d = await res.json().catch(() => ({})) as { error?: string };
-      alert(d.error ?? "Compose file not found for this stack.");
-      return;
-    }
-    const blob = await res.blob();
-    const url  = URL.createObjectURL(blob);
-    const a    = document.createElement("a");
-    a.href     = url;
-    a.download = `${stack.name}-docker-compose.yml`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  };
-
-  const importCasaos = async (stack: Stack) => {
-    setActionBusy(stack.name);
-    try {
-      const res = await fetch(`/api/casaos/import/${encodeURIComponent(stack.name)}`, { method: "POST" });
-      if (res.ok) await loadStacks();
-    } finally {
-      setActionBusy(null);
-    }
-  };
-
-  const stackAction = async (stack: Stack, action: StackAction) => {
-    if (action === "logs")             { await openLogs(stack);           return; }
-    if (action === "note")             { setNoteStack(stack);             return; }
-    if (action === "detail")           { setDetailStack(stack);           return; }
-    if (action === "containers")       { setContainersStack(stack);       return; }
-    if (action === "download-compose") { await downloadCompose(stack);    return; }
-    if (action === "casaos-import")    { await importCasaos(stack);       return; }
-    if (action === "delete")           { setDeleteStack(stack);           return; }
-    setActionBusy(stack.name);
-    try {
-      await Promise.all(
-        stack.services.map((s) => fetch(`/api/docker/containers/${s.id}/${action}`, { method: "POST" }))
-      );
-      await loadStacks();
-    } finally {
-      setActionBusy(null);
-    }
-  };
-
-  // ── Drag-to-reorder ───────────────────────────────────────────────────────
-
-  const handleDrop = async (dropIdx: number) => {
-    if (dragSrcIdx === null || dragSrcIdx === dropIdx) {
-      setDragSrcIdx(null);
-      setDragOverIdx(null);
-      return;
-    }
-    const newOrder = [...displayedStacks];
-    const moved = newOrder.splice(dragSrcIdx, 1)[0];
-    if (!moved) { setDragSrcIdx(null); setDragOverIdx(null); return; }
-    newOrder.splice(dropIdx, 0, moved);
-
-    // Optimistic update
-    setStacks(prev => {
-      const nameOrder = new Map(newOrder.map((s, i) => [s.name, i]));
-      return [...prev].sort((a, b) => (nameOrder.get(a.name) ?? 999) - (nameOrder.get(b.name) ?? 999));
-    });
-    setDragSrcIdx(null);
-    setDragOverIdx(null);
-
-    await Promise.all(
-      newOrder.map((s, i) =>
-        fetch(`/api/docker/stacks/${encodeURIComponent(s.name)}`, {
-          method:  "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body:    JSON.stringify({ orderNo: i }),
-        })
-      )
+    const q = filter.trim().toLowerCase();
+    const sorted = sortMode === "name"
+      ? [...stacks].sort((a, b) =>
+          (a.meta?.title ?? a.name).localeCompare(b.meta?.title ?? b.name))
+      : [...stacks].sort((a, b) => {
+          const oa = a.meta?.orderNo ?? 9999;
+          const ob = b.meta?.orderNo ?? 9999;
+          if (oa !== ob) return oa - ob;
+          return a.name.localeCompare(b.name);
+        });
+    if (!q) return sorted;
+    return sorted.filter(s =>
+      (s.meta?.title ?? s.name).toLowerCase().includes(q) || s.name.toLowerCase().includes(q)
     );
-    await loadStacks();
-  };
+  }, [stacks, sortMode, filter]);
 
   // ── Render ────────────────────────────────────────────────────────────────
 
@@ -196,7 +77,7 @@ export function HomePage({ username, onLogout, onNavigate }: {
         {/* Main grid */}
         <main className="flex-1 p-6 overflow-y-auto">
 
-          {/* Sort controls */}
+          {/* Sort + filter controls */}
           <div className="flex items-center gap-3 mb-5">
             <span className="text-[10px] text-gray-600 font-semibold uppercase tracking-widest">Sort</span>
             <div className="flex gap-1">
@@ -217,6 +98,23 @@ export function HomePage({ username, onLogout, onNavigate }: {
             {sortMode === "custom" && (
               <span className="text-[10px] text-gray-700">drag tiles to reorder</span>
             )}
+            <div className="ml-auto relative">
+              <input
+                type="text"
+                value={filter}
+                onChange={e => setFilter(e.target.value)}
+                placeholder="Filter…"
+                className="w-40 bg-gray-800 border border-gray-700 rounded-lg px-3 py-1 pr-7 text-xs text-white placeholder-gray-500 focus:outline-none focus:border-amber-500"
+              />
+              {filter && (
+                <button
+                  onClick={() => setFilter("")}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-500 hover:text-white transition-colors"
+                >
+                  ✕
+                </button>
+              )}
+            </div>
           </div>
 
           <div className="grid grid-cols-[repeat(auto-fill,minmax(160px,1fr))] gap-4">
@@ -260,7 +158,7 @@ export function HomePage({ username, onLogout, onNavigate }: {
                 dragOver={dragOverIdx === i && dragSrcIdx !== i}
                 onDragStart={() => setDragSrcIdx(i)}
                 onDragOver={(e) => { e.preventDefault(); setDragOverIdx(i); }}
-                onDrop={() => void handleDrop(i)}
+                onDrop={() => void handleDrop(i, displayedStacks)}
                 onDragEnd={() => { setDragSrcIdx(null); setDragOverIdx(null); }}
               />
             ))}
@@ -304,7 +202,7 @@ export function HomePage({ username, onLogout, onNavigate }: {
         stack={logsFor}
         logs={logText}
         loading={logsLoading}
-        onClose={() => setLogsFor(null)}
+        onClose={() => useStacksStore.setState({ logsFor: null })}
       />
 
       <DeleteStackDialog
