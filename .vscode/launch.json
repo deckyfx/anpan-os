@@ -1,0 +1,23 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "bun",
+      "request": "launch",
+      "name": "Run anpan-os",
+      "program": "${workspaceFolder}/src/server.ts",
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "NODE_ENV": "development"
+      },
+      "watchMode": true
+    },
+    {
+      "type": "bun",
+      "request": "launch",
+      "name": "Run build",
+      "program": "${workspaceFolder}/build.ts",
+      "cwd": "${workspaceFolder}"
+    }
+  ]
+}

@@ -1,0 +1,50 @@
+{
+  "folders": [
+    {
+      "path": "."
+    }
+  ],
+  "settings": {
+    "editor.formatOnSave": true,
+    "editor.defaultFormatter": "esbenp.prettier-vscode",
+    "editor.tabSize": 2,
+    "typescript.tsdk": "node_modules/typescript/lib"
+  },
+  "extensions": {
+    "recommendations": [
+      "esbenp.prettier-vscode",
+      "dbaeumer.vscode-eslint",
+      "bradlc.vscode-tailwindcss",
+      "oven.bun-vscode",
+      "ms-vscode.vscode-typescript-next",
+      "formulahendry.auto-rename-tag",
+      "christian-kohler.path-intellisense",
+      "mikestead.dotenv",
+      "redhat.vscode-yaml",
+      "ms-vscode.live-server"
+    ]
+  },
+  "launch": {
+    "version": "0.2.0",
+    "configurations": [
+      {
+        "type": "bun",
+        "request": "launch",
+        "name": "Run anpan-os",
+        "program": "${workspaceFolder}/src/server.ts",
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "NODE_ENV": "development"
+        },
+        "watchMode": true
+      },
+      {
+        "type": "bun",
+        "request": "launch",
+        "name": "Run build",
+        "program": "${workspaceFolder}/build.ts",
+        "cwd": "${workspaceFolder}"
+      }
+    ]
+  }
+}

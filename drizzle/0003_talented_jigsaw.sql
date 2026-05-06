@@ -1,0 +1,1 @@
+ALTER TABLE `stacks` ADD `managed` integer DEFAULT false NOT NULL;

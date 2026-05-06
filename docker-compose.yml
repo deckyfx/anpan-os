@@ -1,0 +1,17 @@
+services:
+  anpan-os:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      # Persistent config & database
+      - ./data/config:/config
+      # Host filesystem (read + write for file manager)
+      - ./data/:/rootfs
+      # Docker socket for container management features
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      RUNTIME_CONFIG_DIR: /config

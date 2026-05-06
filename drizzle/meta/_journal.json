@@ -1,0 +1,48 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1777985457643,
+      "tag": "0000_eminent_steel_serpent",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1777988898865,
+      "tag": "0001_outstanding_sharon_ventura",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1778050369036,
+      "tag": "0002_cultured_microbe",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1778051259665,
+      "tag": "0003_talented_jigsaw",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1778051784059,
+      "tag": "0004_third_morlun",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1778073039251,
+      "tag": "0005_previous_goliath",
+      "breakpoints": true
+    }
+  ]
+}

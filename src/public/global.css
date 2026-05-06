@@ -1,0 +1,9 @@
+@import "tailwindcss";
+@import "plyr/dist/plyr.css";
+@import "viewerjs/dist/viewer.css";
+
+@layer base {
+  button, a {
+    cursor: pointer;
+  }
+}
