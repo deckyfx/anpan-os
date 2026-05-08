@@ -1,6 +1,6 @@
 import { Elysia } from "elysia";
 import { authGuard } from "./authGuard";
-import { bins } from "../lib/commands";
+import { bins, commands } from "../lib/commands";
 
 // Injected at build time via define; falls back to reading package.json from CWD in dev.
 const APP_VERSION: string =
@@ -15,6 +15,42 @@ export function systemPlugin(jwtSecret: string) {
     .get("/stats", async () => {
       const [cpu, ram, disk] = await Promise.all([getCpu(), getRam(), getDisk()]);
       return { cpu, ...ram, ...disk };
+    })
+    .get("/doctor", () => commands.doctor())
+    .post("/restart",  async ({ set }) => {
+      if ((process.getuid?.() ?? -1) !== 0) { set.status = 403; return { error: "Requires root" }; }
+      void Bun.$`systemctl reboot`.quiet().nothrow();
+      return { ok: true };
+    })
+    .post("/shutdown", async ({ set }) => {
+      if ((process.getuid?.() ?? -1) !== 0) { set.status = 403; return { error: "Requires root" }; }
+      void Bun.$`systemctl poweroff`.quiet().nothrow();
+      return { ok: true };
+    })
+    .get("/environment", async () => {
+      const [whoamiRes, uidRes, sambaRes] = await Promise.all([
+        Bun.$`whoami`.quiet().nothrow(),
+        Bun.$`id -u`.quiet().nothrow(),
+        Bun.$`which smbd`.quiet().nothrow(),
+      ]);
+
+      const user      = whoamiRes.stdout.toString().trim()  || (process.env.USER ?? "unknown");
+      const uid       = parseInt(uidRes.stdout.toString().trim(), 10);
+      const isRoot    = uid === 0;
+      const sambaInstalled = sambaRes.exitCode === 0;
+
+      let sambaActive  = false;
+      let sambaEnabled = false;
+      if (sambaInstalled) {
+        const [activeRes, enabledRes] = await Promise.all([
+          Bun.$`systemctl is-active smbd`.quiet().nothrow(),
+          Bun.$`systemctl is-enabled smbd`.quiet().nothrow(),
+        ]);
+        sambaActive  = activeRes.stdout.toString().trim()  === "active";
+        sambaEnabled = enabledRes.stdout.toString().trim() === "enabled";
+      }
+
+      return { user, uid, isRoot, samba: { installed: sambaInstalled, active: sambaActive, enabled: sambaEnabled } };
     });
 }
 
@@ -51,11 +87,28 @@ async function getRam(): Promise<{ ramUsed: number; ramTotal: number }> {
   return { ramUsed: total - avail, ramTotal: total };
 }
 
-/** Disk usage for / from `df -k`. Returns bytes. */
-async function getDisk(): Promise<{ diskUsed: number; diskTotal: number }> {
-  const result = await Bun.$`${bins.df} -k /`.quiet().nothrow();
-  const parts  = result.stdout.toString().trim().split("\n")[1]?.trim().split(/\s+/) ?? [];
-  const total  = parseInt(parts[1] ?? "0", 10) * 1024;
-  const used   = parseInt(parts[2] ?? "0", 10) * 1024;
-  return { diskUsed: used, diskTotal: total };
+interface DiskMount {
+  device: string;
+  mount: string;
+  used: number;
+  total: number;
+}
+
+/** All physical disk mounts from `df -k`. Filters out virtual filesystems. */
+async function getDisk(): Promise<{ disks: DiskMount[] }> {
+  const result = await Bun.$`${bins.df} -k`.quiet().nothrow();
+  const lines  = result.stdout.toString().trim().split("\n").slice(1);
+  const disks: DiskMount[] = [];
+  for (const line of lines) {
+    const parts = line.trim().split(/\s+/);
+    if (parts.length < 6) continue;
+    const device = parts[0]!;
+    // Only real block devices (skip tmpfs, devtmpfs, squashfs, overlay, etc.)
+    if (!device.startsWith("/dev/")) continue;
+    const total = parseInt(parts[1]!, 10) * 1024;
+    const used  = parseInt(parts[2]!, 10) * 1024;
+    const mount = parts[5]!;
+    disks.push({ device, mount, used, total });
+  }
+  return { disks };
 }

@@ -19,4 +19,24 @@
   button, a {
     cursor: pointer;
   }
+
+  /* Slim dark scrollbars */
+  ::-webkit-scrollbar {
+    width: 5px;
+    height: 5px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: theme(colors.gray.700);
+    border-radius: 9999px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: theme(colors.gray.500);
+  }
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: theme(colors.gray.700) transparent;
+  }
 }
