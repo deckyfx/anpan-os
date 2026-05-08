@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import {
   CheckCircle, XCircle, Loader2, RefreshCw, AlertCircle,
-  ShieldCheck, ShieldAlert, User, Terminal,
+  ShieldCheck, ShieldAlert, User, Terminal, FolderOpen,
 } from "lucide-react";
 import { Dialog } from "./Dialog";
 import { api } from "../lib/api";
@@ -166,8 +166,9 @@ export function DoctorDialog({ open, onClose }: {
 }) {
   const systemStore = useSystemStore();
 
-  const [checks,  setChecks]  = useState<Check[]>(INITIAL_CHECKS);
-  const [running, setRunning] = useState(false);
+  const [checks,    setChecks]    = useState<Check[]>(INITIAL_CHECKS);
+  const [running,   setRunning]   = useState(false);
+  const [configDir, setConfigDir] = useState<string | null>(null);
 
   const setCheck = (i: number, patch: Partial<Check>) =>
     setChecks(prev => prev.map((c, idx) => (idx === i ? { ...c, ...patch } : c)));
@@ -175,9 +176,17 @@ export function DoctorDialog({ open, onClose }: {
   const run = async () => {
     setRunning(true);
     setChecks(INITIAL_CHECKS);
+    setConfigDir(null);
 
     await Promise.all([
-      runServiceChecks(setCheck),
+      runServiceChecks(setCheck).then(async () => {
+        // piggyback configDir from the info response
+        try {
+          const { data } = await api.api.system.info.get();
+          const d = data as { version?: string; configDir?: string } | null;
+          setConfigDir(d?.configDir ?? null);
+        } catch { /* ignore */ }
+      }),
       // reload() fetches env + tools in one shot and updates the store
       systemStore.reload().then(() => {
         api.api.system.environment.get().then(({ data }) => {
@@ -253,6 +262,13 @@ export function DoctorDialog({ open, onClose }: {
                     ? <span className="text-xs font-medium text-amber-400">Root / elevated</span>
                     : <span className="text-xs text-gray-500">Standard user — some features may be restricted</span>}
                 </div>
+                {configDir && (
+                  <div className="flex items-center gap-2.5">
+                    <FolderOpen size={13} className="text-gray-500 shrink-0" />
+                    <span className="text-xs text-gray-400 w-16 shrink-0">Data dir</span>
+                    <code className="text-xs font-mono text-gray-300 break-all">{configDir}</code>
+                  </div>
+                )}
               </div>
             )}
           </Section>

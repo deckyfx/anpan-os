@@ -4,6 +4,7 @@ import type { editor } from "monaco-editor";
 import { Link, Loader2 } from "lucide-react";
 import { Dialog } from "../../components/Dialog";
 import { api } from "../../lib/api";
+import { TemplateBrowser } from "./TemplateBrowser";
 
 const NAME_RE = /^[a-zA-Z0-9_-]+$/;
 
@@ -28,7 +29,7 @@ export function NewStackDialog({ open, onClose, onInstalled }: {
   const [fetchBusy,  setFetchBusy]  = useState(false);
   const [fetchError, setFetchError] = useState("");
   const [log,        setLog]        = useState<string[]>([]);
-  const [tab,        setTab]        = useState<"compose" | "log">("compose");
+  const [tab,        setTab]        = useState<"compose" | "templates" | "log">("compose");
 
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
   const logRef    = useRef<HTMLPreElement | null>(null);
@@ -192,7 +193,7 @@ export function NewStackDialog({ open, onClose, onInstalled }: {
 
         {/* Tab bar */}
         <div className="flex items-center gap-1 border-b border-gray-700">
-          {(["compose", "log"] as const).map(t => (
+          {(["compose", "templates", "log"] as const).filter(t => !busy || t !== "templates").map(t => (
             <button
               key={t}
               onClick={() => setTab(t)}
@@ -202,12 +203,25 @@ export function NewStackDialog({ open, onClose, onInstalled }: {
                   : "text-gray-500 hover:text-gray-300"
                 }`}
             >
-              {t === "compose" ? "docker-compose.yml" : "Install log"}
+              {t === "compose" ? "docker-compose.yml" : t === "templates" ? "Browse templates" : "Install log"}
             </button>
           ))}
         </div>
 
-        {/* Editor — hidden when log tab active, kept mounted to preserve content */}
+        {/* Template browser */}
+        {tab === "templates" && (
+          <TemplateBrowser
+            onSelect={(yaml, tplName, defaultPort) => {
+              setContent(yaml);
+              editorRef.current?.setValue(yaml);
+              if (!name.trim()) setName(tplName.toLowerCase().replace(/\s+/g, "-"));
+              void defaultPort; // stored in meta at install time
+              setTab("compose");
+            }}
+          />
+        )}
+
+        {/* Editor — hidden when not on compose tab, kept mounted to preserve content */}
         <div style={{ display: tab === "compose" ? "block" : "none" }}>
           <div className="rounded-lg overflow-hidden border border-gray-700">
             <Editor

@@ -2,7 +2,8 @@ import React, { useState } from "react";
 import {
   Play, Square, RotateCw, ScrollText, StickyNote,
   Settings2, Boxes, FileDown, PackagePlus, Trash2,
-  MoreVertical, GripVertical,
+  MoreVertical, GripVertical, ExternalLink,
+  Pencil, RefreshCcw, FileText,
 } from "lucide-react";
 import type { ComposeOrigin, Stack, StackAction } from "./types";
 import { buildLaunchUrl, stackStateColor } from "./utils";
@@ -68,6 +69,21 @@ function TileMenu({ stack, onAction, onClose }: TileMenuProps) {
       <button className={item} onClick={() => act("download-compose")}>
         <FileDown size={14} className="text-gray-400 shrink-0" /> Download Compose
       </button>
+      {stack.origin === "managed" && (
+        <button className={item} onClick={() => act("edit-compose")}>
+          <Pencil size={14} className="text-gray-400 shrink-0" /> Edit Compose
+        </button>
+      )}
+      {stack.origin !== null && (
+        <button className={item} onClick={() => act("pull-update")}>
+          <RefreshCcw size={14} className="text-sky-400 shrink-0" /> Pull update
+        </button>
+      )}
+      {stack.origin !== null && (
+        <button className={item} onClick={() => act("view-install-log")}>
+          <FileText size={14} className="text-gray-400 shrink-0" /> Install log
+        </button>
+      )}
       <button className={`${item} text-gray-500 text-xs`} onClick={() => act("casaos-import")}>
         <PackagePlus size={13} className="text-gray-500 shrink-0" /> Import from CasaOS
       </button>
@@ -148,13 +164,26 @@ export function StackTile({
           <p className="text-sm text-gray-100 font-medium truncate">{title}</p>
           {tagline && <p className="text-[10px] text-gray-500 truncate">{tagline}</p>}
           <div className="flex items-center justify-center gap-1.5">
-            <span className={`w-2 h-2 rounded-full ${stackStateColor[stack.state]}`} />
+            <span
+              title={stack.state}
+              className={`w-2 h-2 rounded-full ${stackStateColor[stack.state]} ${stack.state === "partial" ? "animate-pulse" : ""}`}
+            />
             <span className="text-xs text-gray-500">{stack.state}</span>
           </div>
           <p className="text-[10px] text-gray-600">
             {stack.services.length === 1 ? "1 service" : `${stack.services.length} services`}
-            {launchUrl ? ` · ${stack.meta?.portMap ?? ""}` : ""}
           </p>
+          {launchUrl && (
+            <a
+              href={launchUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={(e) => e.stopPropagation()}
+              className="inline-flex items-center gap-1 text-[10px] text-amber-400 hover:text-amber-300 hover:underline"
+            >
+              <ExternalLink size={10} /> Open :{stack.meta?.portMap}
+            </a>
+          )}
           {stack.origin && (
             <span className="inline-block text-[9px] px-1.5 py-0.5 rounded-full bg-gray-800 text-gray-500 leading-none">
               {ORIGIN_LABEL[stack.origin]}

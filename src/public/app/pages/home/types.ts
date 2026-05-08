@@ -97,6 +97,9 @@ export type StackAction =
   | "containers"
   | "download-compose"
   | "casaos-import"
-  | "delete";
+  | "delete"
+  | "edit-compose"
+  | "pull-update"
+  | "view-install-log";
 
 export type SortMode = "custom" | "name";

@@ -129,5 +129,36 @@ export function authPlugin(jwtSecret: string) {
     .post("/logout", ({ cookie: { anpan_session } }) => {
       anpan_session.remove();
       return { ok: true };
-    });
+    })
+
+    .put(
+      "/password",
+      async ({ body, jwt: jwtCtx, cookie: { anpan_session }, set }) => {
+        const token = anpan_session.value;
+        const payload = token ? await jwtCtx.verify(token) : null;
+        if (!payload) { set.status = 401; return { error: "Not authenticated" }; }
+
+        const userId = parseInt(String(payload.sub), 10);
+        const user   = await UserStore.findById(userId);
+        if (!user)   { set.status = 401; return { error: "User not found" }; }
+
+        const pErr = validatePassword(body.newPassword);
+        if (pErr)   { set.status = 422; return { error: pErr }; }
+
+        if (!(await UserStore.verifyPassword(user, body.currentPassword))) {
+          set.status = 400;
+          return { error: "Current password is incorrect" };
+        }
+
+        const hash = await Bun.password.hash(body.newPassword);
+        await UserStore.updatePassword(user.id, hash);
+        return { ok: true };
+      },
+      {
+        body: t.Object({
+          currentPassword: t.String({ minLength: 1 }),
+          newPassword:     passwordField,
+        }),
+      },
+    );
 }

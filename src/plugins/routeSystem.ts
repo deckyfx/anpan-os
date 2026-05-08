@@ -1,6 +1,7 @@
 import { Elysia } from "elysia";
 import { authGuard } from "./authGuard";
 import { bins, commands } from "../lib/commands";
+import { envConfig } from "../env-config";
 
 // Injected at build time via define; falls back to reading package.json from CWD in dev.
 const APP_VERSION: string =
@@ -11,7 +12,7 @@ const APP_VERSION: string =
 export function systemPlugin(jwtSecret: string) {
   return new Elysia({ prefix: "/api/system" })
     .use(authGuard(jwtSecret))
-    .get("/info", () => ({ version: APP_VERSION }))
+    .get("/info", () => ({ version: APP_VERSION, configDir: envConfig.RUNTIME_CONFIG_DIR }))
     .get("/stats", async () => {
       const [cpu, ram, disk] = await Promise.all([getCpu(), getRam(), getDisk()]);
       return { cpu, ...ram, ...disk };

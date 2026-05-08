@@ -20,5 +20,5 @@ export function buildLaunchUrl(stack: Stack): string | null {
 export const stackStateColor: Record<Stack["state"], string> = {
   running: "bg-green-400",
   partial: "bg-yellow-400",
-  stopped: "bg-red-400",
+  stopped: "bg-red-500",
 };

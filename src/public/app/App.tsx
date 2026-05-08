@@ -5,8 +5,9 @@ import { LoginPage }        from "./pages/LoginPage";
 import { PasskeySetupPage } from "./pages/PasskeySetupPage";
 import { HomePage }         from "./pages/HomePage";
 import { FilesPage }        from "./pages/FilesPage";
-import { useAuthStore }   from "./stores/authStore";
-import { useSystemStore } from "./stores/systemStore";
+import { useAuthStore }     from "./stores/authStore";
+import { useSystemStore }   from "./stores/systemStore";
+import { ToastContainer }   from "./components/Toast";
 
 export function App() {
   const { view, username, checkAuth, login, afterSetup, logout } = useAuthStore();
@@ -30,7 +31,7 @@ export function App() {
   if (view === "passkeySetup") return <PasskeySetupPage />;
   if (view === "login")        return <LoginPage onSuccess={(u) => login(u)} />; // login is async, returns Promise
 
-  if (path.startsWith("/files"))  return <FilesPage onNavigate={navigate} />;
+  if (path.startsWith("/files"))  return <><FilesPage onNavigate={navigate} /><ToastContainer /></>;
 
-  return <HomePage username={username} onLogout={logout} onNavigate={navigate} />;
+  return <><HomePage username={username} onLogout={logout} onNavigate={navigate} /><ToastContainer /></>;
 }
