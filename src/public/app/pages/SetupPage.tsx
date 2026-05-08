@@ -1,9 +1,9 @@
 import React, { useState } from "react";
-import { AuthCard } from "../components/AuthCard";
-import { Field } from "../components/Field";
+import { AuthCard }    from "../components/AuthCard";
+import { Field }       from "../components/Field";
 import { SubmitButton } from "../components/SubmitButton";
-import { ErrorMsg } from "../components/ErrorMsg";
-import { api } from "../lib/api";
+import { ErrorMsg }    from "../components/ErrorMsg";
+import { api }         from "../lib/api";
 
 export function SetupPage({ onSuccess }: { onSuccess: (username: string) => void }) {
   const [username, setUsername] = useState("");
@@ -15,14 +15,10 @@ export function SetupPage({ onSuccess }: { onSuccess: (username: string) => void
     e.preventDefault();
     setError("");
     setLoading(true);
-
     try {
       const { data, error: err } = await api.api.auth.setup.post({ username, password });
-      if (err) {
-        setError((err.value as { error?: string })?.error ?? "Setup failed");
-      } else if (data) {
-        onSuccess(username);
-      }
+      if (err) setError((err.value as { error?: string })?.error ?? "Setup failed");
+      else if (data) onSuccess(username);
     } catch {
       setError("Network error — is the server running?");
     } finally {
