@@ -36,9 +36,11 @@ export class PasskeyStore {
 
   /** Update counter and last-used timestamp after successful authentication. */
   static async updateCounter(id: number, counter: number): Promise<void> {
-    await db.update(passkeys)
+    const result = await db.update(passkeys)
       .set({ counter, lastUsedAt: new Date() })
-      .where(eq(passkeys.id, id));
+      .where(eq(passkeys.id, id))
+      .returning({ id: passkeys.id });
+    if (result.length === 0) throw new Error(`Passkey ${id} not found — cannot update counter`);
   }
 
   static async delete(id: number, userId: number): Promise<boolean> {

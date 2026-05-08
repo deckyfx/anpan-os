@@ -48,7 +48,6 @@ function EditStackDialogInner({ stack, onClose, onSaved }: {
         }
         const text = data as unknown as string;
         setContent(text);
-        editorRef.current?.setValue(text);
       } catch (e) {
         setError(e instanceof Error ? e.message : "Failed to load compose file");
       } finally {

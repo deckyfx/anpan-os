@@ -5,6 +5,7 @@ import { DoctorDialog } from "../../components/DoctorDialog";
 import { ChangePasswordDialog } from "./ChangePasswordDialog";
 import { browserSupportsWebAuthn } from "@simplewebauthn/browser";
 import { useSystemStore } from "../../stores/systemStore";
+import { useToastStore } from "../../stores/toastStore";
 
 interface NavItem {
   icon: React.ReactNode;
@@ -58,7 +59,7 @@ export function TopBar({ username, version, hasPasskey, onLogout, onNavigate, on
       if (action === "shutdown") await api.api.system.shutdown.post();
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
-      window.alert(`Failed to ${action}: ${message}`);
+      useToastStore.getState().push(`Failed to ${action}: ${message}`, "error");
     }
   };
 
@@ -199,7 +200,7 @@ export function TopBar({ username, version, hasPasskey, onLogout, onNavigate, on
                     setOpen(false);
                   } catch (e) {
                     const message = e instanceof Error ? e.message : String(e);
-                    window.alert(`Failed to add passkey: ${message}`);
+                    useToastStore.getState().push(`Failed to add passkey: ${message}`, "error");
                   } finally {
                     setPkLoading(false);
                   }

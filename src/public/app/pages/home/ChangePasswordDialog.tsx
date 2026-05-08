@@ -63,15 +63,16 @@ function ChangePasswordDialogInner({ onClose }: { onClose: () => void }) {
     <Dialog open title="Change Password" onClose={onClose} footer={footer}>
       <div className="space-y-3">
         {[
-          { label: "Current password", value: current, set: setCurrent },
-          { label: "New password",     value: next,    set: setNext    },
-          { label: "Confirm new",      value: confirm, set: setConfirm },
-        ].map(({ label, value, set }) => (
+          { label: "Current password", value: current, set: setCurrent, autoComplete: "current-password" },
+          { label: "New password",     value: next,    set: setNext,    autoComplete: "new-password"     },
+          { label: "Confirm new",      value: confirm, set: setConfirm, autoComplete: "new-password"     },
+        ].map(({ label, value, set, autoComplete }) => (
           <div key={label}>
             <label className="block text-xs text-gray-500 mb-1">{label}</label>
             <input
               type="password"
               value={value}
+              autoComplete={autoComplete}
               onChange={(e) => set(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && !busy && !savingRef.current && void handleSave()}
               className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-amber-500"
