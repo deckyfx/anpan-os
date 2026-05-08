@@ -136,9 +136,10 @@ function StackDetailDialogInner({ stack, onClose, onSaved }: {
               href={launchUrl}
               target="_blank"
               rel="noopener noreferrer"
-              className="inline-flex items-center gap-1.5 text-sm text-amber-400 hover:text-amber-300 hover:underline"
+              className="inline-flex items-center gap-1.5 text-sm text-amber-400 hover:text-amber-300 hover:underline min-w-0"
+              title={launchUrl}
             >
-              <ExternalLink size={14} /> Open web UI — {launchUrl}
+              <ExternalLink size={14} className="shrink-0" /> <span className="truncate overflow-hidden whitespace-nowrap">Open web UI — {launchUrl}</span>
             </a>
           )}
           <div className="grid grid-cols-2 gap-3">

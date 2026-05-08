@@ -92,7 +92,7 @@ export const useAuthStore = create<AuthState>((set) => ({
     if (verRes.error) throw new Error((verRes.error.value as { error?: string })?.error ?? "Authentication failed");
     const { username } = verRes.data as { username: string };
 
-    set({ view: "app", username });
+    set({ view: "app", username, hasPasskey: true });
     return username;
   },
 }));

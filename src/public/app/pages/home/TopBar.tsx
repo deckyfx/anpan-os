@@ -53,8 +53,13 @@ export function TopBar({ username, version, hasPasskey, onLogout, onNavigate, on
     if (confirm !== action) { setConfirm(action); return; }
     setConfirm(null);
     setOpen(false);
-    if (action === "restart")  await api.api.system.restart.post();
-    if (action === "shutdown") await api.api.system.shutdown.post();
+    try {
+      if (action === "restart")  await api.api.system.restart.post();
+      if (action === "shutdown") await api.api.system.shutdown.post();
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      window.alert(`Failed to ${action}: ${message}`);
+    }
   };
 
   // Close on outside click
@@ -189,7 +194,15 @@ export function TopBar({ username, version, hasPasskey, onLogout, onNavigate, on
               <button
                 onClick={async () => {
                   setPkLoading(true);
-                  try { await onAddPasskey(); } finally { setPkLoading(false); setOpen(false); }
+                  try {
+                    await onAddPasskey();
+                    setOpen(false);
+                  } catch (e) {
+                    const message = e instanceof Error ? e.message : String(e);
+                    window.alert(`Failed to add passkey: ${message}`);
+                  } finally {
+                    setPkLoading(false);
+                  }
                 }}
                 disabled={pkLoading}
                 className="w-full flex items-center gap-3 px-3 py-2 text-sm text-amber-400 hover:text-amber-300 hover:bg-amber-500/10 transition-colors text-left disabled:opacity-50"

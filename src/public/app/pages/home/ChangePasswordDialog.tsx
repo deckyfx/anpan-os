@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useRef } from "react";
 import { Dialog } from "../../components/Dialog";
 import { api } from "../../lib/api";
 import { useToastStore } from "../../stores/toastStore";
@@ -17,10 +17,13 @@ function ChangePasswordDialogInner({ onClose }: { onClose: () => void }) {
   const [confirm, setConfirm]   = useState("");
   const [busy,    setBusy]      = useState(false);
   const [error,   setError]     = useState("");
+  const savingRef = useRef(false);
 
   const handleSave = async () => {
+    if (savingRef.current) return;
+    savingRef.current = true;
     setError("");
-    if (next !== confirm) { setError("Passwords do not match"); return; }
+    if (next !== confirm) { setError("Passwords do not match"); savingRef.current = false; return; }
     setBusy(true);
     try {
       const { error: err } = await api.api.auth.password.put({
@@ -37,6 +40,7 @@ function ChangePasswordDialogInner({ onClose }: { onClose: () => void }) {
       setError(e instanceof Error ? e.message : "Unexpected error");
     } finally {
       setBusy(false);
+      savingRef.current = false;
     }
   };
 
@@ -46,7 +50,7 @@ function ChangePasswordDialogInner({ onClose }: { onClose: () => void }) {
         Cancel
       </button>
       <button
-        onClick={handleSave}
+        onClick={() => { if (!savingRef.current) void handleSave(); }}
         disabled={busy}
         className="px-4 py-2 text-sm bg-amber-500 hover:bg-amber-400 text-black font-semibold rounded-lg transition-colors disabled:opacity-50"
       >
@@ -69,7 +73,7 @@ function ChangePasswordDialogInner({ onClose }: { onClose: () => void }) {
               type="password"
               value={value}
               onChange={(e) => set(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && !busy && void handleSave()}
+              onKeyDown={(e) => e.key === "Enter" && !busy && !savingRef.current && void handleSave()}
               className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-amber-500"
             />
           </div>

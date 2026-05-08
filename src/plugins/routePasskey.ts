@@ -170,7 +170,7 @@ export function passkeyPlugin(jwtSecret: string) {
         const dbUser = await UserStore.findById(passkey.userId);
         if (!dbUser) { set.status = 500; return { error: "User not found" }; }
 
-        const token = await jwtCtx.sign({ sub: String(dbUser.id), username: dbUser.username });
+        const token = await jwtCtx.sign({ sub: String(dbUser.id), username: dbUser.username, tokenVersion: dbUser.tokenVersion ?? 0 });
         setSession(anpan_session as Parameters<typeof setSession>[0], token);
 
         return { ok: true, username: dbUser.username };
@@ -258,10 +258,15 @@ export function passkeyPlugin(jwtSecret: string) {
           return { error: "Registration not verified" };
         }
 
+        if (!entry.userId) {
+          set.status = 400;
+          return { error: "Invalid registration state — userId missing" };
+        }
+
         const { credential } = verification.registrationInfo;
 
         await PasskeyStore.create({
-          userId:       entry.userId!,
+          userId:       entry.userId,
           credentialId: credential.id,
           publicKey:    Buffer.from(credential.publicKey).toString("base64url"),
           counter:      credential.counter,

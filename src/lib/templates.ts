@@ -167,7 +167,7 @@ export const STACK_TEMPLATES: StackTemplate[] = [
     icon:        "https://uptime.kuma.pet/img/icon.svg",
     tagline:     "Self-hosted monitoring dashboard",
     category:    "Monitoring",
-    defaultPort: "3001",
+    defaultPort: "3002",
     scheme:      "http",
     composeYaml: `services:
   uptime-kuma:
@@ -175,7 +175,7 @@ export const STACK_TEMPLATES: StackTemplate[] = [
     container_name: uptime-kuma
     restart: unless-stopped
     ports:
-      - "3001:3001"
+      - "3002:3001"
     volumes:
       - ./data:/app/data
 `,

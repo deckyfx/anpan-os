@@ -138,7 +138,7 @@ function PullUpdateDialogInner({ stack, onClose, onUpdated }: {
 
         {phaseLabel && (
           <div className="flex items-center gap-2 text-sm text-gray-300">
-            <Loader2 size={14} className="animate-spin text-sky-400 shrink-0" />
+            {phase !== "done" && <Loader2 size={14} className="animate-spin text-sky-400 shrink-0" />}
             {phaseLabel}
           </div>
         )}

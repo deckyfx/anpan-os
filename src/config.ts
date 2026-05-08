@@ -128,7 +128,7 @@ class Config {
   /**
    * Origins permitted for WebAuthn/passkey operations.
    * Empty array = accept any origin (open for private networks).
-   * Defaults to ["https://anpan.home.lan"] from the template config.
+   * Defaults to [] (accept any origin).
    */
   get passkeyAllowedOrigins(): string[] {
     return this.data.auth.passkey_allowed_origins ?? [];

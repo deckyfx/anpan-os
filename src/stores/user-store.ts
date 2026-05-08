@@ -34,9 +34,12 @@ export class UserStore {
     return Bun.password.verify(password, user.passwordHash);
   }
 
-  /** Update the password hash for an existing user. */
+  /** Update the password hash for an existing user and increment token version to invalidate existing JWTs. */
   static async updatePassword(id: number, passwordHash: string): Promise<void> {
-    await db.update(users).set({ passwordHash }).where(eq(users.id, id));
+    const user = await UserStore.findById(id);
+    if (!user) throw new Error("User not found");
+    const newTokenVersion = (user.tokenVersion ?? 0) + 1;
+    await db.update(users).set({ passwordHash, tokenVersion: newTokenVersion }).where(eq(users.id, id));
   }
 
   /** Wipe all users — used by the --reset-user CLI command. */

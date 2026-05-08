@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Loader2 } from "lucide-react";
 import { api } from "../../lib/api";
 
@@ -20,7 +20,7 @@ export function TemplateBrowser({ onSelect }: {
   const [fetchError, setFetchError] = useState("");
 
   // Load template list on first render
-  useState(() => {
+  useEffect(() => {
     void (async () => {
       try {
         const { data, error } = await api.api.compose.templates.get();
@@ -33,7 +33,7 @@ export function TemplateBrowser({ onSelect }: {
         setFetchError(e instanceof Error ? e.message : "Failed to load templates");
       }
     })();
-  });
+  }, []);
 
   const handleSelect = async (tpl: TemplateSummary) => {
     setLoadingId(tpl.id);
@@ -93,10 +93,14 @@ export function TemplateBrowser({ onSelect }: {
                   onError={(e) => {
                     const el = e.target as HTMLImageElement;
                     el.style.display = "none";
-                    el.nextElementSibling?.classList.remove("hidden");
+                    const sibling = el.nextElementSibling as HTMLElement | null;
+                    if (sibling) {
+                      sibling.classList.remove("hidden");
+                      sibling.classList.add("flex");
+                    }
                   }}
                 />
-                <span className="hidden w-8 h-8 rounded-lg bg-gray-700 border border-gray-600 flex items-center justify-center text-sm font-bold text-gray-300 shrink-0">
+                <span className="hidden w-8 h-8 rounded-lg bg-gray-700 border border-gray-600 items-center justify-center text-sm font-bold text-gray-300 shrink-0">
                   {tpl.name.charAt(0)}
                 </span>
                 <div className="min-w-0">

@@ -1,19 +1,24 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { AuthCard } from "../components/AuthCard";
 import { useAuthStore } from "../stores/authStore";
 import { browserSupportsWebAuthn } from "@simplewebauthn/browser";
 
 export function PasskeySetupPage() {
   const { registerPasskey, skipPasskeySetup } = useAuthStore();
-
-  // Skip silently if browser/context doesn't support WebAuthn.
-  if (!browserSupportsWebAuthn()) {
-    skipPasskeySetup();
-    return null;
-  }
   const [loading, setLoading] = useState(false);
   const [error, setError]     = useState("");
   const [done, setDone]       = useState(false);
+
+  // Skip silently if browser/context doesn't support WebAuthn.
+  useEffect(() => {
+    if (!browserSupportsWebAuthn()) {
+      skipPasskeySetup();
+    }
+  }, [skipPasskeySetup]);
+
+  if (!browserSupportsWebAuthn()) {
+    return null;
+  }
 
   async function handleRegister() {
     setError("");

@@ -79,6 +79,7 @@ export function authPlugin(jwtSecret: string) {
         const token = await jwtCtx.sign({
           sub: String(user.id),
           username: user.username,
+          tokenVersion: user.tokenVersion ?? 0,
         });
         setSession(anpan_session, token);
         return { ok: true, username: user.username };
@@ -114,6 +115,7 @@ export function authPlugin(jwtSecret: string) {
         const token = await jwtCtx.sign({
           sub: String(user.id),
           username: user.username,
+          tokenVersion: user.tokenVersion ?? 0,
         });
         setSession(anpan_session, token);
         return { ok: true, username: user.username };
