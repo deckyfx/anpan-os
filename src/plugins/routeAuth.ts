@@ -142,7 +142,8 @@ export function authPlugin(jwtSecret: string) {
 
         const userId = parseInt(String(payload.sub), 10);
         const user   = await UserStore.findById(userId);
-        if (!user)   { set.status = 401; return { error: "User not found" }; }
+        if (!user)                                           { set.status = 401; return { error: "User not found" }; }
+        if (payload.tokenVersion !== user.tokenVersion)     { set.status = 401; return { error: "Session expired" }; }
 
         const pErr = validatePassword(body.newPassword);
         if (pErr)   { set.status = 422; return { error: pErr }; }
