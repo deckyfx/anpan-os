@@ -78,8 +78,14 @@ export function TopBar({ username, version, hasPasskey, onLogout, onNavigate, on
 
   const handleLogout = async () => {
     setOpen(false);
-    await api.api.auth.logout.post();
-    onLogout();
+    try {
+      await api.api.auth.logout.post();
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      useToastStore.getState().push(`Logout failed: ${message}`, "error");
+    } finally {
+      onLogout();
+    }
   };
 
   const navigate = (path: string) => {
@@ -91,10 +97,12 @@ export function TopBar({ username, version, hasPasskey, onLogout, onNavigate, on
     }
   };
 
-  // Hide the item for the current page
-  const visibleItems = MENU_ITEMS.filter(item =>
-    item.path === "/" ? currentPath !== "/" : !currentPath.startsWith(item.path)
-  );
+  // Hide the item for the current page (boundary-aware: "/files" must not match "/filesarchive")
+  const isActive = (itemPath: string) =>
+    itemPath === "/"
+      ? currentPath === "/"
+      : currentPath === itemPath || currentPath.startsWith(itemPath + "/");
+  const visibleItems = MENU_ITEMS.filter(item => !isActive(item.path));
 
   // Group items by section
   const sections = visibleItems.reduce<Record<string, NavItem[]>>((acc, item) => {
@@ -121,6 +129,9 @@ export function TopBar({ username, version, hasPasskey, onLogout, onNavigate, on
       <button
         ref={btnRef}
         onClick={toggle}
+        aria-haspopup="true"
+        aria-expanded={open}
+        aria-label="Menu"
         className={`flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-lg transition-colors ${
           open
             ? "bg-gray-800 text-white"
@@ -135,6 +146,8 @@ export function TopBar({ username, version, hasPasskey, onLogout, onNavigate, on
       {open && (
         <div
           ref={dropRef}
+          role="menu"
+          aria-label="Main menu"
           style={{ left: pos.left, top: pos.top }}
           className="fixed w-52 bg-gray-900 border border-gray-700 rounded-xl shadow-2xl py-2 overflow-hidden"
         >
@@ -145,6 +158,7 @@ export function TopBar({ username, version, hasPasskey, onLogout, onNavigate, on
               {items.map(item => (
                 <button
                   key={item.path}
+                  role="menuitem"
                   onClick={() => navigate(item.path)}
                   className="w-full flex items-center gap-3 px-3 py-2 text-sm text-gray-300 hover:text-white hover:bg-gray-800 transition-colors text-left"
                 >

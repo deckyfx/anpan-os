@@ -155,6 +155,19 @@ export function authPlugin(jwtSecret: string) {
 
         const hash = await Bun.password.hash(body.newPassword);
         await UserStore.updatePassword(user.id, hash);
+
+        // Re-fetch to get the incremented tokenVersion, then issue a fresh JWT
+        // so the browser immediately holds a valid session.
+        const updated = await UserStore.findById(user.id);
+        if (updated) {
+          const newToken = await jwtCtx.sign({
+            sub: String(updated.id),
+            username: updated.username,
+            tokenVersion: updated.tokenVersion ?? 0,
+          });
+          setSession(anpan_session, newToken);
+        }
+
         return { ok: true };
       },
       {
