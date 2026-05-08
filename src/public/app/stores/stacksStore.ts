@@ -1,19 +1,17 @@
 import { create } from "zustand";
 import { api } from "../lib/api";
 import type { Stack, SystemStats, SortMode, StackAction } from "../pages/home/types";
+import { useToastStore } from "./toastStore";
 
 interface StacksState {
-  // ── Data ──────────────────────────────────────────────────────────────────
   stacks:  Stack[];
   stats:   SystemStats | null;
   version: string;
 
-  // ── Sort / drag ───────────────────────────────────────────────────────────
   sortMode:   SortMode;
   dragSrcIdx: number | null;
   dragOverIdx: number | null;
 
-  // ── Dialog open targets ────────────────────────────────────────────────────
   newStackOpen:    boolean;
   detailStack:     Stack | null;
   containersStack: Stack | null;
@@ -22,14 +20,16 @@ interface StacksState {
   logsFor:         Stack | null;
   logText:         string;
   logsLoading:     boolean;
+  editStack:         Stack | null;
+  pullStack:         Stack | null;
+  installLogStack:   Stack | null;
+  installLogText:    string;
+  installLogLoading: boolean;
 
-  // ── Busy ──────────────────────────────────────────────────────────────────
   actionBusy: string | null;
 
-  // ── Init (prevents double-interval) ──────────────────────────────────────
   initialized: boolean;
 
-  // ── Actions ───────────────────────────────────────────────────────────────
   initialize:      () => void;
   loadStacks:      () => Promise<void>;
   loadStats:       () => Promise<void>;
@@ -41,6 +41,8 @@ interface StacksState {
   setContainersStack: (stack: Stack | null) => void;
   setNoteStack:    (stack: Stack | null) => void;
   setDeleteStack:  (stack: Stack | null) => void;
+  setEditStack:    (stack: Stack | null) => void;
+  setPullStack:    (stack: Stack | null) => void;
   stackAction:     (stack: Stack, action: StackAction) => Promise<void>;
   handleDrop:      (dropIdx: number, displayedStacks: Stack[]) => Promise<void>;
 }
@@ -62,6 +64,11 @@ export const useStacksStore = create<StacksState>((set, get) => ({
   logsFor:      null,
   logText:      "",
   logsLoading:  false,
+  editStack:         null,
+  pullStack:         null,
+  installLogStack:   null,
+  installLogText:    "",
+  installLogLoading: false,
   actionBusy:   null,
   initialized:  false,
 
@@ -103,6 +110,8 @@ export const useStacksStore = create<StacksState>((set, get) => ({
   setContainersStack: (containersStack) => set({ containersStack }),
   setNoteStack:    (noteStack) => set({ noteStack }),
   setDeleteStack:  (deleteStack) => set({ deleteStack }),
+  setEditStack:    (editStack) => set({ editStack }),
+  setPullStack:    (pullStack) => set({ pullStack }),
 
   stackAction: async (stack, action) => {
     if (action === "logs") {
@@ -122,6 +131,21 @@ export const useStacksStore = create<StacksState>((set, get) => ({
     if (action === "detail")           { set({ detailStack: stack });     return; }
     if (action === "containers")       { set({ containersStack: stack }); return; }
     if (action === "delete")           { set({ deleteStack: stack });     return; }
+    if (action === "edit-compose")     { set({ editStack: stack });       return; }
+    if (action === "pull-update")      { set({ pullStack: stack });       return; }
+
+    if (action === "view-install-log") {
+      set({ installLogStack: stack, installLogText: "", installLogLoading: true });
+      try {
+        const { data } = await api.api.compose.stacks({ name: stack.name })["install-log"].get();
+        const d = data as { log?: string; error?: string } | null;
+        set({ installLogText: d?.log ?? d?.error ?? "(empty)" });
+      } finally {
+        set({ installLogLoading: false });
+      }
+      return;
+    }
+
     if (action === "download-compose") {
       const { data, error } = await api.api.compose.stacks({ name: stack.name }).file.get();
       if (error) {
@@ -143,7 +167,10 @@ export const useStacksStore = create<StacksState>((set, get) => ({
       set({ actionBusy: stack.name });
       try {
         const { error } = await api.api.casaos.import({ id: stack.name }).post();
-        if (!error) await get().loadStacks();
+        if (!error) {
+          await get().loadStacks();
+          useToastStore.getState().push("Imported from CasaOS", "success");
+        }
       } finally {
         set({ actionBusy: null });
       }
@@ -162,6 +189,13 @@ export const useStacksStore = create<StacksState>((set, get) => ({
         })
       );
       await get().loadStacks();
+      const label = action === "start" ? "started" : action === "stop" ? "stopped" : "restarted";
+      useToastStore.getState().push(`Stack ${label}`, "success");
+    } catch (err) {
+      useToastStore.getState().push(
+        err instanceof Error ? err.message : `Failed to ${action} stack`,
+        "error",
+      );
     } finally {
       set({ actionBusy: null });
     }

@@ -1,7 +1,8 @@
 import { useState } from "react";
+import { ExternalLink } from "lucide-react";
 import { Dialog } from "../../components/Dialog";
 import type { ComposeOrigin, Stack } from "./types";
-import { stackStateColor } from "./utils";
+import { buildLaunchUrl, stackStateColor } from "./utils";
 import { api } from "../../lib/api";
 
 const ORIGIN_LABEL: Record<NonNullable<ComposeOrigin>, { label: string; cls: string }> = {
@@ -49,6 +50,7 @@ function StackDetailDialogInner({ stack, onClose, onSaved }: {
   onSaved: () => void;
 }) {
   const m = stack.meta;
+  const launchUrl = buildLaunchUrl(stack);
   const [tab,       setTab]       = useState<DetailTab>("info");
   const [title,     setTitle]     = useState(m?.title     ?? "");
   const [icon,      setIcon]      = useState(m?.icon      ?? "");
@@ -129,6 +131,17 @@ function StackDetailDialogInner({ stack, onClose, onSaved }: {
       {/* ── Stack Info ─────────────────────────────────────────────── */}
       {tab === "info" && (
         <div className="space-y-3">
+          {launchUrl && (
+            <a
+              href={launchUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1.5 text-sm text-amber-400 hover:text-amber-300 hover:underline min-w-0"
+              title={launchUrl}
+            >
+              <ExternalLink size={14} className="shrink-0" /> <span className="truncate overflow-hidden whitespace-nowrap">Open web UI — {launchUrl}</span>
+            </a>
+          )}
           <div className="grid grid-cols-2 gap-3">
             <Field label="Title"   value={title}   onChange={setTitle}   placeholder={stack.name} />
             <Field label="Tagline" value={tagline} onChange={setTagline} placeholder="Short description" />

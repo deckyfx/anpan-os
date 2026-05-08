@@ -19,6 +19,11 @@ export class UserStore {
     return user;
   }
 
+  static async findById(id: number): Promise<User | null> {
+    const result = await db.select().from(users).where(eq(users.id, id)).limit(1);
+    return result[0] ?? null;
+  }
+
   static async findByUsername(username: string): Promise<User | null> {
     const result = await db.select().from(users).where(eq(users.username, username)).limit(1);
     return result[0] ?? null;
@@ -27,6 +32,14 @@ export class UserStore {
   /** Verify a plaintext password against the stored bcrypt hash. */
   static async verifyPassword(user: User, password: string): Promise<boolean> {
     return Bun.password.verify(password, user.passwordHash);
+  }
+
+  /** Update the password hash for an existing user and increment token version to invalidate existing JWTs. */
+  static async updatePassword(id: number, passwordHash: string): Promise<void> {
+    const user = await UserStore.findById(id);
+    if (!user) throw new Error("User not found");
+    const newTokenVersion = (user.tokenVersion ?? 0) + 1;
+    await db.update(users).set({ passwordHash, tokenVersion: newTokenVersion }).where(eq(users.id, id));
   }
 
   /** Wipe all users — used by the --reset-user CLI command. */

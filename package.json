@@ -21,6 +21,8 @@
     "@fontsource/inter": "^5.2.8",
     "@libsql/client": "^0.17.3",
     "@monaco-editor/react": "^4.7.0",
+    "@simplewebauthn/browser": "^13.3.0",
+    "@simplewebauthn/server": "^13.3.0",
     "drizzle-orm": "^0.45.2",
     "elysia": "^1.4.28",
     "lucide-react": "^1.14.0",

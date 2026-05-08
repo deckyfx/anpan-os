@@ -79,6 +79,7 @@ export function authPlugin(jwtSecret: string) {
         const token = await jwtCtx.sign({
           sub: String(user.id),
           username: user.username,
+          tokenVersion: user.tokenVersion ?? 0,
         });
         setSession(anpan_session, token);
         return { ok: true, username: user.username };
@@ -114,6 +115,7 @@ export function authPlugin(jwtSecret: string) {
         const token = await jwtCtx.sign({
           sub: String(user.id),
           username: user.username,
+          tokenVersion: user.tokenVersion ?? 0,
         });
         setSession(anpan_session, token);
         return { ok: true, username: user.username };
@@ -129,5 +131,50 @@ export function authPlugin(jwtSecret: string) {
     .post("/logout", ({ cookie: { anpan_session } }) => {
       anpan_session.remove();
       return { ok: true };
-    });
+    })
+
+    .put(
+      "/password",
+      async ({ body, jwt: jwtCtx, cookie: { anpan_session }, set }) => {
+        const token = anpan_session.value;
+        const payload = token ? await jwtCtx.verify(token) : null;
+        if (!payload) { set.status = 401; return { error: "Not authenticated" }; }
+
+        const userId = parseInt(String(payload.sub), 10);
+        const user   = await UserStore.findById(userId);
+        if (!user)                                           { set.status = 401; return { error: "User not found" }; }
+        if (payload.tokenVersion !== user.tokenVersion)     { set.status = 401; return { error: "Session expired" }; }
+
+        const pErr = validatePassword(body.newPassword);
+        if (pErr)   { set.status = 422; return { error: pErr }; }
+
+        if (!(await UserStore.verifyPassword(user, body.currentPassword))) {
+          set.status = 400;
+          return { error: "Current password is incorrect" };
+        }
+
+        const hash = await Bun.password.hash(body.newPassword);
+        await UserStore.updatePassword(user.id, hash);
+
+        // Re-fetch to get the incremented tokenVersion, then issue a fresh JWT
+        // so the browser immediately holds a valid session.
+        const updated = await UserStore.findById(user.id);
+        if (updated) {
+          const newToken = await jwtCtx.sign({
+            sub: String(updated.id),
+            username: updated.username,
+            tokenVersion: updated.tokenVersion ?? 0,
+          });
+          setSession(anpan_session, newToken);
+        }
+
+        return { ok: true };
+      },
+      {
+        body: t.Object({
+          currentPassword: t.String({ minLength: 1 }),
+          newPassword:     passwordField,
+        }),
+      },
+    );
 }

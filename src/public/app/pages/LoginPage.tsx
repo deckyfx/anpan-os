@@ -1,32 +1,48 @@
 import React, { useState } from "react";
-import { AuthCard } from "../components/AuthCard";
-import { Field } from "../components/Field";
+import { AuthCard }    from "../components/AuthCard";
+import { Field }       from "../components/Field";
 import { SubmitButton } from "../components/SubmitButton";
-import { ErrorMsg } from "../components/ErrorMsg";
-import { api } from "../lib/api";
+import { ErrorMsg }    from "../components/ErrorMsg";
+import { api }         from "../lib/api";
+import { useAuthStore } from "../stores/authStore";
+import { browserSupportsWebAuthn } from "@simplewebauthn/browser";
 
-export function LoginPage({ onSuccess }: { onSuccess: (username: string) => void }) {
+const webAuthnSupported = browserSupportsWebAuthn();
+
+export function LoginPage({ onSuccess }: { onSuccess: (username: string) => Promise<void> }) {
+  const { loginWithPasskey } = useAuthStore();
+
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError]       = useState("");
   const [loading, setLoading]   = useState(false);
+  const [pkLoading, setPkLoading] = useState(false);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError("");
     setLoading(true);
-
     try {
       const { data, error: err } = await api.api.auth.login.post({ username, password });
-      if (err) {
-        setError((err.value as { error?: string })?.error ?? "Login failed");
-      } else if (data) {
-        onSuccess(username);
-      }
+      if (err) setError((err.value as { error?: string })?.error ?? "Login failed");
+      else if (data) await onSuccess(username);
     } catch {
       setError("Network error — is the server running?");
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function handlePasskey() {
+    setError("");
+    setPkLoading(true);
+    try {
+      await loginWithPasskey();
+      // loginWithPasskey sets view to "app" in the store; onSuccess not needed.
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Passkey sign-in failed");
+    } finally {
+      setPkLoading(false);
     }
   }
 
@@ -38,6 +54,30 @@ export function LoginPage({ onSuccess }: { onSuccess: (username: string) => void
         <SubmitButton label="Sign in" loading={loading} />
         {error && <ErrorMsg message={error} />}
       </form>
+
+      {webAuthnSupported && (
+        <>
+          <div className="flex items-center gap-3 my-5">
+            <div className="flex-1 h-px bg-gray-800" />
+            <span className="text-xs text-gray-500">or</span>
+            <div className="flex-1 h-px bg-gray-800" />
+          </div>
+
+          <button
+            type="button"
+            onClick={handlePasskey}
+            disabled={pkLoading || loading}
+            className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg border border-gray-700 bg-gray-800 hover:bg-gray-700 text-sm text-gray-200 font-medium transition-colors disabled:opacity-50"
+          >
+            {pkLoading ? (
+              <span className="w-4 h-4 border-2 border-gray-400 border-t-transparent rounded-full animate-spin" />
+            ) : (
+              <span className="text-base">🔑</span>
+            )}
+            {pkLoading ? "Waiting for authenticator…" : "Sign in with passkey"}
+          </button>
+        </>
+      )}
     </AuthCard>
   );
 }

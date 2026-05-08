@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { create } from "zustand";
-import type { SystemStats } from "./types";
+import type { SystemStats, DiskMount } from "./types";
 import { toGB } from "./utils";
 
 // Single interval-driven store — shared across all ClockWidget mounts.
@@ -108,8 +108,55 @@ export function SystemWidget({ stats }: { stats: SystemStats | null }) {
           <div className={`h-full ${cpuColor} rounded-full transition-all duration-700`} style={{ width: `${stats.cpu}%` }} />
         </div>
       </div>
-      <StatBar label="RAM"  used={stats.ramUsed}  total={stats.ramTotal}  color="bg-blue-500" />
-      <StatBar label="Disk" used={stats.diskUsed} total={stats.diskTotal} color="bg-violet-500" />
+      <StatBar label="RAM" used={stats.ramUsed} total={stats.ramTotal} color="bg-blue-500" />
+    </div>
+  );
+}
+
+export function DiskWidget({ disks }: { disks: DiskMount[] | null }) {
+  if (!disks) {
+    return (
+      <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 text-xs text-gray-600 animate-pulse">
+        Loading…
+      </div>
+    );
+  }
+
+  if (disks.length === 0) {
+    return (
+      <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 text-xs text-gray-600">
+        No disks found
+      </div>
+    );
+  }
+
+  return (
+    <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 space-y-3">
+      <p className="text-[10px] font-semibold text-gray-600 uppercase tracking-widest">Disks</p>
+      {disks.map((d) => (
+        <div key={d.device}>
+          <div className="flex justify-between text-xs mb-1">
+            <span className="text-gray-500 truncate max-w-24" title={d.device}>{d.device.replace("/dev/", "")}</span>
+            <span className="text-gray-600 truncate max-w-20 text-right" title={d.mount}>{d.mount}</span>
+          </div>
+          <div className="flex justify-between text-xs mb-1.5">
+            <span className="text-gray-400 tabular-nums">{toGB(d.used)}</span>
+            <span className="text-gray-600 tabular-nums">/ {toGB(d.total)}</span>
+          </div>
+          <div className="h-1.5 bg-gray-800 rounded-full overflow-hidden">
+            <div
+              className={`h-full rounded-full transition-all duration-700 ${
+                d.total > 0 && d.used / d.total > 0.85
+                  ? "bg-red-500"
+                  : d.total > 0 && d.used / d.total > 0.65
+                  ? "bg-yellow-400"
+                  : "bg-violet-500"
+              }`}
+              style={{ width: `${d.total > 0 ? Math.min(100, Math.round((d.used / d.total) * 100)) : 0}%` }}
+            />
+          </div>
+        </div>
+      ))}
     </div>
   );
 }

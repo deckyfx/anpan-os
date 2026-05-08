@@ -39,12 +39,18 @@ export interface Stack {
   origin: ComposeOrigin;
 }
 
+export interface DiskMount {
+  device: string;
+  mount: string;
+  used: number;
+  total: number;
+}
+
 export interface SystemStats {
   cpu: number;
   ramUsed: number;
   ramTotal: number;
-  diskUsed: number;
-  diskTotal: number;
+  disks: DiskMount[];
 }
 
 export interface ContainerDetail {
@@ -91,6 +97,9 @@ export type StackAction =
   | "containers"
   | "download-compose"
   | "casaos-import"
-  | "delete";
+  | "delete"
+  | "edit-compose"
+  | "pull-update"
+  | "view-install-log";
 
 export type SortMode = "custom" | "name";

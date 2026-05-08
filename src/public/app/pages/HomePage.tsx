@@ -1,9 +1,11 @@
 import { useMemo, useState } from "react";
 import { useStacksStore }    from "../stores/stacksStore";
+import { useAuthStore }      from "../stores/authStore";
+import { useToastStore }     from "../stores/toastStore";
 
 import { TopBar }            from "./home/TopBar";
 import { BottomBar }         from "./home/BottomBar";
-import { ClockWidget, CalendarWidget, SystemWidget, NetworkWidget } from "./home/SideWidgets";
+import { ClockWidget, CalendarWidget, SystemWidget, DiskWidget, NetworkWidget } from "./home/SideWidgets";
 import { StackTile }         from "./home/StackTile";
 import { StackDetailDialog } from "./home/StackDetailDialog";
 import { ContainersDialog }  from "./home/ContainersDialog";
@@ -11,14 +13,19 @@ import { NoteDialog }        from "./home/NoteDialog";
 import { LogsDialog }        from "./home/LogsDialog";
 import { NewStackDialog }    from "./home/NewStackDialog";
 import { DeleteStackDialog } from "./home/DeleteStackDialog";
+import { EditStackDialog }   from "./home/EditStackDialog";
+import { PullUpdateDialog }  from "./home/PullUpdateDialog";
+import { ConfirmDialog }     from "../components/ConfirmDialog";
 
-import type { Stack } from "./home/types";
+import type { Stack, StackAction } from "./home/types";
 
 export function HomePage({ username, onLogout, onNavigate }: {
   username: string;
   onLogout: () => void;
   onNavigate: (path: string) => void;
 }) {
+  const { hasPasskey, registerPasskey } = useAuthStore();
+
   const {
     stacks, stats, version,
     sortMode, setSortMode,
@@ -29,6 +36,9 @@ export function HomePage({ username, onLogout, onNavigate }: {
     noteStack, setNoteStack,
     deleteStack, setDeleteStack,
     logsFor, logText, logsLoading,
+    editStack, setEditStack,
+    pullStack, setPullStack,
+    installLogStack, installLogText, installLogLoading,
     actionBusy,
     initialize, loadStacks, stackAction, handleDrop,
   } = useStacksStore();
@@ -37,6 +47,9 @@ export function HomePage({ username, onLogout, onNavigate }: {
   useState(() => { initialize(); });
 
   const [filter, setFilter] = useState("");
+  const [pendingAction, setPendingAction] = useState<
+    { action: "stop" | "restart"; stack: Stack } | null
+  >(null);
 
   // ── Sorted + filtered stacks ──────────────────────────────────────────────
 
@@ -62,15 +75,23 @@ export function HomePage({ username, onLogout, onNavigate }: {
   return (
     <div className="h-screen bg-gray-950 text-white flex flex-col overflow-hidden">
 
-      <TopBar username={username} version={version} onLogout={onLogout} />
+      <TopBar
+        username={username}
+        version={version}
+        hasPasskey={hasPasskey}
+        onLogout={onLogout}
+        onNavigate={onNavigate}
+        onAddPasskey={() => registerPasskey("This device")}
+      />
 
       <div className="flex-1 flex overflow-hidden">
 
         {/* Left panel */}
-        <aside className="w-60 border-r border-gray-800 p-4 flex flex-col gap-3 overflow-y-auto shrink-0">
+        <aside className="w-72 border-r border-gray-800 p-4 flex flex-col gap-3 overflow-y-auto shrink-0">
           <ClockWidget />
           <CalendarWidget />
           <SystemWidget stats={stats} />
+          <DiskWidget disks={stats?.disks ?? null} />
           <NetworkWidget />
         </aside>
 
@@ -152,7 +173,13 @@ export function HomePage({ username, onLogout, onNavigate }: {
                 key={s.name}
                 stack={s}
                 actionLoading={actionBusy === s.name}
-                onAction={(action) => void stackAction(s, action)}
+                onAction={(action: StackAction) => {
+                  if (action === "stop" || action === "restart") {
+                    setPendingAction({ action, stack: s });
+                  } else {
+                    void stackAction(s, action);
+                  }
+                }}
                 dragEnabled={sortMode === "custom"}
                 dragging={dragSrcIdx === i}
                 dragOver={dragOverIdx === i && dragSrcIdx !== i}
@@ -210,6 +237,43 @@ export function HomePage({ username, onLogout, onNavigate }: {
         open={deleteStack !== null}
         onClose={() => setDeleteStack(null)}
         onDeleted={() => { void loadStacks(); }}
+      />
+
+      <EditStackDialog
+        stack={editStack}
+        open={editStack !== null}
+        onClose={() => setEditStack(null)}
+        onSaved={() => { void loadStacks(); useToastStore.getState().push("Stack updated", "success"); }}
+      />
+
+      <PullUpdateDialog
+        stack={pullStack}
+        open={pullStack !== null}
+        onClose={() => setPullStack(null)}
+        onUpdated={() => { void loadStacks(); }}
+      />
+
+      <LogsDialog
+        open={installLogStack !== null}
+        stack={installLogStack}
+        logs={installLogText}
+        loading={installLogLoading}
+        onClose={() => useStacksStore.setState({ installLogStack: null })}
+      />
+
+      <ConfirmDialog
+        open={pendingAction !== null}
+        title={pendingAction?.action === "stop" ? "Stop stack?" : "Restart stack?"}
+        message={`This will ${pendingAction?.action ?? ""} all containers in "${
+          pendingAction?.stack.meta?.title ?? pendingAction?.stack.name ?? ""
+        }". Continue?`}
+        confirmLabel={pendingAction?.action === "stop" ? "Stop" : "Restart"}
+        danger={pendingAction?.action === "stop"}
+        onConfirm={() => {
+          if (pendingAction) void stackAction(pendingAction.stack, pendingAction.action);
+          setPendingAction(null);
+        }}
+        onCancel={() => setPendingAction(null)}
       />
     </div>
   );

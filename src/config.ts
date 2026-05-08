@@ -18,6 +18,10 @@ bind = "local"   # "local" = 127.0.0.1 only | "public" = 0.0.0.0 (all interfaces
 # username = "admin"
 # password_hash = ""   # bcrypt hash — set via the setup endpoint
 # jwt_secret   = ""   # randomly generated on first run
+# Allowed origins for passkey authentication.
+# Add every URL you use to access anpan-os (protocol + hostname + optional port).
+# Leave empty to accept any origin (suitable for local / private networks).
+passkey_allowed_origins = []
 
 [compose]
 # folder = "/var/lib/anpan-os/composes"   # defaults to $HOME/.anpanos/composes
@@ -40,6 +44,7 @@ interface AuthConfig {
   username?: string;
   password_hash?: string;
   jwt_secret?: string;
+  passkey_allowed_origins?: string[];
 }
 
 interface ComposeConfig {
@@ -118,6 +123,15 @@ class Config {
 
   get auth(): Readonly<AuthConfig> {
     return this.data.auth;
+  }
+
+  /**
+   * Origins permitted for WebAuthn/passkey operations.
+   * Empty array = accept any origin (open for private networks).
+   * Defaults to [] (accept any origin).
+   */
+  get passkeyAllowedOrigins(): string[] {
+    return this.data.auth.passkey_allowed_origins ?? [];
   }
 
   /** Compose stacks folder — defaults to RUNTIME_CONFIG_DIR/composes. */

@@ -5,6 +5,7 @@ export const users = sqliteTable("users", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   username: text("username").notNull().unique(),
   passwordHash: text("password_hash").notNull(),
+  tokenVersion: integer("token_version").notNull().default(0),
   createdAt: integer("created_at", { mode: "timestamp" })
     .notNull()
     .default(sql`(unixepoch())`),
@@ -43,8 +44,28 @@ export const stacks = sqliteTable("stacks", {
     .default(sql`(unixepoch())`),
 });
 
-export type User = typeof users.$inferSelect;
+/**
+ * WebAuthn / Passkey credentials bound to a user.
+ * rpId is stored per-credential so registrations from different hostnames
+ * (e.g. anpan.home.lan vs 192.168.1.x) coexist without conflict.
+ */
+export const passkeys = sqliteTable("passkeys", {
+  id:           integer("id").primaryKey({ autoIncrement: true }),
+  userId:       integer("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  credentialId: text("credential_id").notNull().unique(),
+  publicKey:    text("public_key").notNull(),
+  counter:      integer("counter").notNull().default(0),
+  rpId:         text("rp_id").notNull(),
+  deviceName:   text("device_name"),
+  createdAt:    integer("created_at", { mode: "timestamp" }).notNull().default(sql`(unixepoch())`),
+  lastUsedAt:   integer("last_used_at", { mode: "timestamp" }),
+});
+
+export type User    = typeof users.$inferSelect;
 export type NewUser = typeof users.$inferInsert;
 
-export type Stack = typeof stacks.$inferSelect;
+export type Stack    = typeof stacks.$inferSelect;
 export type NewStack = typeof stacks.$inferInsert;
+
+export type Passkey    = typeof passkeys.$inferSelect;
+export type NewPasskey = typeof passkeys.$inferInsert;

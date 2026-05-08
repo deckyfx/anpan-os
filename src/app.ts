@@ -1,12 +1,13 @@
 import { Elysia } from "elysia";
-import { authPlugin }   from "./plugins/routeAuth";
-import { apiPlugin }    from "./plugins/routeApi";
-import { dockerPlugin } from "./plugins/routeDocker";
+import { authPlugin }    from "./plugins/routeAuth";
+import { passkeyPlugin } from "./plugins/routePasskey";
+import { apiPlugin }     from "./plugins/routeApi";
+import { dockerPlugin }  from "./plugins/routeDocker";
 import { composePlugin } from "./plugins/routeCompose";
-import { systemPlugin } from "./plugins/routeSystem";
-import { filesPlugin }  from "./plugins/routeFiles";
-import { sambaPlugin }  from "./plugins/routeSamba";
-import { casaosPlugin } from "./plugins/routeCasaos";
+import { systemPlugin }  from "./plugins/routeSystem";
+import { filesPlugin }   from "./plugins/routeFiles";
+import { sambaPlugin }   from "./plugins/routeSamba";
+import { casaosPlugin }  from "./plugins/routeCasaos";
 
 /** Core API app — no frontend routes, no listen. Used by server.ts and unit tests. */
 export function createApp(jwtSecret: string) {
@@ -18,6 +19,7 @@ export function createApp(jwtSecret: string) {
       }
     })
     .use(authPlugin(jwtSecret))
+    .use(passkeyPlugin(jwtSecret))
     .use(apiPlugin(jwtSecret))
     .use(dockerPlugin(jwtSecret))
     .use(composePlugin(jwtSecret))

@@ -1,4 +1,4 @@
-export type View = "loading" | "setup" | "login" | "app";
+export type View = "loading" | "setup" | "login" | "app" | "passkeySetup";
 
 export interface AuthStatus {
   initialized: boolean;

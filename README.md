@@ -6,6 +6,18 @@ Manage your Docker Compose stacks, browse files, and monitor system resources â€
 
 ---
 
+## Screenshots
+
+| Dashboard | File Manager |
+|-----------|-------------|
+| ![Dashboard](screenshoots/showcase01.png) | ![File Manager](screenshoots/showcase02.png) |
+
+| New Stack | Stack Actions |
+|-----------|--------------|
+| ![New Stack](screenshoots/showcase03.png) | ![Stack Actions](screenshoots/showcase04.png) |
+
+---
+
 ## Features
 
 - **Docker Compose dashboard** â€” install, start, stop, restart, and delete stacks; stream live install logs

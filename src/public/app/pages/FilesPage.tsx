@@ -1,6 +1,9 @@
 import { useRef, useState } from "react";
-import { useFileStore } from "../stores/fileStore";
-import { ChevronLeft, ChevronRight, FolderUp, House, LayoutDashboard, LayoutGrid, List,
+import { useFileStore }  from "../stores/fileStore";
+import { useAuthStore }  from "../stores/authStore";
+import { useStacksStore } from "../stores/stacksStore";
+import { TopBar }        from "./home/TopBar";
+import { ChevronLeft, ChevronRight, FolderUp, House, LayoutGrid, List,
          FolderOpen, Pencil, Download, Archive, PackageOpen, ShieldCheck, Info,
          Trash2, FolderPlus, Upload } from "lucide-react";
 import { ConfirmDialog } from "../components/ConfirmDialog";
@@ -49,6 +52,9 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
     initialize,
   } = useFileStore();
 
+  const { username, logout, hasPasskey, registerPasskey } = useAuthStore();
+  const version = useStacksStore(s => s.version);
+
   // Lazy-init: load home dir + shares once, no useEffect needed.
   useState(() => { initialize(); });
 
@@ -90,15 +96,15 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
   return (
     <div className="min-h-screen bg-gray-950 text-white flex flex-col">
 
-      {/* Top bar */}
-      <header className="border-b border-gray-800 px-5 py-3 flex items-center gap-3">
-        <button onClick={() => onNavigate("/")} className="flex items-center gap-1.5 text-gray-400 hover:text-white transition-colors text-sm">
-          <LayoutDashboard size={14} />
-          Dashboard
-        </button>
-        <span className="text-gray-700">|</span>
-        <span className="text-sm font-medium text-gray-300">File Manager</span>
-      </header>
+      <TopBar
+        username={username}
+        version={version}
+        hasPasskey={hasPasskey}
+        onLogout={logout}
+        onNavigate={onNavigate}
+        onAddPasskey={() => registerPasskey("This device")}
+        currentPath="/files"
+      />
 
       {/* Toolbar */}
       <div className="px-5 py-3 flex items-center gap-2 border-b border-gray-900">
