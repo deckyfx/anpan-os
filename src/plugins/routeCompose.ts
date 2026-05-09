@@ -15,35 +15,47 @@ type LogWriter = { write(s: string): Promise<void>; flush(): Promise<void> };
 
 interface SSEMsg { log?: string; ok?: boolean; error?: string }
 
+const MAX_BUFFER = 256;
+
 /** Merges parallel readable streams into a single async iterable of SSE messages. */
 class StreamAggregator {
   private readonly buffer: SSEMsg[] = [];
-  private resolver: (() => void) | null = null;
+  private consumerResolver: (() => void) | null = null;
+  private readonly producerQueue: Array<() => void> = [];
   private done = false;
 
-  push(data: SSEMsg) {
+  async push(data: SSEMsg): Promise<void> {
+    if (this.buffer.length >= MAX_BUFFER) {
+      await new Promise<void>(r => { this.producerQueue.push(r); });
+    }
     this.buffer.push(data);
-    this.resolver?.();
+    this.consumerResolver?.();
+    this.consumerResolver = null;
   }
 
   end() {
     this.done = true;
-    this.resolver?.();
+    this.consumerResolver?.();
+    this.consumerResolver = null;
+    for (const resolve of this.producerQueue) resolve();
+    this.producerQueue.length = 0;
   }
 
   async *[Symbol.asyncIterator](): AsyncGenerator<SSEMsg> {
     while (true) {
-      while (this.buffer.length > 0) yield this.buffer.shift()!;
+      while (this.buffer.length > 0) {
+        yield this.buffer.shift()!;
+        this.producerQueue.shift()?.();
+      }
       if (this.done) break;
-      await new Promise<void>(r => { this.resolver = r; });
-      this.resolver = null;
+      await new Promise<void>(r => { this.consumerResolver = r; });
     }
   }
 }
 
 async function drainStream(
   readable: ReadableStream<Uint8Array>,
-  push: (data: SSEMsg) => void,
+  push: (data: SSEMsg) => void | Promise<void>,
   logWriter?: LogWriter,
 ): Promise<void> {
   const reader = readable.getReader();
@@ -58,13 +70,13 @@ async function drainStream(
       buf = lines.pop() ?? "";
       for (const line of lines) {
         if (line.trim()) {
-          push({ log: line });
+          await push({ log: line });
           if (logWriter) await logWriter.write(line + "\n");
         }
       }
     }
     if (buf.trim()) {
-      push({ log: buf });
+      await push({ log: buf });
       if (logWriter) await logWriter.write(buf + "\n");
     }
   } finally {
@@ -140,19 +152,24 @@ export function composePlugin(jwtSecret: string) {
         const agg = new StreamAggregator();
 
         void (async () => {
-          const [, , exitCode] = await Promise.all([
-            drainStream(proc.stdout, data => agg.push(data), logWriter),
-            drainStream(proc.stderr, data => agg.push(data), logWriter),
-            proc.exited,
-          ]);
-          await logWriter.flush();
-          if (exitCode === 0) {
-            try { await StackStore.upsert({ id: name, managed: true }); } catch { /* non-critical */ }
-            agg.push({ ok: true });
-          } else {
-            agg.push({ error: `docker compose exited with code ${exitCode}` });
+          try {
+            const [, , exitCode] = await Promise.all([
+              drainStream(proc.stdout, data => agg.push(data), logWriter),
+              drainStream(proc.stderr, data => agg.push(data), logWriter),
+              proc.exited,
+            ]);
+            if (exitCode === 0) {
+              try { await StackStore.upsert({ id: name, managed: true }); } catch { /* non-critical */ }
+              await agg.push({ ok: true });
+            } else {
+              await agg.push({ error: `docker compose exited with code ${exitCode}` });
+            }
+          } catch (err) {
+            await agg.push({ error: err instanceof Error ? err.message : String(err) });
+          } finally {
+            await logWriter.flush();
+            agg.end();
           }
-          agg.end();
         })();
 
         for await (const msg of agg) yield sse({ data: msg });
@@ -202,13 +219,18 @@ export function composePlugin(jwtSecret: string) {
         const agg = new StreamAggregator();
 
         void (async () => {
-          const [, , exitCode] = await Promise.all([
-            drainStream(proc.stdout, data => agg.push(data)),
-            drainStream(proc.stderr, data => agg.push(data)),
-            proc.exited,
-          ]);
-          agg.push(exitCode === 0 ? { ok: true } : { error: `docker compose exited with code ${exitCode}` });
-          agg.end();
+          try {
+            const [, , exitCode] = await Promise.all([
+              drainStream(proc.stdout, data => agg.push(data)),
+              drainStream(proc.stderr, data => agg.push(data)),
+              proc.exited,
+            ]);
+            await agg.push(exitCode === 0 ? { ok: true } : { error: `docker compose exited with code ${exitCode}` });
+          } catch (err) {
+            await agg.push({ error: err instanceof Error ? err.message : String(err) });
+          } finally {
+            agg.end();
+          }
         })();
 
         for await (const msg of agg) yield sse({ data: msg });
@@ -246,38 +268,40 @@ export function composePlugin(jwtSecret: string) {
       const agg = new StreamAggregator();
 
       void (async () => {
-        // Phase 1: pull images
-        const pullProc = Bun.spawn(
-          [bins.docker, "compose", "pull", "--progress", "plain"],
-          { cwd: dir, stdout: "pipe", stderr: "pipe" },
-        );
-        const [, , pullExit] = await Promise.all([
-          drainStream(pullProc.stdout, data => agg.push(data), logWriter),
-          drainStream(pullProc.stderr, data => agg.push(data), logWriter),
-          pullProc.exited,
-        ]);
+        try {
+          // Phase 1: pull images
+          const pullProc = Bun.spawn(
+            [bins.docker, "compose", "pull", "--progress", "plain"],
+            { cwd: dir, stdout: "pipe", stderr: "pipe" },
+          );
+          const [, , pullExit] = await Promise.all([
+            drainStream(pullProc.stdout, data => agg.push(data), logWriter),
+            drainStream(pullProc.stderr, data => agg.push(data), logWriter),
+            pullProc.exited,
+          ]);
 
-        if (pullExit !== 0) {
+          if (pullExit !== 0) {
+            await agg.push({ error: `docker compose pull failed with code ${pullExit}` });
+            return;
+          }
+
+          // Phase 2: re-deploy with updated images
+          const upProc = Bun.spawn(
+            [bins.docker, "compose", "up", "-d"],
+            { cwd: dir, stdout: "pipe", stderr: "pipe" },
+          );
+          const [, , upExit] = await Promise.all([
+            drainStream(upProc.stdout, data => agg.push(data), logWriter),
+            drainStream(upProc.stderr, data => agg.push(data), logWriter),
+            upProc.exited,
+          ]);
+          await agg.push(upExit === 0 ? { ok: true } : { error: `docker compose up failed with code ${upExit}` });
+        } catch (err) {
+          await agg.push({ error: err instanceof Error ? err.message : String(err) });
+        } finally {
           await logWriter.flush();
-          agg.push({ error: `docker compose pull failed with code ${pullExit}` });
           agg.end();
-          return;
         }
-
-        // Phase 2: re-deploy with updated images
-        const upProc = Bun.spawn(
-          [bins.docker, "compose", "up", "-d"],
-          { cwd: dir, stdout: "pipe", stderr: "pipe" },
-        );
-        const [, , upExit] = await Promise.all([
-          drainStream(upProc.stdout, data => agg.push(data), logWriter),
-          drainStream(upProc.stderr, data => agg.push(data), logWriter),
-          upProc.exited,
-        ]);
-
-        await logWriter.flush();
-        agg.push(upExit === 0 ? { ok: true } : { error: `docker compose up failed with code ${upExit}` });
-        agg.end();
       })();
 
       for await (const msg of agg) yield sse({ data: msg });
