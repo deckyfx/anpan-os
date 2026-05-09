@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useRef, useEffect } from "react";
 import { useFileStore }  from "../stores/fileStore";
 import { useAuthStore }  from "../stores/authStore";
 import { useStacksStore } from "../stores/stacksStore";
@@ -53,8 +53,7 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
   const { username, logout, hasPasskey, registerPasskey } = useAuthStore();
   const version = useStacksStore(s => s.version);
 
-  // Lazy-init: load home dir + shares once, no useEffect needed.
-  useState(() => { useFileStore.getState().initialize(); });
+  useEffect(() => { useFileStore.getState().initialize(); }, []);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 

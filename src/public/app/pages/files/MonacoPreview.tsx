@@ -18,7 +18,7 @@ export function monacoLang(ext: string): string {
     cs: "csharp", php: "php", swift: "swift",
     kt: "kotlin", kts: "kotlin", dart: "dart",
     sh: "shell", bash: "shell", zsh: "shell", fish: "shell", cmd: "shell",
-    ps1: "powershell", sql: "sql", graphql: "graphql", gql: "graphql",
+    ps1: "powershell", sql: "sql", graphql: "plaintext", gql: "plaintext",
     xml: "xml", plist: "xml", proto: "xml",
     toml: "ini", ini: "ini", cfg: "ini", conf: "ini", env: "ini",
     dockerfile: "dockerfile", lua: "lua", r: "r", scala: "scala",
@@ -41,7 +41,9 @@ export interface MonacoPreviewProps {
 export function MonacoPreview({ ext, content, onContentChange, onSave, saving, saveMsg }: MonacoPreviewProps) {
   const [fullscreen, setFullscreen] = useState(false);
   const onSaveRef = useRef(onSave);
+  const savingRef = useRef(saving);
   useEffect(() => { onSaveRef.current = onSave; }, [onSave]);
+  useEffect(() => { savingRef.current = saving; }, [saving]);
 
   useEffect(() => {
     if (!fullscreen) return;
@@ -53,7 +55,9 @@ export function MonacoPreview({ ext, content, onContentChange, onSave, saving, s
   const lang = monacoLang(ext);
 
   const handleMount: OnMount = (editor, monaco) => {
-    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => onSaveRef.current());
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
+      if (!savingRef.current) onSaveRef.current();
+    });
   };
 
   const toolbar = (
@@ -68,13 +72,15 @@ export function MonacoPreview({ ext, content, onContentChange, onSave, saving, s
         onClick={onSave}
         disabled={saving}
         title="Save (Ctrl+S)"
+        aria-label="Save file"
         className="p-1.5 rounded text-gray-400 hover:text-white hover:bg-gray-700 transition-colors disabled:opacity-40"
       >
         {saving ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />}
       </button>
       <button
         onClick={() => setFullscreen((f) => !f)}
-        title={fullscreen ? "Exit fullscreen (Esc)" : "Fullscreen"}
+        title={fullscreen ? "Exit fullscreen (Esc)" : "Enter fullscreen"}
+        aria-label={fullscreen ? "Exit fullscreen" : "Enter fullscreen"}
         className="p-1.5 rounded text-gray-400 hover:text-white hover:bg-gray-700 transition-colors"
       >
         {fullscreen ? <Minimize2 size={15} /> : <Maximize2 size={15} />}

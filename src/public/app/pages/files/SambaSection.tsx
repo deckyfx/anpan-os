@@ -14,18 +14,20 @@ export function SambaSection() {
   return (
     <>
       <div className="border-t border-gray-800 px-5 py-3">
-        <button
-          onClick={() => setSambaOpen(!sambaOpen)}
-          className="flex items-center gap-2 text-sm text-gray-400 hover:text-white transition-colors w-full text-left"
-        >
-          <span className={`transition-transform ${sambaOpen ? "rotate-90" : ""}`}>›</span>
-          <span>Samba Shares</span>
-          <span className="flex-1 border-t border-gray-800 ml-2" />
+        <div className="flex items-center gap-2 text-sm text-gray-400">
           <button
-            onClick={(e) => { e.stopPropagation(); setNewShare({ ...newShare, path: currentPath }); setAddShareOpen(true); }}
+            onClick={() => setSambaOpen(!sambaOpen)}
+            className="flex items-center gap-2 flex-1 hover:text-white transition-colors text-left"
+          >
+            <span className={`transition-transform ${sambaOpen ? "rotate-90" : ""}`}>›</span>
+            <span>Samba Shares</span>
+            <span className="flex-1 border-t border-gray-800 ml-2" />
+          </button>
+          <button
+            onClick={() => { setNewShare({ ...newShare, path: currentPath }); setAddShareOpen(true); }}
             className="text-xs px-2 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-300 hover:text-white transition-colors"
           >+</button>
-        </button>
+        </div>
         {sambaOpen && (
           <div className="mt-3 space-y-2">
             {shares.length === 0 && <p className="text-gray-600 text-xs">No shares configured.</p>}

@@ -225,10 +225,12 @@ export function filesPlugin(jwtSecret: string) {
       }
       try {
         if (body.recursive) {
-          const proc = Bun.spawnSync(["chmod", "-R", body.mode, resolved]);
-          if (proc.exitCode !== 0) {
+          const proc = Bun.spawn(["chmod", "-R", body.mode, resolved], { stderr: "pipe" });
+          const exitCode = await proc.exited;
+          if (exitCode !== 0) {
+            const errText = await new Response(proc.stderr).text();
             set.status = 500;
-            return { error: proc.stderr.toString().trim() || "chmod -R failed" };
+            return { error: errText.trim() || "chmod -R failed" };
           }
         } else {
           await chmod(resolved, mode);
@@ -263,10 +265,12 @@ export function filesPlugin(jwtSecret: string) {
 
       try {
         if (body.recursive) {
-          const proc = Bun.spawnSync(["chown", "-R", `${uid}:${gid}`, resolved]);
-          if (proc.exitCode !== 0) {
+          const proc = Bun.spawn(["chown", "-R", `${uid}:${gid}`, resolved], { stderr: "pipe" });
+          const exitCode = await proc.exited;
+          if (exitCode !== 0) {
+            const errText = await new Response(proc.stderr).text();
             set.status = 500;
-            return { error: proc.stderr.toString().trim() || "chown -R failed" };
+            return { error: errText.trim() || "chown -R failed" };
           }
         } else {
           await chown(resolved, uid, gid);
