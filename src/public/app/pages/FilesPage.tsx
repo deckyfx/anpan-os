@@ -122,7 +122,7 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
           className="p-1.5 rounded-lg text-gray-400 hover:text-white hover:bg-gray-800 transition-colors disabled:opacity-30 disabled:cursor-not-allowed shrink-0">
           <ChevronRight size={16} />
         </button>
-        <button onClick={() => navigateTo(currentPath.replace(/\/[^/]+$/, "") || "/")} disabled={currentPath === "/" || loadingDir} title="Up"
+        <button onClick={() => { const p = currentPath.replace(/\/+$/, ""); navigateTo(p.replace(/\/[^/]+$/, "") || "/"); }} disabled={currentPath === "/" || loadingDir} title="Up"
           className="p-1.5 rounded-lg text-gray-400 hover:text-white hover:bg-gray-800 transition-colors disabled:opacity-30 disabled:cursor-not-allowed shrink-0">
           <FolderUp size={16} />
         </button>
