@@ -1,8 +1,11 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { Dialog } from "../../components/Dialog";
+import { api } from "../../lib/api";
 import { useToastStore } from "../../stores/toastStore";
 import type { Stack } from "./types";
+
+interface SSEMsg { log?: string; ok?: boolean; error?: string }
 
 export function PullUpdateDialog({ stack, open, onClose, onUpdated }: {
   stack: Stack | null;
@@ -26,6 +29,10 @@ function PullUpdateDialogInner({ stack, onClose, onUpdated }: {
 
   const logRef = useRef<HTMLPreElement | null>(null);
 
+  useEffect(() => {
+    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
+  }, [log]);
+
   const handlePull = async () => {
     setBusy(true);
     setError("");
@@ -33,55 +40,29 @@ function PullUpdateDialogInner({ stack, onClose, onUpdated }: {
     setPhase("pulling");
 
     try {
-      const res = await fetch(`/api/compose/stacks/${stack.name}/pull`, { method: "POST" });
-
-      if (!res.ok || !res.body) {
-        const d = await res.json().catch(() => ({})) as { error?: string };
-        setError(d.error ?? `Server error ${res.status}`);
+      const { data, error: err } = await api.api.compose.stacks({ name: stack.name }).pull.post();
+      if (err) {
+        setError((err.value as { error?: string })?.error ?? "Request failed");
         setPhase("idle");
         return;
       }
-
-      const reader = res.body.getReader();
-      const dec = new TextDecoder();
-      let buf = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += dec.decode(value, { stream: true });
-        const parts = buf.split("\n\n");
-        buf = parts.pop() ?? "";
-        for (const chunk of parts) {
-          const line = chunk.startsWith("data: ") ? chunk.slice(6) : chunk;
-          if (!line.trim()) continue;
-          try {
-            const msg = JSON.parse(line) as { log?: string; ok?: boolean; error?: string };
-            if (msg.log !== undefined) {
-              setLog(prev => {
-                const next = [...prev, msg.log!];
-                // Scroll to bottom after state update
-                setTimeout(() => {
-                  if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
-                }, 0);
-                return next;
-              });
-              // Detect phase from log output
-              const lower = msg.log.toLowerCase();
-              if (lower.includes("pulling") || lower.includes("pull")) setPhase("pulling");
-              if (lower.includes("starting") || lower.includes("up -d") || lower.includes("running")) setPhase("deploying");
-            } else if (msg.ok) {
-              setPhase("done");
-              useToastStore.getState().push(`Stack updated: ${stack.meta?.title ?? stack.name}`, "success");
-              onUpdated();
-              onClose();
-              return;
-            } else if (msg.error) {
-              setError(msg.error);
-              setPhase("idle");
-              return;
-            }
-          } catch { /* skip malformed SSE line */ }
+      for await (const event of data!) {
+        const m = event.data as SSEMsg;
+        if (m.log !== undefined) {
+          setLog(prev => [...prev, m.log!]);
+          const lower = m.log.toLowerCase();
+          if (lower.includes("pulling") || lower.includes("pull")) setPhase("pulling");
+          if (lower.includes("starting") || lower.includes("up -d") || lower.includes("running")) setPhase("deploying");
+        } else if (m.ok) {
+          setPhase("done");
+          useToastStore.getState().push(`Stack updated: ${stack.meta?.title ?? stack.name}`, "success");
+          onUpdated();
+          onClose();
+          return;
+        } else if (m.error) {
+          setError(m.error);
+          setPhase("idle");
+          return;
         }
       }
     } catch (err) {

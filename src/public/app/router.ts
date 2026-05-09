@@ -1,18 +1,22 @@
-import { useState, useEffect } from "react";
+import { useSyncExternalStore } from "react";
+
+function subscribe(callback: () => void) {
+  window.addEventListener("popstate", callback);
+  return () => window.removeEventListener("popstate", callback);
+}
+
+function getSnapshot() {
+  return window.location.pathname;
+}
 
 /** Returns the current path and a navigate function that uses history.pushState. */
 export function useRouter() {
-  const [path, setPath] = useState(window.location.pathname);
-
-  useEffect(() => {
-    const onPop = () => setPath(window.location.pathname);
-    window.addEventListener("popstate", onPop);
-    return () => window.removeEventListener("popstate", onPop);
-  }, []);
+  const path = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 
   const navigate = (to: string) => {
     history.pushState(null, "", to);
-    setPath(to);
+    // pushState does not fire popstate — dispatch manually so all subscribers update
+    window.dispatchEvent(new PopStateEvent("popstate"));
   };
 
   return { path, navigate };
