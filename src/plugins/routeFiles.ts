@@ -1,6 +1,6 @@
 import { Elysia, t } from "elysia";
 import { resolve, join, basename, extname } from "node:path";
-import { readdir, stat, mkdir, rename, rm, chmod } from "node:fs/promises";
+import { readdir, stat, mkdir, rename, rm, chmod, chown } from "node:fs/promises";
 import { homedir } from "node:os";
 import { authGuard } from "./authGuard";
 import { config } from "../config";
@@ -215,20 +215,68 @@ export function filesPlugin(jwtSecret: string) {
     })
 
     // POST /api/files/chmod
-    .post("/chmod", async ({ body }) => {
+    .post("/chmod", async ({ body, set }) => {
       let resolved: string;
       try { resolved = guardPath(body.path); } catch { return forbidden(); }
       const mode = parseInt(body.mode, 8);
       if (isNaN(mode) || mode < 0 || mode > 0o777) {
-        return Response.json({ error: "Invalid mode" }, { status: 400 });
+        set.status = 400;
+        return { error: "Invalid mode" };
       }
       try {
-        await chmod(resolved, mode);
+        if (body.recursive) {
+          const proc = Bun.spawnSync(["chmod", "-R", body.mode, resolved]);
+          if (proc.exitCode !== 0) {
+            set.status = 500;
+            return { error: proc.stderr.toString().trim() || "chmod -R failed" };
+          }
+        } else {
+          await chmod(resolved, mode);
+        }
         return { ok: true };
-      } catch {
-        return serverError();
+      } catch (e) {
+        set.status = 500;
+        return { error: e instanceof Error ? e.message : "chmod failed" };
       }
-    }, { body: t.Object({ path: t.String(), mode: t.String() }) })
+    }, { body: t.Object({ path: t.String(), mode: t.String(), recursive: t.Optional(t.Boolean()) }) })
+
+    // POST /api/files/chown
+    .post("/chown", async ({ body, set }) => {
+      let resolved: string;
+      try { resolved = guardPath(body.path); } catch { return forbidden(); }
+
+      const resolveId = (value: string, kind: "user" | "group"): number | null => {
+        const n = parseInt(value, 10);
+        if (!isNaN(n) && String(n) === value.trim()) return n;
+        const flag = kind === "user" ? "-u" : "-g";
+        const proc = Bun.spawnSync(["id", flag, value.trim()]);
+        if (proc.exitCode !== 0) return null;
+        const parsed = parseInt(proc.stdout.toString().trim(), 10);
+        return isNaN(parsed) ? null : parsed;
+      };
+
+      const uid = resolveId(body.owner, "user");
+      const gid = resolveId(body.group, "group");
+
+      if (uid === null) { set.status = 400; return { error: `Unknown user: ${body.owner}` }; }
+      if (gid === null) { set.status = 400; return { error: `Unknown group: ${body.group}` }; }
+
+      try {
+        if (body.recursive) {
+          const proc = Bun.spawnSync(["chown", "-R", `${uid}:${gid}`, resolved]);
+          if (proc.exitCode !== 0) {
+            set.status = 500;
+            return { error: proc.stderr.toString().trim() || "chown -R failed" };
+          }
+        } else {
+          await chown(resolved, uid, gid);
+        }
+        return { ok: true };
+      } catch (e) {
+        set.status = 500;
+        return { error: e instanceof Error ? e.message : "chown failed" };
+      }
+    }, { body: t.Object({ path: t.String(), owner: t.String(), group: t.String(), recursive: t.Optional(t.Boolean()) }) })
 
     // POST /api/files/zip
     .post("/zip", async ({ body }) => {
