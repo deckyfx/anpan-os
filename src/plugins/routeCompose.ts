@@ -7,7 +7,6 @@ import { config } from "../config";
 import { bins } from "../lib/commands";
 import { StackStore } from "../stores/stack-store";
 import { envConfig } from "../env-config";
-import { STACK_TEMPLATES } from "../lib/templates";
 
 const STACK_NAME_RE = /^[a-zA-Z0-9_-]+$/;
 
@@ -354,25 +353,6 @@ export function composePlugin(jwtSecret: string) {
       }
     })
 
-    .post(
-      "/fetch",
-      async ({ body, set }) => {
-        try {
-          const res = await fetch(body.url, { headers: { "Accept": "text/plain,text/yaml,*/*" } });
-          if (!res.ok) {
-            set.status = 502;
-            return { error: `Remote returned ${res.status} ${res.statusText}` };
-          }
-          const content = await res.text();
-          return { content };
-        } catch (err) {
-          set.status = 502;
-          return { error: err instanceof Error ? err.message : String(err) };
-        }
-      },
-      { body: t.Object({ url: t.String({ minLength: 1 }) }) },
-    )
-
     .get("/stacks/:name/file", async ({ params, set }) => {
       const { name } = params;
       if (!STACK_NAME_RE.test(name)) {
@@ -411,15 +391,72 @@ export function composePlugin(jwtSecret: string) {
       return { error: "Compose file not found for this stack" };
     })
 
-    .get("/templates", () =>
-      STACK_TEMPLATES.map(({ id, name, icon, tagline, category, defaultPort, scheme }) => ({
-        id, name, icon, tagline, category, defaultPort, scheme,
-      }))
+    .get("/stacks/:name/envfile", async ({ params, set }) => {
+      const { name } = params;
+      if (!STACK_NAME_RE.test(name)) {
+        set.status = 422;
+        return { error: "Invalid stack name" };
+      }
+      const envPath = join(config.composeFolder, name, ".env");
+      if (!envPath.startsWith(config.composeFolder)) {
+        set.status = 422;
+        return { error: "Invalid stack name" };
+      }
+      try {
+        const content = await Bun.file(envPath).text();
+        return { content };
+      } catch {
+        set.status = 404;
+        return { error: "not found" };
+      }
+    })
+
+    .put(
+      "/stacks/:name/envfile",
+      async ({ params, body, set }) => {
+        const { name } = params;
+        if (!STACK_NAME_RE.test(name)) {
+          set.status = 422;
+          return { error: "Invalid stack name" };
+        }
+        const envPath = join(config.composeFolder, name, ".env");
+        if (!envPath.startsWith(config.composeFolder)) {
+          set.status = 422;
+          return { error: "Invalid stack name" };
+        }
+        try {
+          await Bun.write(envPath, body.content);
+          return { ok: true };
+        } catch (err) {
+          set.status = 500;
+          return { error: err instanceof Error ? err.message : String(err) };
+        }
+      },
+      { body: t.Object({ content: t.String() }) },
     )
 
-    .get("/templates/:id", ({ params, set }) => {
-      const tpl = STACK_TEMPLATES.find(t => t.id === params.id);
-      if (!tpl) { set.status = 404; return { error: "Template not found" }; }
-      return tpl;
+    // ── Docker Hub tag proxy ───────────────────────────────────────────────────
+    // Proxies to hub.docker.com so the browser avoids CORS and rate-limit issues.
+    // image may be "nginx", "library/nginx", or "myorg/myimage".
+    .get("/tags", async ({ query, set }) => {
+      const image = (query as Record<string, string>).image ?? "";
+      if (!image) { set.status = 422; return { error: "image query param required" }; }
+
+      // Normalise: bare image names (e.g. "nginx") belong to "library"
+      const [ns, repo] = image.includes("/") ? image.split("/", 2) : ["library", image];
+      const url = `https://hub.docker.com/v2/repositories/${ns}/${repo}/tags?page_size=25&ordering=last_updated`;
+
+      try {
+        const res = await fetch(url, {
+          headers: { "Accept": "application/json" },
+          signal: AbortSignal.timeout(8_000),
+        });
+        if (!res.ok) { set.status = res.status; return { error: `Docker Hub returned ${res.status}` }; }
+        const data = await res.json() as { results?: Array<{ name: string; last_updated: string }> };
+        return { tags: (data.results ?? []).map(r => ({ name: r.name, updated: r.last_updated })) };
+      } catch (err) {
+        set.status = 502;
+        return { error: err instanceof Error ? err.message : "Failed to fetch tags" };
+      }
     });
 }

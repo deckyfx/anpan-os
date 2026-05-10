@@ -35,6 +35,8 @@ export const stacks = sqliteTable("stacks", {
   address:     text("address"),
   /** Freeform markdown/text note for this stack. */
   note:        text("note"),
+  /** How the web UI is opened: "new-page" (_blank), "here" (_self), "contained" (in-app dialog). */
+  openMode:    text("open_mode"),
   /** true = installed via this app or imported from CasaOS; false = discovered from Docker only. */
   managed:     integer("managed", { mode: "boolean" }).notNull().default(false),
   /** User-defined display order (null = unset, sorted last). */

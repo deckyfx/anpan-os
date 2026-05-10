@@ -3,6 +3,8 @@ import type { Cookie } from "elysia";
 import { jwt } from "@elysiajs/jwt";
 import { config } from "../config";
 import { UserStore } from "../stores/user-store";
+import { SettingsStore } from "../stores/settings-store";
+import { bins } from "../lib/commands";
 import {
   usernameField,
   passwordField,
@@ -130,6 +132,55 @@ export function authPlugin(jwtSecret: string) {
 
     .post("/logout", ({ cookie: { anpan_session } }) => {
       anpan_session.remove();
+      return { ok: true };
+    })
+
+    // ── Docker Hub auth ───────────────────────────────────────────────────────
+
+    .get("/dockerhub", async ({ jwt: jwtCtx, cookie: { anpan_session }, set }) => {
+      const token = anpan_session.value;
+      if (!token || !(await jwtCtx.verify(token))) { set.status = 401; return { error: "Not authenticated" }; }
+      const username = await SettingsStore.get("dockerhub_username");
+      return { loggedIn: !!username, username: username ?? null };
+    })
+
+    .post("/dockerhub", async ({ body, jwt: jwtCtx, cookie: { anpan_session }, set }) => {
+      const token = anpan_session.value;
+      if (!token || !(await jwtCtx.verify(token))) { set.status = 401; return { error: "Not authenticated" }; }
+
+      const proc = Bun.spawn(
+        [bins.docker, "login", "--username", body.username, "--password-stdin"],
+        { stdin: "pipe", stdout: "pipe", stderr: "pipe" },
+      );
+      proc.stdin.write(body.password);
+      proc.stdin.end();
+      await proc.exited;
+
+      if (proc.exitCode !== 0) {
+        const stderr = await new Response(proc.stderr).text();
+        set.status = 400;
+        return { error: stderr.trim() || "docker login failed" };
+      }
+
+      await SettingsStore.set("dockerhub_username", body.username);
+      await SettingsStore.set("dockerhub_token", body.password);
+      return { ok: true };
+    }, {
+      body: t.Object({
+        username: t.String({ minLength: 1 }),
+        password: t.String({ minLength: 1 }),
+      }),
+    })
+
+    .delete("/dockerhub", async ({ jwt: jwtCtx, cookie: { anpan_session }, set }) => {
+      const token = anpan_session.value;
+      if (!token || !(await jwtCtx.verify(token))) { set.status = 401; return { error: "Not authenticated" }; }
+
+      const proc = Bun.spawn([bins.docker, "logout"], { stdout: "pipe", stderr: "pipe" });
+      await proc.exited;
+
+      await SettingsStore.set("dockerhub_username", "");
+      await SettingsStore.set("dockerhub_token", "");
       return { ok: true };
     })
 

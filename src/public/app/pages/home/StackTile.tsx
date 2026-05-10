@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import {
   Play, Square, RotateCw, ScrollText, StickyNote,
-  Settings2, Boxes, FileDown, PackagePlus, Trash2,
+  Settings2, FileDown, PackagePlus, Trash2,
   MoreVertical, GripVertical, ExternalLink,
   Pencil, RefreshCcw, FileText,
 } from "lucide-react";
@@ -32,7 +32,7 @@ function TileMenu({ stack, onAction, onClose }: TileMenuProps) {
     <>
       <div className="fixed inset-0 z-10" onClick={onClose} />
       <div
-        className="absolute top-8 right-0 z-20 w-52 bg-gray-800 border border-gray-700 rounded-xl shadow-2xl p-1 text-sm"
+        className="absolute top-8 right-0 z-20 w-60 bg-gray-800 border border-gray-700 rounded-xl shadow-2xl p-1 text-sm"
       >
       {!allRunning && (
         <button className={item} onClick={() => act("start")}>
@@ -47,6 +47,11 @@ function TileMenu({ stack, onAction, onClose }: TileMenuProps) {
       <button className={item} onClick={() => act("restart")}>
         <RotateCw size={14} className="text-sky-400 shrink-0" /> Restart
       </button>
+      {stack.origin === "managed" && (
+        <button className={item} onClick={() => act("guided-edit")}>
+          <Pencil size={14} className="text-amber-400 shrink-0" /> Edit
+        </button>
+      )}
 
       <div className="border-t border-gray-700 my-1 mx-1" />
 
@@ -63,17 +68,6 @@ function TileMenu({ stack, onAction, onClose }: TileMenuProps) {
       <button className={item} onClick={() => act("detail")}>
         <Settings2 size={14} className="text-gray-400 shrink-0" /> Stack Detail
       </button>
-      <button className={item} onClick={() => act("containers")}>
-        <Boxes size={14} className="text-gray-400 shrink-0" /> Containers
-      </button>
-      <button className={item} onClick={() => act("download-compose")}>
-        <FileDown size={14} className="text-gray-400 shrink-0" /> Download Compose
-      </button>
-      {stack.origin === "managed" && (
-        <button className={item} onClick={() => act("edit-compose")}>
-          <Pencil size={14} className="text-gray-400 shrink-0" /> Edit Compose
-        </button>
-      )}
       {stack.origin !== null && (
         <button className={item} onClick={() => act("pull-update")}>
           <RefreshCcw size={14} className="text-sky-400 shrink-0" /> Pull update
@@ -84,6 +78,9 @@ function TileMenu({ stack, onAction, onClose }: TileMenuProps) {
           <FileText size={14} className="text-gray-400 shrink-0" /> Install log
         </button>
       )}
+      <button className={item} onClick={() => act("download-compose")}>
+        <FileDown size={14} className="text-gray-400 shrink-0" /> Download Compose File
+      </button>
       <button className={`${item} text-gray-500 text-xs`} onClick={() => act("casaos-import")}>
         <PackagePlus size={13} className="text-gray-500 shrink-0" /> Import from CasaOS
       </button>

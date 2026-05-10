@@ -23,6 +23,7 @@ export interface StackMeta {
   mainService: string | null;
   address: string | null;
   note: string | null;
+  openMode: string | null;
   managed: boolean | null;
   orderNo: number | null;
 }
@@ -94,11 +95,10 @@ export type StackAction =
   | "logs"
   | "note"
   | "detail"
-  | "containers"
   | "download-compose"
   | "casaos-import"
   | "delete"
-  | "edit-compose"
+  | "guided-edit"
   | "pull-update"
   | "view-install-log";
 

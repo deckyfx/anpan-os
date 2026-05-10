@@ -64,6 +64,13 @@
       "when": 1778249321357,
       "tag": "0008_dry_bullseye",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1778349321357,
+      "tag": "0009_open_mode",
+      "breakpoints": true
     }
   ]
 }

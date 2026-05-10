@@ -8,12 +8,10 @@ import { BottomBar }         from "./home/BottomBar";
 import { ClockWidget, CalendarWidget, SystemWidget, DiskWidget, NetworkWidget } from "./home/SideWidgets";
 import { StackTile }         from "./home/StackTile";
 import { StackDetailDialog } from "./home/StackDetailDialog";
-import { ContainersDialog }  from "./home/ContainersDialog";
 import { NoteDialog }        from "./home/NoteDialog";
 import { LogsDialog }        from "./home/LogsDialog";
-import { NewStackDialog }    from "./home/NewStackDialog";
+import { GuidedStackDialog } from "./home/GuidedStackDialog";
 import { DeleteStackDialog } from "./home/DeleteStackDialog";
-import { EditStackDialog }   from "./home/EditStackDialog";
 import { PullUpdateDialog }  from "./home/PullUpdateDialog";
 import { ConfirmDialog }     from "../components/ConfirmDialog";
 
@@ -32,11 +30,10 @@ export function HomePage({ username, onLogout, onNavigate }: {
     dragSrcIdx, dragOverIdx, setDragSrcIdx, setDragOverIdx,
     newStackOpen, setNewStackOpen,
     detailStack, setDetailStack,
-    containersStack, setContainersStack,
     noteStack, setNoteStack,
     deleteStack, setDeleteStack,
     logsFor, logText, logsLoading,
-    editStack, setEditStack,
+    guidedEditStack, setGuidedEditStack,
     pullStack, setPullStack,
     installLogStack, installLogText, installLogLoading,
     actionBusy,
@@ -196,10 +193,11 @@ export function HomePage({ username, onLogout, onNavigate }: {
       <BottomBar stacks={stacks} />
 
       {/* ── Dialogs ── */}
-      <NewStackDialog
+      <GuidedStackDialog
+        mode="create"
         open={newStackOpen}
         onClose={() => setNewStackOpen(false)}
-        onInstalled={() => void loadStacks()}
+        onDone={() => void loadStacks()}
       />
 
       {detailStack && (
@@ -210,12 +208,6 @@ export function HomePage({ username, onLogout, onNavigate }: {
           onSaved={() => { void loadStacks(); }}
         />
       )}
-
-      <ContainersDialog
-        stack={containersStack}
-        open={containersStack !== null}
-        onClose={() => setContainersStack(null)}
-      />
 
       <NoteDialog
         stack={noteStack}
@@ -239,11 +231,12 @@ export function HomePage({ username, onLogout, onNavigate }: {
         onDeleted={() => { void loadStacks(); }}
       />
 
-      <EditStackDialog
-        stack={editStack}
-        open={editStack !== null}
-        onClose={() => setEditStack(null)}
-        onSaved={() => { void loadStacks(); useToastStore.getState().push("Stack updated", "success"); }}
+      <GuidedStackDialog
+        mode="edit"
+        stack={guidedEditStack}
+        open={guidedEditStack !== null}
+        onClose={() => setGuidedEditStack(null)}
+        onDone={() => void loadStacks()}
       />
 
       <PullUpdateDialog

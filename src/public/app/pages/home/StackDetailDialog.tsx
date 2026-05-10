@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { ExternalLink } from "lucide-react";
 import { Dialog } from "../../components/Dialog";
-import type { ComposeOrigin, Stack } from "./types";
+import type { ComposeOrigin, ContainerDetail, Stack } from "./types";
 import { buildLaunchUrl, stackStateColor } from "./utils";
 import { api } from "../../lib/api";
 
@@ -10,127 +10,175 @@ const ORIGIN_LABEL: Record<NonNullable<ComposeOrigin>, { label: string; cls: str
   casaos:  { label: "🏠 Managed by CasaOS",  cls: "text-sky-400  bg-sky-500/10  border-sky-500/20"  },
 };
 
-// ─── Inline field (compact variant for this dialog) ───────────────────────────
+// ─── KV display helpers ───────────────────────────────────────────────────────
 
-function Field({ label, value, onChange, placeholder, type = "text" }: {
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-  placeholder?: string;
-  type?: string;
-}) {
+function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div>
-      <label className="block text-xs text-gray-500 mb-1">{label}</label>
-      <input
-        type={type}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder={placeholder}
-        className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-amber-500"
-      />
+      <p className="text-[10px] font-semibold text-gray-600 uppercase tracking-widest mb-1.5">{title}</p>
+      <div className="space-y-1 pl-1">{children}</div>
     </div>
   );
 }
 
-// ─── Tabs ─────────────────────────────────────────────────────────────────────
+function KVRow({ k, v, mono }: { k: string; v: string; mono?: boolean }) {
+  return (
+    <div className="flex gap-2 min-w-0">
+      <span className="text-gray-500 shrink-0 w-32 truncate">{k}</span>
+      <span className={`text-gray-300 truncate flex-1 ${mono ? "font-mono" : ""}`} title={v}>{v || "—"}</span>
+    </div>
+  );
+}
 
-type DetailTab = "info" | "docker";
+// ─── Container detail panel ───────────────────────────────────────────────────
 
-const DETAIL_TABS: { id: DetailTab; label: string }[] = [
-  { id: "info",   label: "Stack Info" },
-  { id: "docker", label: "Docker"     },
-];
+function ContainerPanel({ detail }: { detail: ContainerDetail }) {
+  return (
+    <div className="space-y-4 text-xs">
+      <Section title="State">
+        <KVRow k="Status"  v={detail.State.Status} />
+        <KVRow k="Started" v={detail.State.StartedAt ? new Date(detail.State.StartedAt).toLocaleString() : "—"} />
+        {!detail.State.Running && (
+          <>
+            <KVRow k="Finished"  v={detail.State.FinishedAt ? new Date(detail.State.FinishedAt).toLocaleString() : "—"} />
+            <KVRow k="Exit code" v={String(detail.State.ExitCode)} />
+          </>
+        )}
+      </Section>
+
+      <Section title="Config">
+        <KVRow k="Hostname"       v={detail.Config.Hostname} />
+        <KVRow k="Network mode"   v={detail.HostConfig.NetworkMode} />
+        <KVRow k="Restart policy" v={
+          detail.HostConfig.RestartPolicy.Name === "on-failure"
+            ? `on-failure (max ${detail.HostConfig.RestartPolicy.MaximumRetryCount})`
+            : detail.HostConfig.RestartPolicy.Name || "no"
+        } />
+      </Section>
+
+      {Object.keys(detail.NetworkSettings.Ports).length > 0 && (
+        <Section title="Ports">
+          {Object.entries(detail.NetworkSettings.Ports).map(([containerPort, bindings]) => (
+            <KVRow
+              key={containerPort}
+              k={containerPort}
+              v={bindings?.map(b => `${b.HostIp}:${b.HostPort}`).join(", ") ?? "—"}
+            />
+          ))}
+        </Section>
+      )}
+
+      {detail.Mounts.length > 0 && (
+        <Section title="Mounts">
+          {detail.Mounts.map((m, i) => (
+            <KVRow
+              key={i}
+              k={`${m.Type}${m.RW ? "" : " (ro)"}`}
+              v={`${m.Source} → ${m.Destination}`}
+              mono
+            />
+          ))}
+        </Section>
+      )}
+
+      {Object.keys(detail.NetworkSettings.Networks).length > 0 && (
+        <Section title="Networks">
+          {Object.entries(detail.NetworkSettings.Networks).map(([net, info]) => (
+            <KVRow key={net} k={net} v={info.IPAddress || "—"} />
+          ))}
+        </Section>
+      )}
+
+      {detail.Config.Env && detail.Config.Env.length > 0 && (
+        <Section title="Environment">
+          {detail.Config.Env.map((e, i) => {
+            const [key, ...rest] = e.split("=");
+            return <KVRow key={i} k={key ?? e} v={rest.join("=") || ""} mono />;
+          })}
+        </Section>
+      )}
+    </div>
+  );
+}
 
 // ─── Inner component — keyed by stack.name so state initializes fresh each time ──
 
-function StackDetailDialogInner({ stack, onClose, onSaved }: {
+type DetailTab = "docker" | string; // "docker" or a service name
+
+function StackDetailDialogInner({ stack, onClose }: {
   stack: Stack;
   onClose: () => void;
-  onSaved: () => void;
 }) {
-  const m = stack.meta;
   const launchUrl = buildLaunchUrl(stack);
-  const [tab,       setTab]       = useState<DetailTab>("info");
-  const [title,     setTitle]     = useState(m?.title     ?? "");
-  const [icon,      setIcon]      = useState(m?.icon      ?? "");
-  const [tagline,   setTagline]   = useState(m?.tagline   ?? "");
-  const [address,   setAddress]   = useState(m?.address   ?? "");
-  const [portMap,   setPortMap]   = useState(m?.portMap   ?? "");
-  const [scheme,    setScheme]    = useState(m?.scheme    ?? "http");
-  const [indexPath, setIndexPath] = useState(m?.indexPath ?? "/");
-  const [note,      setNote]      = useState(m?.note      ?? "");
-  const [busy,      setBusy]      = useState(false);
-  const [saveError, setSaveError] = useState("");
+  const [tab, setTab] = useState<DetailTab>("docker");
 
-  const handleSave = async () => {
-    setBusy(true);
-    setSaveError("");
-    try {
-      const { error: err } = await api.api.docker.stacks({ name: stack.name }).patch({
-        title:     title     || null,
-        icon:      icon      || null,
-        tagline:   tagline   || null,
-        address:   address   || null,
-        portMap:   portMap   || null,
-        scheme:    scheme    || null,
-        indexPath: indexPath || null,
-        note:      note      || null,
-      });
-      if (err) {
-        setSaveError((err.value as { error?: string })?.error ?? "Server error");
-        return;
-      }
-      onSaved();
-      onClose();
-    } catch (err) {
-      setSaveError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(false);
-    }
-  };
+  // Container details — fetched once on mount
+  const [containers,    setContainers]    = useState<Record<string, ContainerDetail>>({});
+  const [containersLoading, setContainersLoading] = useState(true);
 
-  const footer = tab === "info" ? (
-    <>
-      <button onClick={onClose} className="px-4 py-2 text-sm text-gray-400 hover:text-white transition-colors">
-        Cancel
-      </button>
-      <button
-        onClick={handleSave}
-        disabled={busy}
-        className="px-4 py-2 text-sm bg-amber-500 hover:bg-amber-400 text-black font-semibold rounded-lg transition-colors disabled:opacity-50"
-      >
-        {busy ? "Saving…" : "Save"}
-      </button>
-    </>
-  ) : (
-    <button onClick={onClose} className="px-4 py-2 text-sm text-gray-400 hover:text-white transition-colors">
-      Close
-    </button>
-  );
+  useState(() => {
+    const ids = stack.services.map(s => s.id);
+    if (ids.length === 0) { setContainersLoading(false); return; }
+    Promise.all(
+      ids.map(id =>
+        api.api.docker.containers({ id }).get()
+          .then(({ data }) => data ? [id, data as ContainerDetail] as [string, ContainerDetail] : null)
+          .catch(() => null)
+      )
+    ).then(results => {
+      const map: Record<string, ContainerDetail> = {};
+      for (const r of results) { if (r) map[r[0]] = r[1]; }
+      setContainers(map);
+    }).finally(() => setContainersLoading(false));
+  });
+
+  const tabs: { id: DetailTab; label: string }[] = [
+    { id: "docker", label: "Docker" },
+    ...stack.services.map(svc => ({ id: svc.service, label: svc.service })),
+  ];
+
+  const activeSvc = stack.services.find(s => s.service === tab);
 
   return (
-    <Dialog open title={m?.title ?? stack.name} onClose={onClose} size="xl" footer={footer}>
+    <Dialog
+      open
+      title={stack.meta?.title ?? stack.name}
+      onClose={onClose}
+      size="xl"
+      footer={
+        <button onClick={onClose} className="px-4 py-2 text-sm text-gray-400 hover:text-white transition-colors">
+          Close
+        </button>
+      }
+    >
       {/* Tab bar */}
-      <div className="flex gap-1 mb-5 border-b border-gray-800 -mt-1">
-        {DETAIL_TABS.map(t => (
-          <button
-            key={t.id}
-            onClick={() => setTab(t.id)}
-            className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors -mb-px
-              ${tab === t.id
-                ? "border-amber-500 text-amber-400"
-                : "border-transparent text-gray-500 hover:text-gray-200"
-              }`}
-          >
-            {t.label}
-          </button>
-        ))}
+      <div className="flex gap-1 mb-5 border-b border-gray-800 -mt-1 overflow-x-auto">
+        {tabs.map(t => {
+          const svc = stack.services.find(s => s.service === t.id);
+          return (
+            <button
+              key={t.id}
+              onClick={() => setTab(t.id)}
+              className={`flex items-center gap-1.5 px-4 py-2 text-sm font-medium border-b-2 transition-colors -mb-px shrink-0
+                ${tab === t.id
+                  ? "border-amber-500 text-amber-400"
+                  : "border-transparent text-gray-500 hover:text-gray-200"
+                }`}
+            >
+              {svc && (
+                <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${svc.state === "running" ? "bg-green-400" : "bg-red-400"}`} />
+              )}
+              {t.label}
+            </button>
+          );
+        })}
       </div>
 
-      {/* ── Stack Info ─────────────────────────────────────────────── */}
-      {tab === "info" && (
-        <div className="space-y-3">
+      <div className="h-128 overflow-y-auto pr-1">
+
+      {/* ── Docker overview ─────────────────────────────────────────── */}
+      {tab === "docker" && (
+        <div className="space-y-4 text-sm">
           {launchUrl && (
             <a
               href={launchUrl}
@@ -139,51 +187,11 @@ function StackDetailDialogInner({ stack, onClose, onSaved }: {
               className="inline-flex items-center gap-1.5 text-sm text-amber-400 hover:text-amber-300 hover:underline min-w-0"
               title={launchUrl}
             >
-              <ExternalLink size={14} className="shrink-0" /> <span className="truncate overflow-hidden whitespace-nowrap">Open web UI — {launchUrl}</span>
+              <ExternalLink size={14} className="shrink-0" />
+              <span className="truncate overflow-hidden whitespace-nowrap">Open web UI — {launchUrl}</span>
             </a>
           )}
-          <div className="grid grid-cols-2 gap-3">
-            <Field label="Title"   value={title}   onChange={setTitle}   placeholder={stack.name} />
-            <Field label="Tagline" value={tagline} onChange={setTagline} placeholder="Short description" />
-          </div>
-          <Field label="Icon URL" value={icon} onChange={setIcon} placeholder="https://…/icon.svg" />
-          <div className="grid grid-cols-[auto_1fr] gap-3 items-end">
-            <div>
-              <label className="block text-xs text-gray-500 mb-1">Scheme</label>
-              <select
-                value={scheme}
-                onChange={(e) => setScheme(e.target.value)}
-                className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-amber-500"
-              >
-                <option value="http">http</option>
-                <option value="https">https</option>
-              </select>
-            </div>
-            <Field label="Address" value={address} onChange={setAddress} placeholder="e.g. npm.home.lan  (blank = current host)" />
-          </div>
-          <div className="grid grid-cols-2 gap-3">
-            <Field label="Port" value={portMap} onChange={setPortMap} placeholder="8096  (blank = default port)" />
-            <Field label="Index path" value={indexPath} onChange={setIndexPath} placeholder="/" />
-          </div>
-          <div>
-            <label className="block text-xs text-gray-500 mb-1">Note</label>
-            <textarea
-              value={note}
-              onChange={(e) => setNote(e.target.value)}
-              placeholder="Add a note about this stack…"
-              rows={5}
-              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 font-mono focus:outline-none focus:border-amber-500 resize-y"
-            />
-          </div>
-          {saveError && (
-            <p className="text-red-400 text-xs bg-red-500/10 border border-red-500/20 rounded-lg p-2">{saveError}</p>
-          )}
-        </div>
-      )}
 
-      {/* ── Docker ─────────────────────────────────────────────────── */}
-      {tab === "docker" && (
-        <div className="space-y-4 text-sm">
           <div className="flex items-center gap-3">
             <span className="text-gray-500">Project name</span>
             <span className="font-mono text-gray-200">{stack.name}</span>
@@ -195,9 +203,7 @@ function StackDetailDialogInner({ stack, onClose, onSaved }: {
 
           {stack.origin && (() => {
             const o = ORIGIN_LABEL[stack.origin];
-            return (
-              <p className={`text-xs px-3 py-1.5 rounded-lg border ${o.cls}`}>{o.label}</p>
-            );
+            return <p className={`text-xs px-3 py-1.5 rounded-lg border ${o.cls}`}>{o.label}</p>;
           })()}
           {!stack.origin && (
             <p className="text-xs px-3 py-1.5 rounded-lg border border-gray-800 text-gray-600">
@@ -220,7 +226,11 @@ function StackDetailDialogInner({ stack, onClose, onSaved }: {
                 </thead>
                 <tbody>
                   {stack.services.map(svc => (
-                    <tr key={svc.id} className="border-b border-gray-800/50 last:border-0">
+                    <tr
+                      key={svc.id}
+                      className="border-b border-gray-800/50 last:border-0 cursor-pointer hover:bg-gray-800/40 transition-colors"
+                      onClick={() => setTab(svc.service)}
+                    >
                       <td className="px-3 py-2 text-gray-200 font-medium">{svc.service}</td>
                       <td className="px-3 py-2 font-mono text-gray-400 max-w-48 truncate" title={svc.image}>{svc.image}</td>
                       <td className="px-3 py-2 font-mono text-gray-500">{svc.id.slice(0, 12)}</td>
@@ -241,6 +251,29 @@ function StackDetailDialogInner({ stack, onClose, onSaved }: {
           </div>
         </div>
       )}
+
+      {/* ── Per-service container detail ────────────────────────────── */}
+      {activeSvc && (
+        <>
+          <div className="flex items-center gap-2 text-xs text-gray-500 pb-3 mb-3 border-b border-gray-800">
+            <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${activeSvc.state === "running" ? "bg-green-400" : "bg-red-400"}`} />
+            <span className="font-medium text-gray-300">{activeSvc.service}</span>
+            <span className="text-gray-700">·</span>
+            <span className="font-mono text-gray-500 truncate flex-1">{activeSvc.image}</span>
+            <span className="font-mono shrink-0">{activeSvc.id.slice(0, 12)}</span>
+          </div>
+
+          {containersLoading ? (
+            <p className="text-gray-500 text-sm animate-pulse py-4">Loading container details…</p>
+          ) : !containers[activeSvc.id] ? (
+            <p className="text-gray-600 text-sm">No details available.</p>
+          ) : (
+            <ContainerPanel detail={containers[activeSvc.id]!} />
+          )}
+        </>
+      )}
+
+      </div>
     </Dialog>
   );
 }
@@ -251,8 +284,8 @@ export function StackDetailDialog({ stack, open, onClose, onSaved }: {
   stack: Stack;
   open: boolean;
   onClose: () => void;
-  onSaved: () => void;
+  onSaved?: () => void;
 }) {
   if (!open) return null;
-  return <StackDetailDialogInner key={stack.name} stack={stack} onClose={onClose} onSaved={onSaved} />;
+  return <StackDetailDialogInner key={stack.name} stack={stack} onClose={onClose} />;
 }

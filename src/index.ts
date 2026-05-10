@@ -24,7 +24,8 @@ if (Bun.argv.includes("--reset-user")) {
 await config.load();
 await MigrationManager.init({ autoMigrate: true });
 
-const jwtSecret = config.auth.jwt_secret ?? await SettingsStore.getOrCreateJwtSecret();
+const jwtSecret =
+  config.auth.jwt_secret ?? (await SettingsStore.getOrCreateJwtSecret());
 
 const app = createApp(jwtSecret)
   .use(envConfig.IS_BINARY_MODE ? appPluginBinary : appPlugin)
@@ -34,7 +35,13 @@ const app = createApp(jwtSecret)
     tls: config.tlsEnabled
       ? { cert: Bun.file(config.tlsCert), key: Bun.file(config.tlsKey) }
       : undefined,
+    // Disable Bun's built-in dev-server client injection (/_bun/client).
+    // That script opens a WebSocket and calls location.reload() on any file-watcher
+    // event — including SQLite WAL writes in configs/ — causing dialogs to close.
+    development: false,
   });
 
 const protocol = config.tlsEnabled ? "https" : "http";
-console.log(`anpan-os running at ${protocol}://${config.hostname}:${app.server?.port}`);
+console.log(
+  `anpan-os running at ${protocol}://${config.hostname}:${app.server?.port}`,
+);
