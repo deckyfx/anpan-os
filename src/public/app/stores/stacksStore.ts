@@ -14,13 +14,12 @@ interface StacksState {
 
   newStackOpen:    boolean;
   detailStack:     Stack | null;
-  containersStack: Stack | null;
   noteStack:       Stack | null;
   deleteStack:     Stack | null;
   logsFor:         Stack | null;
   logText:         string;
   logsLoading:     boolean;
-  editStack:         Stack | null;
+  guidedEditStack:   Stack | null;
   pullStack:         Stack | null;
   installLogStack:   Stack | null;
   installLogText:    string;
@@ -38,11 +37,10 @@ interface StacksState {
   setDragOverIdx:  (idx: number | null) => void;
   setNewStackOpen: (open: boolean) => void;
   setDetailStack:  (stack: Stack | null) => void;
-  setContainersStack: (stack: Stack | null) => void;
   setNoteStack:    (stack: Stack | null) => void;
   setDeleteStack:  (stack: Stack | null) => void;
-  setEditStack:    (stack: Stack | null) => void;
-  setPullStack:    (stack: Stack | null) => void;
+  setGuidedEditStack: (stack: Stack | null) => void;
+  setPullStack:       (stack: Stack | null) => void;
   stackAction:     (stack: Stack, action: StackAction) => Promise<void>;
   handleDrop:      (dropIdx: number, displayedStacks: Stack[]) => Promise<void>;
 }
@@ -58,13 +56,12 @@ export const useStacksStore = create<StacksState>((set, get) => ({
   dragOverIdx:  null,
   newStackOpen: false,
   detailStack:  null,
-  containersStack: null,
   noteStack:    null,
   deleteStack:  null,
   logsFor:      null,
   logText:      "",
   logsLoading:  false,
-  editStack:         null,
+  guidedEditStack:   null,
   pullStack:         null,
   installLogStack:   null,
   installLogText:    "",
@@ -93,13 +90,17 @@ export const useStacksStore = create<StacksState>((set, get) => ({
   },
 
   loadStacks: async () => {
-    const { data } = await api.api.docker.stacks.get();
-    if (data) set({ stacks: data as Stack[] });
+    try {
+      const { data } = await api.api.docker.stacks.get();
+      if (data) set({ stacks: data as Stack[] });
+    } catch { /* network error — keep last known stacks, retry on next poll */ }
   },
 
   loadStats: async () => {
-    const { data } = await api.api.system.stats.get();
-    if (data) set({ stats: data as SystemStats });
+    try {
+      const { data } = await api.api.system.stats.get();
+      if (data) set({ stats: data as SystemStats });
+    } catch { /* network error — keep last known stats */ }
   },
 
   setSortMode:     (sortMode) => set({ sortMode }),
@@ -107,11 +108,10 @@ export const useStacksStore = create<StacksState>((set, get) => ({
   setDragOverIdx:  (dragOverIdx) => set({ dragOverIdx }),
   setNewStackOpen: (newStackOpen) => set({ newStackOpen }),
   setDetailStack:  (detailStack) => set({ detailStack }),
-  setContainersStack: (containersStack) => set({ containersStack }),
   setNoteStack:    (noteStack) => set({ noteStack }),
   setDeleteStack:  (deleteStack) => set({ deleteStack }),
-  setEditStack:    (editStack) => set({ editStack }),
-  setPullStack:    (pullStack) => set({ pullStack }),
+  setGuidedEditStack: (guidedEditStack) => set({ guidedEditStack }),
+  setPullStack:       (pullStack)       => set({ pullStack }),
 
   stackAction: async (stack, action) => {
     if (action === "logs") {
@@ -129,9 +129,8 @@ export const useStacksStore = create<StacksState>((set, get) => ({
     }
     if (action === "note")             { set({ noteStack: stack });       return; }
     if (action === "detail")           { set({ detailStack: stack });     return; }
-    if (action === "containers")       { set({ containersStack: stack }); return; }
     if (action === "delete")           { set({ deleteStack: stack });     return; }
-    if (action === "edit-compose")     { set({ editStack: stack });       return; }
+    if (action === "guided-edit")      { set({ guidedEditStack: stack }); return; }
     if (action === "pull-update")      { set({ pullStack: stack });       return; }
 
     if (action === "view-install-log") {

@@ -1,30 +1,54 @@
 import { Elysia, t } from "elysia";
 import { join } from "node:path";
+import { rmSync } from "node:fs";
 import { authGuard } from "./authGuard";
 import { DockerClient } from "../lib/docker";
 import { StackStore } from "../stores/stack-store";
 import { config } from "../config";
+import { envConfig } from "../env-config";
 
 type ComposeOrigin = "managed" | "casaos" | null;
 
-/** Cheaply detect where the compose file for a stack lives. */
+/** Cache origin detection results for 5 minutes to avoid subprocess spam on every poll. */
+const originCache = new Map<string, { origin: ComposeOrigin; expiresAt: number }>();
+const ORIGIN_TTL  = 5 * 60 * 1000;
+
+/** Invalidate a single stack's cached origin (call after create/delete/import). */
+export function invalidateOriginCache(name: string) { originCache.delete(name); }
+
+/** Cheaply detect where the compose file for a stack lives. Cached per-name for 5 min. */
 async function detectOrigin(name: string, managed: boolean): Promise<ComposeOrigin> {
   if (managed) return "managed";
+
+  const cached = originCache.get(name);
+  if (cached && cached.expiresAt > Date.now()) return cached.origin;
+
+  let origin: ComposeOrigin = null;
+
   const casaosPath = `/var/lib/casaos/apps/${name}/docker-compose.yml`;
   try {
-    if (await Bun.file(casaosPath).exists()) return "casaos";
-  } catch { /* directory not readable — fall through */ }
-  // Fallback: try a quick sudo -n stat (handles root-owned CasaOS dirs)
-  const stat = await Bun.$`sudo -n stat ${casaosPath}`.quiet().nothrow();
-  if (stat.exitCode === 0) return "casaos";
-  // Check managed folder as secondary (in case managed flag isn't set yet)
-  const managedPath = join(config.composeFolder, name, "docker-compose.yml");
-  if (managedPath.startsWith(config.composeFolder)) {
+    if (await Bun.file(casaosPath).exists()) { origin = "casaos"; }
+  } catch { /* directory not readable */ }
+
+  if (!origin) {
+    // Fallback: sudo -n stat handles root-owned CasaOS dirs (wrapped in try/catch in case sudo is unavailable)
     try {
-      if (await Bun.file(managedPath).exists()) return "managed";
-    } catch { /* ignore */ }
+      const stat = await Bun.$`sudo -n stat ${casaosPath}`.quiet().nothrow();
+      if (stat.exitCode === 0) origin = "casaos";
+    } catch { /* sudo not available or other spawn error */ }
   }
-  return null;
+
+  if (!origin) {
+    const managedPath = join(config.composeFolder, name, "docker-compose.yml");
+    if (managedPath.startsWith(config.composeFolder)) {
+      try {
+        if (await Bun.file(managedPath).exists()) origin = "managed";
+      } catch { /* ignore */ }
+    }
+  }
+
+  originCache.set(name, { origin, expiresAt: Date.now() + ORIGIN_TTL });
+  return origin;
 }
 
 /**
@@ -55,19 +79,36 @@ export function dockerPlugin(jwtSecret: string) {
       if (!result.ok) { set.status = 502; return { error: result.error }; }
 
       // Sync discovered stacks into DB (only seeds icon from Docker label; never overwrites user edits)
-      await Promise.all(result.data.map(s =>
-        StackStore.upsert({ id: s.name, ...(s.icon ? { icon: s.icon } : {}) }),
-      ));
+      // Wrapped in try/catch so a transient DB error doesn't abort the poll response.
+      try {
+        await Promise.all(result.data.map(s =>
+          StackStore.upsert({ id: s.name, ...(s.icon ? { icon: s.icon } : {}) }),
+        ));
+      } catch (e) { console.error("[stacks] upsert failed:", e); }
 
       // Merge live Docker state with DB metadata + compose origin
-      const allMeta = await StackStore.findAll();
+      let allMeta: Awaited<ReturnType<typeof StackStore.findAll>> = [];
+      try {
+        allMeta = await StackStore.findAll();
+      } catch (e) {
+        console.error("[stacks] findAll failed:", e);
+        set.status = 500;
+        return { error: String(e) };
+      }
+
       const metaMap = new Map(allMeta.map(m => [m.id, m]));
 
-      return Promise.all(result.data.map(async s => {
-        const meta   = metaMap.get(s.name) ?? null;
-        const origin = await detectOrigin(s.name, meta?.managed ?? false);
-        return { ...s, meta, origin };
-      }));
+      try {
+        return await Promise.all(result.data.map(async s => {
+          const meta   = metaMap.get(s.name) ?? null;
+          const origin = await detectOrigin(s.name, meta?.managed ?? false);
+          return { ...s, meta, origin };
+        }));
+      } catch (e) {
+        console.error("[stacks] origin detection failed:", e);
+        set.status = 500;
+        return { error: String(e) };
+      }
     })
 
     .patch(
@@ -88,6 +129,7 @@ export function dockerPlugin(jwtSecret: string) {
           mainService: t.Optional(t.Nullable(t.String())),
           address:     t.Optional(t.Nullable(t.String())),
           note:        t.Optional(t.Nullable(t.String())),
+          openMode:    t.Optional(t.Nullable(t.String())),
           orderNo:     t.Optional(t.Nullable(t.Number())),
         }),
       },
@@ -146,6 +188,14 @@ export function dockerPlugin(jwtSecret: string) {
 
       // 4. Remove DB metadata row
       await StackStore.delete(params.name);
+      invalidateOriginCache(params.name);
+
+      // 5. Remove managed compose directory and install log (best-effort)
+      const composeDir = join(config.composeFolder, params.name);
+      if (composeDir.startsWith(config.composeFolder)) {
+        try { rmSync(composeDir, { recursive: true, force: true }); } catch { /* ignore */ }
+      }
+      try { rmSync(join(envConfig.RUNTIME_CONFIG_DIR, "logs", `${params.name}.log`), { force: true }); } catch { /* ignore */ }
 
       return { ok: true, hostPaths: [...hostPaths].sort() };
     })

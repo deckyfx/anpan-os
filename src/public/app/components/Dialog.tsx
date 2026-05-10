@@ -10,6 +10,8 @@ interface DialogProps {
   onClose: () => void;
   /** "md" (default, max-w-lg) | "lg" (max-w-3xl) | "xl" (max-w-5xl) | "2xl" (max-w-7xl) */
   size?: "md" | "lg" | "xl" | "2xl";
+  /** When true, clicking the backdrop does not close the dialog. */
+  disableBackdropClose?: boolean;
 }
 
 const SIZE_CLASS: Record<NonNullable<DialogProps["size"]>, string> = {
@@ -19,7 +21,7 @@ const SIZE_CLASS: Record<NonNullable<DialogProps["size"]>, string> = {
   "2xl": "max-w-7xl",
 };
 
-export function Dialog({ open, title, children, footer, notification, onClose, size = "md" }: DialogProps) {
+export function Dialog({ open, title, children, footer, notification, onClose, size = "md", disableBackdropClose = false }: DialogProps) {
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
@@ -32,7 +34,7 @@ export function Dialog({ open, title, children, footer, notification, onClose, s
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
-      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+      onClick={(e) => { if (!disableBackdropClose && e.target === e.currentTarget) onClose(); }}
     >
       <div className={`w-full ${SIZE_CLASS[size]} bg-gray-900 border border-gray-700 rounded-xl shadow-2xl flex flex-col max-h-[90vh]`}>
         <div className="flex items-center justify-between px-5 py-4 border-b border-gray-800">

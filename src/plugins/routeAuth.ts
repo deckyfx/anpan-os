@@ -3,6 +3,8 @@ import type { Cookie } from "elysia";
 import { jwt } from "@elysiajs/jwt";
 import { config } from "../config";
 import { UserStore } from "../stores/user-store";
+import { SettingsStore } from "../stores/settings-store";
+import { bins } from "../lib/commands";
 import {
   usernameField,
   passwordField,
@@ -11,6 +13,59 @@ import {
 } from "../constants/auth";
 
 const MAX_AGE = 7 * 24 * 60 * 60; // 7 days in seconds
+const DOCKER_TIMEOUT_MS = 30_000;
+
+async function runWithTimeout(proc: ReturnType<typeof Bun.spawn>, ms: number): Promise<number> {
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => { proc.kill(); reject(new Error("timed out")); }, ms);
+  });
+  try {
+    const code = await Promise.race([proc.exited, timeout]);
+    clearTimeout(timer!);
+    return code;
+  } catch (e) {
+    clearTimeout(timer!);
+    throw e;
+  }
+}
+
+type JwtCtx = { verify: (token: string) => Promise<Record<string, unknown> | false> };
+
+/**
+ * Verifies the session cookie and checks tokenVersion against the DB.
+ * Returns the user row on success, null if the session is missing, invalid,
+ * expired, or stale (pre-rotation token after a password change).
+ */
+async function requireActiveSession(jwtCtx: JwtCtx, token: string | undefined) {
+  if (!token) return null;
+  const payload = await jwtCtx.verify(token);
+  if (!payload) return null;
+  const userId = parseInt(String(payload.sub), 10);
+  if (isNaN(userId)) return null;
+  const user = await UserStore.findById(userId);
+  if (!user) return null;
+  if ((payload.tokenVersion as number) !== user.tokenVersion) return null;
+  return user;
+}
+
+/**
+ * Wraps a Docker Hub route handler with the active-session guard.
+ * Returns 401 immediately when the session is missing or stale;
+ * otherwise delegates to the inner handler.
+ */
+async function withDockerHubAuth<T>(
+  jwtCtx: JwtCtx,
+  token: string | undefined,
+  set: { status?: number | string },
+  handler: () => Promise<T>,
+): Promise<T | { error: string }> {
+  if (!(await requireActiveSession(jwtCtx, token))) {
+    set.status = 401;
+    return { error: "Not authenticated" };
+  }
+  return handler();
+}
 
 /** Cookie schema — session value is a JWT string. */
 const cookieSchema = t.Cookie({
@@ -132,6 +187,64 @@ export function authPlugin(jwtSecret: string) {
       anpan_session.remove();
       return { ok: true };
     })
+
+    // ── Docker Hub auth ───────────────────────────────────────────────────────
+
+    .get("/dockerhub", ({ jwt: jwtCtx, cookie: { anpan_session }, set }) =>
+      withDockerHubAuth(jwtCtx, anpan_session.value, set, async () => {
+        const username = await SettingsStore.get("dockerhub_username");
+        return { loggedIn: !!username, username: username ?? null };
+      })
+    )
+
+    .post("/dockerhub", ({ body, jwt: jwtCtx, cookie: { anpan_session }, set }) =>
+      withDockerHubAuth(jwtCtx, anpan_session.value, set, async () => {
+        const proc = Bun.spawn(
+          [bins.docker, "login", "--username", body.username, "--password-stdin"],
+          { stdin: "pipe", stdout: "pipe", stderr: "pipe" },
+        );
+        proc.stdin.write(body.password);
+        proc.stdin.end();
+
+        let loginCode: number;
+        try {
+          loginCode = await runWithTimeout(proc, DOCKER_TIMEOUT_MS);
+        } catch {
+          set.status = 500;
+          return { error: "Docker login timed out" };
+        }
+
+        if (loginCode !== 0) {
+          const stderr = await new Response(proc.stderr).text();
+          set.status = 400;
+          return { error: stderr.trim() || "docker login failed" };
+        }
+
+        await SettingsStore.set("dockerhub_username", body.username);
+        return { ok: true };
+      }), {
+      body: t.Object({
+        username: t.String({ minLength: 1 }),
+        password: t.String({ minLength: 1 }),
+      }),
+    })
+
+    .delete("/dockerhub", ({ jwt: jwtCtx, cookie: { anpan_session }, set }) =>
+      withDockerHubAuth(jwtCtx, anpan_session.value, set, async () => {
+        const proc = Bun.spawn([bins.docker, "logout"], { stdout: "pipe", stderr: "pipe" });
+        let logoutCode: number;
+        try {
+          logoutCode = await runWithTimeout(proc, DOCKER_TIMEOUT_MS);
+        } catch {
+          set.status = 500;
+          return { error: "Docker logout timed out" };
+        }
+        if (logoutCode !== 0) { set.status = 500; return { error: "Docker logout failed" }; }
+
+        await SettingsStore.set("dockerhub_username", "");
+        return { ok: true };
+      })
+    )
 
     .put(
       "/password",

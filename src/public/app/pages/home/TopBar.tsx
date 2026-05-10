@@ -1,8 +1,9 @@
 import { useState, useRef, useEffect } from "react";
-import { Menu, X, LayoutGrid, FolderOpen, Activity, LogOut, KeyRound, RotateCcw, PowerOff, Lock } from "lucide-react";
+import { Menu, X, LayoutGrid, FolderOpen, Activity, LogOut, KeyRound, RotateCcw, PowerOff, Lock, Container } from "lucide-react";
 import { api } from "../../lib/api";
 import { DoctorDialog } from "../../components/DoctorDialog";
 import { ChangePasswordDialog } from "./ChangePasswordDialog";
+import { DockerHubDialog } from "./DockerHubDialog";
 import { browserSupportsWebAuthn } from "@simplewebauthn/browser";
 import { useSystemStore } from "../../stores/systemStore";
 import { useToastStore } from "../../stores/toastStore";
@@ -32,10 +33,11 @@ export function TopBar({ username, version, hasPasskey, onLogout, onNavigate, on
   const { isRoot, hasBin } = useSystemStore();
   const canPowerCtl = isRoot && hasBin("systemctl");
 
-  const [open, setOpen]             = useState(false);
-  const [pos,  setPos]              = useState({ left: 0, top: 0 });
-  const [doctorOpen, setDoctorOpen] = useState(false);
-  const [changePwOpen, setChangePwOpen] = useState(false);
+  const [open, setOpen]                   = useState(false);
+  const [pos,  setPos]                    = useState({ left: 0, top: 0 });
+  const [doctorOpen, setDoctorOpen]       = useState(false);
+  const [changePwOpen, setChangePwOpen]   = useState(false);
+  const [dockerHubOpen, setDockerHubOpen] = useState(false);
   const [pkLoading, setPkLoading]   = useState(false);
   const [confirm, setConfirm]       = useState<"restart" | "shutdown" | null>(null);
   const btnRef  = useRef<HTMLButtonElement>(null);
@@ -149,7 +151,7 @@ export function TopBar({ username, version, hasPasskey, onLogout, onNavigate, on
           role="menu"
           aria-label="Main menu"
           style={{ left: pos.left, top: pos.top }}
-          className="fixed w-52 bg-gray-900 border border-gray-700 rounded-xl shadow-2xl py-2 overflow-hidden"
+          className="fixed z-50 w-52 bg-gray-900 border border-gray-700 rounded-xl shadow-2xl py-2 overflow-hidden"
         >
           {Object.entries(sections).map(([section, items], si) => (
             <div key={section}>
@@ -199,6 +201,13 @@ export function TopBar({ username, version, hasPasskey, onLogout, onNavigate, on
 
           <div className="mt-1.5 border-t border-gray-800 pt-1.5">
             <button
+              onClick={() => { setOpen(false); setDockerHubOpen(true); }}
+              className="w-full flex items-center gap-3 px-3 py-2 text-sm text-gray-300 hover:text-white hover:bg-gray-800 transition-colors text-left"
+            >
+              <Container size={14} className="text-gray-500" />
+              Docker Hub
+            </button>
+            <button
               onClick={() => { setOpen(false); setChangePwOpen(true); }}
               className="w-full flex items-center gap-3 px-3 py-2 text-sm text-gray-300 hover:text-white hover:bg-gray-800 transition-colors text-left"
             >
@@ -243,6 +252,7 @@ export function TopBar({ username, version, hasPasskey, onLogout, onNavigate, on
 
     <DoctorDialog open={doctorOpen} onClose={() => setDoctorOpen(false)} />
     <ChangePasswordDialog open={changePwOpen} onClose={() => setChangePwOpen(false)} />
+    <DockerHubDialog open={dockerHubOpen} onClose={() => setDockerHubOpen(false)} />
     </>
   );
 }
