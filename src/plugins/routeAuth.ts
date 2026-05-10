@@ -30,6 +30,26 @@ async function runWithTimeout(proc: ReturnType<typeof Bun.spawn>, ms: number): P
   }
 }
 
+/**
+ * Verifies the session cookie and checks tokenVersion against the DB.
+ * Returns the user row on success, null if the session is missing, invalid,
+ * expired, or stale (pre-rotation token after a password change).
+ */
+async function requireActiveSession(
+  jwtCtx: { verify: (token: string) => Promise<Record<string, unknown> | false> },
+  token: string | undefined,
+) {
+  if (!token) return null;
+  const payload = await jwtCtx.verify(token);
+  if (!payload) return null;
+  const userId = parseInt(String(payload.sub), 10);
+  if (isNaN(userId)) return null;
+  const user = await UserStore.findById(userId);
+  if (!user) return null;
+  if ((payload.tokenVersion as number) !== user.tokenVersion) return null;
+  return user;
+}
+
 /** Cookie schema — session value is a JWT string. */
 const cookieSchema = t.Cookie({
   anpan_session: t.Optional(t.String()),
@@ -154,15 +174,13 @@ export function authPlugin(jwtSecret: string) {
     // ── Docker Hub auth ───────────────────────────────────────────────────────
 
     .get("/dockerhub", async ({ jwt: jwtCtx, cookie: { anpan_session }, set }) => {
-      const token = anpan_session.value;
-      if (!token || !(await jwtCtx.verify(token))) { set.status = 401; return { error: "Not authenticated" }; }
+      if (!(await requireActiveSession(jwtCtx, anpan_session.value))) { set.status = 401; return { error: "Not authenticated" }; }
       const username = await SettingsStore.get("dockerhub_username");
       return { loggedIn: !!username, username: username ?? null };
     })
 
     .post("/dockerhub", async ({ body, jwt: jwtCtx, cookie: { anpan_session }, set }) => {
-      const token = anpan_session.value;
-      if (!token || !(await jwtCtx.verify(token))) { set.status = 401; return { error: "Not authenticated" }; }
+      if (!(await requireActiveSession(jwtCtx, anpan_session.value))) { set.status = 401; return { error: "Not authenticated" }; }
 
       const proc = Bun.spawn(
         [bins.docker, "login", "--username", body.username, "--password-stdin"],
@@ -195,8 +213,7 @@ export function authPlugin(jwtSecret: string) {
     })
 
     .delete("/dockerhub", async ({ jwt: jwtCtx, cookie: { anpan_session }, set }) => {
-      const token = anpan_session.value;
-      if (!token || !(await jwtCtx.verify(token))) { set.status = 401; return { error: "Not authenticated" }; }
+      if (!(await requireActiveSession(jwtCtx, anpan_session.value))) { set.status = 401; return { error: "Not authenticated" }; }
 
       const proc = Bun.spawn([bins.docker, "logout"], { stdout: "pipe", stderr: "pipe" });
       let logoutCode: number;
