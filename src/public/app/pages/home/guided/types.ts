@@ -4,7 +4,7 @@ export interface ServiceForm {
   restart:      "no" | "always" | "on-failure" | "unless-stopped";
   containerName: string;
   ports:        Array<{ host: string; container: string; protocol: "tcp" | "udp" }>;
-  environment:  Array<{ key: string; value: string }>;
+  environment:  Array<{ key: string; value: string | null }>;
   volumes:      Array<{ host: string; container: string; mode: "" | "ro" | "rw" }>;
   networks:     string[];
   dependsOn:    string[];

@@ -13,6 +13,22 @@ import {
 } from "../constants/auth";
 
 const MAX_AGE = 7 * 24 * 60 * 60; // 7 days in seconds
+const DOCKER_TIMEOUT_MS = 30_000;
+
+async function runWithTimeout(proc: ReturnType<typeof Bun.spawn>, ms: number): Promise<number> {
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => { proc.kill(); reject(new Error("timed out")); }, ms);
+  });
+  try {
+    const code = await Promise.race([proc.exited, timeout]);
+    clearTimeout(timer!);
+    return code;
+  } catch (e) {
+    clearTimeout(timer!);
+    throw e;
+  }
+}
 
 /** Cookie schema — session value is a JWT string. */
 const cookieSchema = t.Cookie({
@@ -154,16 +170,22 @@ export function authPlugin(jwtSecret: string) {
       );
       proc.stdin.write(body.password);
       proc.stdin.end();
-      await proc.exited;
 
-      if (proc.exitCode !== 0) {
+      let loginCode: number;
+      try {
+        loginCode = await runWithTimeout(proc, DOCKER_TIMEOUT_MS);
+      } catch {
+        set.status = 500;
+        return { error: "Docker login timed out" };
+      }
+
+      if (loginCode !== 0) {
         const stderr = await new Response(proc.stderr).text();
         set.status = 400;
         return { error: stderr.trim() || "docker login failed" };
       }
 
       await SettingsStore.set("dockerhub_username", body.username);
-      await SettingsStore.set("dockerhub_token", body.password);
       return { ok: true };
     }, {
       body: t.Object({
@@ -177,11 +199,16 @@ export function authPlugin(jwtSecret: string) {
       if (!token || !(await jwtCtx.verify(token))) { set.status = 401; return { error: "Not authenticated" }; }
 
       const proc = Bun.spawn([bins.docker, "logout"], { stdout: "pipe", stderr: "pipe" });
-      const exitCode = await proc.exited;
-      if (exitCode !== 0) { set.status = 500; return { error: "Docker logout failed" }; }
+      let logoutCode: number;
+      try {
+        logoutCode = await runWithTimeout(proc, DOCKER_TIMEOUT_MS);
+      } catch {
+        set.status = 500;
+        return { error: "Docker logout timed out" };
+      }
+      if (logoutCode !== 0) { set.status = 500; return { error: "Docker logout failed" }; }
 
       await SettingsStore.set("dockerhub_username", "");
-      await SettingsStore.set("dockerhub_token", "");
       return { ok: true };
     })
 

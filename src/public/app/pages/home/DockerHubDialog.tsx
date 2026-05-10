@@ -29,6 +29,7 @@ function DockerHubDialogInner({ onClose }: { onClose: () => void }) {
   }, []);
 
   const handleLogin = async () => {
+    if (busy) return;
     setError("");
     setBusy(true);
     try {
@@ -143,7 +144,7 @@ function DockerHubDialogInner({ onClose }: { onClose: () => void }) {
                 onChange={e => setPassword(e.target.value)}
                 placeholder="password or access token"
                 autoComplete="current-password"
-                onKeyDown={e => { if (e.key === "Enter" && username && password) void handleLogin(); }}
+                onKeyDown={e => { if (e.key === "Enter" && username && password && !busy) void handleLogin(); }}
                 className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-blue-500"
               />
               <p className="text-[10px] text-gray-600 mt-1.5">Use a read-only access token for better security</p>

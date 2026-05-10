@@ -33,7 +33,26 @@ function parseKeyValueEntries(raw: unknown): Array<{ key: string; value: string 
   return [];
 }
 
-const parseEnv    = parseKeyValueEntries;
+// Env uses null for bare keys ("FOO" = inherit from host vs "FOO=" = explicit empty)
+function parseEnvEntries(raw: unknown): Array<{ key: string; value: string | null }> {
+  if (!raw) return [];
+  if (Array.isArray(raw)) {
+    return (raw as string[]).map(item => {
+      const eq = String(item).indexOf("=");
+      return eq >= 0
+        ? { key: String(item).slice(0, eq), value: String(item).slice(eq + 1) }
+        : { key: String(item), value: null };
+    });
+  }
+  if (typeof raw === "object") {
+    return Object.entries(raw as Record<string, unknown>).map(([key, value]) => ({
+      key,
+      value: value == null ? null : String(value),
+    }));
+  }
+  return [];
+}
+
 const parseLabels = parseKeyValueEntries;
 
 // ─── Parse ports ──────────────────────────────────────────────────────────────
@@ -78,7 +97,7 @@ function parseVolumes(raw: unknown): Array<{ host: string; container: string; mo
     }
     if (typeof item === "object" && item !== null) {
       const o = item as Record<string, unknown>;
-      const modeStr = String(o.mode ?? o.read_only ? "ro" : "");
+      const modeStr = String(o.mode ?? (o.read_only ? "ro" : ""));
       const mode    = modeStr === "ro" ? "ro" : modeStr === "rw" ? "rw" : "" as "" | "ro" | "rw";
       return { host: String(o.source ?? ""), container: String(o.target ?? ""), mode };
     }
@@ -135,9 +154,23 @@ export function parseService(svc: unknown): ServiceForm {
   const s = (svc && typeof svc === "object" ? svc : {}) as Record<string, unknown>;
 
   const image = String(s.image ?? "");
-  const lastColon = image.lastIndexOf(":");
-  const imageName = lastColon >= 0 ? image.slice(0, lastColon) : image;
-  const imageTag  = lastColon >= 0 ? image.slice(lastColon + 1) : "latest";
+  let imageName: string;
+  let imageTag: string;
+  if (image.includes("@")) {
+    // digest ref (e.g. repo@sha256:abc) — preserve whole ref, no tag
+    imageName = image;
+    imageTag  = "latest";
+  } else {
+    const lastSlash = image.lastIndexOf("/");
+    const lastColon = image.lastIndexOf(":");
+    if (lastColon > lastSlash) {
+      imageName = image.slice(0, lastColon);
+      imageTag  = image.slice(lastColon + 1);
+    } else {
+      imageName = image;
+      imageTag  = "latest";
+    }
+  }
 
   const restart = (["no", "always", "on-failure", "unless-stopped"] as const).includes(s.restart as never)
     ? s.restart as ServiceForm["restart"]
@@ -182,7 +215,7 @@ export function parseService(svc: unknown): ServiceForm {
     restart,
     containerName: String(s.container_name ?? ""),
     ports:        parsePorts(s.ports),
-    environment:  parseEnv(s.environment),
+    environment:  parseEnvEntries(s.environment),
     volumes:      parseVolumes(s.volumes),
     networks,
     dependsOn,
@@ -239,7 +272,7 @@ export function serializeService(form: ServiceForm): Record<string, unknown> {
 
   if (form.environment.length > 0) {
     out.environment = form.environment.map(({ key, value }) =>
-      value ? `${key}=${value}` : key
+      value === null ? key : `${key}=${value}`
     );
   }
 
@@ -340,22 +373,28 @@ export function parseStackConfig(doc: ComposeDocument): import("./types").StackC
 export function serializeStackConfig(cfg: import("./types").StackConfig, doc: ComposeDocument): ComposeDocument {
   const networks: Record<string, unknown> = {};
   for (const n of cfg.networks) {
-    const entry: Record<string, unknown> = {};
-    if (n.driver)     entry.driver     = n.driver;
-    if (n.external)   entry.external   = true;
-    if (n.attachable) entry.attachable = true;
-    networks[n.name] = Object.keys(entry).length > 0 ? entry : null;
+    if (n.external) {
+      networks[n.name] = { external: true };
+    } else {
+      const entry: Record<string, unknown> = {};
+      if (n.driver)     entry.driver     = n.driver;
+      if (n.attachable) entry.attachable = true;
+      networks[n.name] = Object.keys(entry).length > 0 ? entry : null;
+    }
   }
 
   const volumes: Record<string, unknown> = {};
   for (const v of cfg.volumes) {
-    const entry: Record<string, unknown> = {};
-    if (v.driver)   entry.driver   = v.driver;
-    if (v.external) entry.external = true;
-    if (v.driverOpts.length > 0) {
-      entry.driver_opts = Object.fromEntries(v.driverOpts.map(({ key, value }) => [key, value]));
+    if (v.external) {
+      volumes[v.name] = { external: true };
+    } else {
+      const entry: Record<string, unknown> = {};
+      if (v.driver) entry.driver = v.driver;
+      if (v.driverOpts.length > 0) {
+        entry.driver_opts = Object.fromEntries(v.driverOpts.map(({ key, value }) => [key, value]));
+      }
+      volumes[v.name] = Object.keys(entry).length > 0 ? entry : null;
     }
-    volumes[v.name] = Object.keys(entry).length > 0 ? entry : null;
   }
 
   // Build result with name first so it appears at the top of the YAML

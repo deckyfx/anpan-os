@@ -103,7 +103,7 @@ function ContainerPanel({ detail }: { detail: ContainerDetail }) {
 
 // ─── Inner component — keyed by stack.name so state initializes fresh each time ──
 
-type DetailTab = "docker" | string; // "docker" or a service name
+type DetailTab = "docker" | `service:${string}`;
 
 function StackDetailDialogInner({ stack, onClose }: {
   stack: Stack;
@@ -117,6 +117,7 @@ function StackDetailDialogInner({ stack, onClose }: {
   const [containersLoading, setContainersLoading] = useState(true);
 
   useEffect(() => {
+    let cancelled = false;
     const ids = stack.services.map(s => s.id);
     if (ids.length === 0) { setContainersLoading(false); return; }
     setContainersLoading(true);
@@ -127,18 +128,21 @@ function StackDetailDialogInner({ stack, onClose }: {
           .catch(() => null)
       )
     ).then(results => {
+      if (cancelled) return;
       const map: Record<string, ContainerDetail> = {};
       for (const r of results) { if (r) map[r[0]] = r[1]; }
       setContainers(map);
-    }).finally(() => setContainersLoading(false));
+    }).finally(() => { if (!cancelled) setContainersLoading(false); });
+    return () => { cancelled = true; };
   }, [stack.services]);
 
   const tabs: { id: DetailTab; label: string }[] = [
     { id: "docker", label: "Docker" },
-    ...stack.services.map(svc => ({ id: svc.service, label: svc.service })),
+    ...stack.services.map(svc => ({ id: `service:${svc.service}` as const, label: svc.service })),
   ];
 
-  const activeSvc = stack.services.find(s => s.service === tab);
+  const activeSvcName = tab.startsWith("service:") ? tab.slice("service:".length) : null;
+  const activeSvc = activeSvcName ? stack.services.find(s => s.service === activeSvcName) : null;
 
   return (
     <Dialog
@@ -155,7 +159,8 @@ function StackDetailDialogInner({ stack, onClose }: {
       {/* Tab bar */}
       <div className="flex gap-1 mb-5 border-b border-gray-800 -mt-1 overflow-x-auto">
         {tabs.map(t => {
-          const svc = stack.services.find(s => s.service === t.id);
+          const svcName = t.id.startsWith("service:") ? t.id.slice("service:".length) : null;
+          const svc = svcName ? stack.services.find(s => s.service === svcName) : null;
           return (
             <button
               key={t.id}
@@ -230,7 +235,7 @@ function StackDetailDialogInner({ stack, onClose }: {
                     <tr
                       key={svc.id}
                       className="border-b border-gray-800/50 last:border-0 cursor-pointer hover:bg-gray-800/40 transition-colors"
-                      onClick={() => setTab(svc.service)}
+                      onClick={() => setTab(`service:${svc.service}`)}
                     >
                       <td className="px-3 py-2 text-gray-200 font-medium">{svc.service}</td>
                       <td className="px-3 py-2 font-mono text-gray-400 max-w-48 truncate" title={svc.image}>{svc.image}</td>

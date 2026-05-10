@@ -240,13 +240,13 @@ export function ServiceTab({ value: form, onChange }: Props) {
             <span className="text-gray-600 shrink-0">=</span>
             <input
               className={inp}
-              value={e.value}
+              value={e.value ?? ""}
               onChange={ev => {
                 const environment = [...form.environment];
                 environment[i] = { ...e, value: ev.target.value };
                 set({ environment });
               }}
-              placeholder="value"
+              placeholder={e.value === null ? "(inherit from host)" : "value"}
             />
             <RemoveBtn onClick={() => set({ environment: form.environment.filter((_, j) => j !== i) })} />
           </div>
