@@ -205,7 +205,6 @@ export function HomePage({ username, onLogout, onNavigate }: {
           stack={detailStack}
           open={detailStack !== null}
           onClose={() => setDetailStack(null)}
-          onSaved={() => { void loadStacks(); }}
         />
       )}
 

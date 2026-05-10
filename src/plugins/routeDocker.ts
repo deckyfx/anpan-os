@@ -188,6 +188,7 @@ export function dockerPlugin(jwtSecret: string) {
 
       // 4. Remove DB metadata row
       await StackStore.delete(params.name);
+      invalidateOriginCache(params.name);
 
       // 5. Remove managed compose directory and install log (best-effort)
       const composeDir = join(config.composeFolder, params.name);

@@ -177,7 +177,8 @@ export function authPlugin(jwtSecret: string) {
       if (!token || !(await jwtCtx.verify(token))) { set.status = 401; return { error: "Not authenticated" }; }
 
       const proc = Bun.spawn([bins.docker, "logout"], { stdout: "pipe", stderr: "pipe" });
-      await proc.exited;
+      const exitCode = await proc.exited;
+      if (exitCode !== 0) { set.status = 500; return { error: "Docker logout failed" }; }
 
       await SettingsStore.set("dockerhub_username", "");
       await SettingsStore.set("dockerhub_token", "");

@@ -141,7 +141,7 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone }: {
   }, [actionLog]);
 
   // Edit mode: load existing YAML + env file on mount
-  useState(() => {
+  useEffect(() => {
     if (!isEdit || !stack) return;
     void (async () => {
       try {
@@ -174,7 +174,7 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone }: {
         setLoading(false);
       }
     })();
-  });
+  }, [isEdit, stack]);
 
   // ── Sync helpers ──────────────────────────────────────────────────────────
 
@@ -259,8 +259,10 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone }: {
         return;
       }
 
-      for await (const event of data!) {
-        const m = event.data as SSEMsg;
+      if (!data) { setError("No stream received from server"); setBusy(false); return; }
+      for await (const event of data) {
+        const m = event.data as SSEMsg | undefined;
+        if (!m) continue;
         if (m.log !== undefined) {
           setActionLog(prev => [...prev, m.log!]);
         } else if (m.ok) {
@@ -337,8 +339,10 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone }: {
         return;
       }
 
-      for await (const event of sseData!) {
-        const m = event.data as SSEMsg;
+      if (!sseData) { setError("No stream received from server"); setBusy(false); return; }
+      for await (const event of sseData) {
+        const m = event.data as SSEMsg | undefined;
+        if (!m) continue;
         if (m.log !== undefined) {
           setActionLog(prev => [...prev, m.log!]);
         } else if (m.ok) {

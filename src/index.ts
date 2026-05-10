@@ -25,7 +25,9 @@ await config.load();
 await MigrationManager.init({ autoMigrate: true });
 
 const jwtSecret =
-  config.auth.jwt_secret ?? (await SettingsStore.getOrCreateJwtSecret());
+  (config.auth.jwt_secret?.trim().length ?? 0) > 0
+    ? config.auth.jwt_secret!
+    : await SettingsStore.getOrCreateJwtSecret();
 
 const app = createApp(jwtSecret)
   .use(envConfig.IS_BINARY_MODE ? appPluginBinary : appPlugin)

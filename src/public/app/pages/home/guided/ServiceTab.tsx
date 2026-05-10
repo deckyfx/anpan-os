@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Plus, Trash2, ChevronDown, ChevronRight, Tag, Loader2 } from "lucide-react";
 import { api } from "../../../lib/api";
 import type { ServiceForm } from "./types";
@@ -52,6 +52,18 @@ function TagPicker({ imageName, currentTag, onSelect }: {
   const [tags,    setTags]    = useState<TagEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [error,   setError]   = useState("");
+  const dropdownRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [open]);
 
   const fetch = async () => {
     if (!imageName.trim()) return;
@@ -81,7 +93,7 @@ function TagPicker({ imageName, currentTag, onSelect }: {
       </button>
 
       {open && (
-        <div className="absolute right-0 top-8 z-20 w-52 bg-gray-900 border border-gray-700 rounded-xl shadow-2xl py-1 max-h-56 overflow-y-auto">
+        <div ref={dropdownRef} className="absolute right-0 top-8 z-20 w-52 bg-gray-900 border border-gray-700 rounded-xl shadow-2xl py-1 max-h-56 overflow-y-auto">
           {error && <p className="px-3 py-2 text-xs text-red-400">{error}</p>}
           {!error && tags.length === 0 && !loading && (
             <p className="px-3 py-2 text-xs text-gray-500">No tags found</p>
@@ -276,9 +288,9 @@ export function ServiceTab({ value: form, onChange }: Props) {
                 set({ volumes });
               }}
             >
-              <option value="">rw</option>
+              <option value="">rw (default)</option>
               <option value="ro">ro</option>
-              <option value="rw">rw</option>
+              <option value="rw">rw (explicit)</option>
             </select>
             <RemoveBtn onClick={() => set({ volumes: form.volumes.filter((_, j) => j !== i) })} />
           </div>

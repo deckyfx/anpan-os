@@ -12,9 +12,9 @@ export function serializeComposeDoc(doc: ComposeDocument): string {
   return stringify(doc, { lineWidth: 0 });
 }
 
-// ─── Parse environment ────────────────────────────────────────────────────────
+// ─── Shared key=value parser (env, labels) ───────────────────────────────────
 
-function parseEnv(raw: unknown): Array<{ key: string; value: string }> {
+function parseKeyValueEntries(raw: unknown): Array<{ key: string; value: string }> {
   if (!raw) return [];
   if (Array.isArray(raw)) {
     return (raw as string[]).map(item => {
@@ -33,26 +33,8 @@ function parseEnv(raw: unknown): Array<{ key: string; value: string }> {
   return [];
 }
 
-// ─── Parse labels ─────────────────────────────────────────────────────────────
-
-function parseLabels(raw: unknown): Array<{ key: string; value: string }> {
-  if (!raw) return [];
-  if (Array.isArray(raw)) {
-    return (raw as string[]).map(item => {
-      const eq = String(item).indexOf("=");
-      return eq >= 0
-        ? { key: String(item).slice(0, eq), value: String(item).slice(eq + 1) }
-        : { key: String(item), value: "" };
-    });
-  }
-  if (typeof raw === "object") {
-    return Object.entries(raw as Record<string, unknown>).map(([key, value]) => ({
-      key,
-      value: value == null ? "" : String(value),
-    }));
-  }
-  return [];
-}
+const parseEnv    = parseKeyValueEntries;
+const parseLabels = parseKeyValueEntries;
 
 // ─── Parse ports ──────────────────────────────────────────────────────────────
 
@@ -106,25 +88,28 @@ function parseVolumes(raw: unknown): Array<{ host: string; container: string; mo
 
 // ─── Parse memory limit ───────────────────────────────────────────────────────
 
+function parseMemStr(raw: string): number {
+  const s = raw.trim().toLowerCase();
+  const n = parseFloat(s);
+  if (isNaN(n)) return 0;
+  if (s.endsWith("gb") || s.endsWith("g")) return Math.round(n * 1024);
+  if (s.endsWith("mb") || s.endsWith("m")) return Math.round(n);
+  if (s.endsWith("kb") || s.endsWith("k")) return Math.round(n / 1024);
+  // bare bytes
+  return Math.round(n / (1024 * 1024));
+}
+
 function parseMemMb(svc: Record<string, unknown>): number {
   if (svc.mem_limit) {
-    const raw = String(svc.mem_limit).toLowerCase().replace(/[mb\s]/g, "");
-    const parsed = parseInt(raw, 10);
-    if (!isNaN(parsed)) {
-      if (String(svc.mem_limit).toLowerCase().includes("g")) return parsed * 1024;
-      return parsed;
-    }
+    const v = parseMemStr(String(svc.mem_limit));
+    if (v > 0) return v;
   }
   const deploy = svc.deploy as Record<string, unknown> | undefined;
   const limits = deploy?.resources as Record<string, unknown> | undefined;
   const memory = (limits?.limits as Record<string, unknown> | undefined)?.memory;
   if (memory) {
-    const raw = String(memory).toLowerCase();
-    const parsed = parseInt(raw, 10);
-    if (!isNaN(parsed)) {
-      if (raw.includes("g")) return parsed * 1024;
-      return parsed;
-    }
+    const v = parseMemStr(String(memory));
+    if (v > 0) return v;
   }
   return 0;
 }

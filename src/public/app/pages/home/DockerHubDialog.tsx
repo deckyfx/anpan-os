@@ -18,7 +18,7 @@ function DockerHubDialogInner({ onClose }: { onClose: () => void }) {
   const [busy,     setBusy]     = useState(false);
   const [error,    setError]    = useState("");
 
-  useState(() => {
+  useEffect(() => {
     void (async () => {
       try {
         const { data } = await api.api.auth.dockerhub.get();
@@ -26,7 +26,7 @@ function DockerHubDialogInner({ onClose }: { onClose: () => void }) {
         if ((data as Status).username) setUsername((data as Status).username ?? "");
       } catch { setStatus({ loggedIn: false, username: null }); }
     })();
-  });
+  }, []);
 
   const handleLogin = async () => {
     setError("");

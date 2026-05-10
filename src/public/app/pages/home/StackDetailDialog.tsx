@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { ExternalLink } from "lucide-react";
 import { Dialog } from "../../components/Dialog";
 import type { ComposeOrigin, ContainerDetail, Stack } from "./types";
@@ -116,9 +116,10 @@ function StackDetailDialogInner({ stack, onClose }: {
   const [containers,    setContainers]    = useState<Record<string, ContainerDetail>>({});
   const [containersLoading, setContainersLoading] = useState(true);
 
-  useState(() => {
+  useEffect(() => {
     const ids = stack.services.map(s => s.id);
     if (ids.length === 0) { setContainersLoading(false); return; }
+    setContainersLoading(true);
     Promise.all(
       ids.map(id =>
         api.api.docker.containers({ id }).get()
@@ -130,7 +131,7 @@ function StackDetailDialogInner({ stack, onClose }: {
       for (const r of results) { if (r) map[r[0]] = r[1]; }
       setContainers(map);
     }).finally(() => setContainersLoading(false));
-  });
+  }, [stack.services]);
 
   const tabs: { id: DetailTab; label: string }[] = [
     { id: "docker", label: "Docker" },
@@ -280,11 +281,10 @@ function StackDetailDialogInner({ stack, onClose }: {
 
 // ─── Public component — renders nothing when closed ──────────────────────────
 
-export function StackDetailDialog({ stack, open, onClose, onSaved }: {
+export function StackDetailDialog({ stack, open, onClose }: {
   stack: Stack;
   open: boolean;
   onClose: () => void;
-  onSaved?: () => void;
 }) {
   if (!open) return null;
   return <StackDetailDialogInner key={stack.name} stack={stack} onClose={onClose} />;

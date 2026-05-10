@@ -28,13 +28,14 @@ function NetworkRow({
           value={net.name}
           onChange={e => onChange({ ...net, name: e.target.value })}
         />
-        <button type="button" onClick={onRemove} className={delBtn}><Trash2 size={13} /></button>
+        <button type="button" onClick={onRemove} className={delBtn} aria-label="Remove network"><Trash2 size={13} /></button>
       </div>
       <div className={row}>
         <input
           className={inp}
           placeholder="driver (bridge)"
           value={net.driver}
+          disabled={net.external}
           onChange={e => onChange({ ...net, driver: e.target.value })}
         />
       </div>
@@ -43,7 +44,10 @@ function NetworkRow({
           <input
             type="checkbox"
             checked={net.external}
-            onChange={e => onChange({ ...net, external: e.target.checked })}
+            onChange={e => {
+              const external = e.target.checked;
+              onChange({ ...net, external, ...(external ? { driver: "", attachable: false } : {}) });
+            }}
             className="accent-amber-500"
           />
           external
@@ -52,6 +56,7 @@ function NetworkRow({
           <input
             type="checkbox"
             checked={net.attachable}
+            disabled={net.external}
             onChange={e => onChange({ ...net, attachable: e.target.checked })}
             className="accent-amber-500"
           />
@@ -89,13 +94,14 @@ function VolumeRow({
           value={vol.name}
           onChange={e => onChange({ ...vol, name: e.target.value })}
         />
-        <button type="button" onClick={onRemove} className={delBtn}><Trash2 size={13} /></button>
+        <button type="button" onClick={onRemove} className={delBtn} aria-label="Remove volume"><Trash2 size={13} /></button>
       </div>
       <div className={row}>
         <input
           className={inp}
           placeholder="driver (local)"
           value={vol.driver}
+          disabled={vol.external}
           onChange={e => onChange({ ...vol, driver: e.target.value })}
         />
       </div>
@@ -103,7 +109,10 @@ function VolumeRow({
         <input
           type="checkbox"
           checked={vol.external}
-          onChange={e => onChange({ ...vol, external: e.target.checked })}
+          onChange={e => {
+            const external = e.target.checked;
+            onChange({ ...vol, external, ...(external ? { driver: "", driverOpts: [] } : {}) });
+          }}
           className="accent-amber-500"
         />
         external
@@ -128,7 +137,7 @@ function VolumeRow({
                 value={opt.value}
                 onChange={e => setOpt(i, opt.key, e.target.value)}
               />
-              <button type="button" onClick={() => delOpt(i)} className={delBtn}><Trash2 size={11} /></button>
+              <button type="button" onClick={() => delOpt(i)} className={delBtn} aria-label="Remove driver option"><Trash2 size={11} /></button>
             </div>
           ))}
         </div>
@@ -195,7 +204,11 @@ export function StackConfigTab({
             className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-amber-500 font-mono"
             placeholder="my-app"
             value={value.name}
-            onChange={e => onNameChange?.(e.target.value)}
+            onChange={e => {
+              const newName = e.target.value;
+              if (onNameChange) onNameChange(newName);
+              else onChange({ ...value, name: newName });
+            }}
           />
         )}
       </section>

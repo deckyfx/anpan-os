@@ -26,9 +26,10 @@ export function AppConfigTab({ value, onChange }: Props) {
 
   // Debounced preview URL — updates 600 ms after the user stops typing
   const [previewSrc, setPreviewSrc] = useState(value.icon);
+  const [imageError, setImageError] = useState(false);
   useEffect(() => {
-    if (value.icon.startsWith("data:")) { setPreviewSrc(value.icon); return; }
-    const t = setTimeout(() => setPreviewSrc(value.icon), 600);
+    if (value.icon.startsWith("data:")) { setPreviewSrc(value.icon); setImageError(false); return; }
+    const t = setTimeout(() => { setPreviewSrc(value.icon); setImageError(false); }, 600);
     return () => clearTimeout(t);
   }, [value.icon]);
 
@@ -68,12 +69,13 @@ export function AppConfigTab({ value, onChange }: Props) {
         <div className="flex gap-3">
           {/* Large preview */}
           <div className="relative shrink-0 w-20 h-20 rounded-xl bg-gray-800 border border-gray-700 flex items-center justify-center overflow-hidden group">
-            {previewSrc ? (
+            {previewSrc && !imageError ? (
               <img
+                key={previewSrc}
                 src={previewSrc}
                 alt=""
                 className="w-full h-full object-cover"
-                onError={e => { (e.target as HTMLImageElement).style.display = "none"; }}
+                onError={() => setImageError(true)}
               />
             ) : (
               <span className="text-2xl text-gray-600 font-bold select-none">
