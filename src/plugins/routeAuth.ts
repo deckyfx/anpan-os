@@ -200,7 +200,7 @@ export function authPlugin(jwtSecret: string) {
     .post("/dockerhub", ({ body, jwt: jwtCtx, cookie: { anpan_session }, set }) =>
       withDockerHubAuth(jwtCtx, anpan_session.value, set, async () => {
         const proc = Bun.spawn(
-          [bins.docker, "login", "--username", body.username, "--password-stdin"],
+          [bins.docker!, "login", "--username", body.username, "--password-stdin"],
           { stdin: "pipe", stdout: "pipe", stderr: "pipe" },
         );
         proc.stdin.write(body.password);
@@ -231,7 +231,7 @@ export function authPlugin(jwtSecret: string) {
 
     .delete("/dockerhub", ({ jwt: jwtCtx, cookie: { anpan_session }, set }) =>
       withDockerHubAuth(jwtCtx, anpan_session.value, set, async () => {
-        const proc = Bun.spawn([bins.docker, "logout"], { stdout: "pipe", stderr: "pipe" });
+        const proc = Bun.spawn([bins.docker!, "logout"], { stdout: "pipe", stderr: "pipe" });
         let logoutCode: number;
         try {
           logoutCode = await runWithTimeout(proc, DOCKER_TIMEOUT_MS);

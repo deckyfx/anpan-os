@@ -158,15 +158,15 @@ export const commands = CommandRegistry.getInstance();
 // ─── Resolved binaries — use directly in Bun.$ template literals ─────────────
 // Resolved once at module load for the current OS.
 
-function resolveBins(): Record<ToolId, string> {
+function resolveBins(): Partial<Record<ToolId, string>> {
   const platform = process.platform as Platform;
   return Object.fromEntries(
-    (Object.keys(TOOLS) as ToolId[]).map((id) => {
-      const binaries = TOOLS[id].binary as Partial<Record<Platform, string>>;
-      const binary   = binaries[platform] ?? id;
-      return [id, binary];
-    }),
-  ) as Record<ToolId, string>;
+    (Object.keys(TOOLS) as ToolId[])
+      .flatMap((id) => {
+        const binary = (TOOLS[id].binary as Partial<Record<Platform, string>>)[platform];
+        return binary !== undefined ? [[id, binary]] : [];
+      }),
+  );
 }
 
 export const bins = resolveBins();
