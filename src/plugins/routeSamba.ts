@@ -131,12 +131,31 @@ async function isIncludePresent(): Promise<boolean> {
   return raw.includes(INCLUDE_MARKER) && raw.includes(config.sambaSharesPath);
 }
 
-/** Strip all lines belonging to a previous anpan-os block (marker comment + include path). */
-function stripAnpanLines(raw: string): string {
-  return raw
-    .split("\n")
-    .filter((l) => !l.includes(INCLUDE_MARKER) && !l.includes(config.sambaSharesPath))
-    .join("\n");
+/**
+ * Remove any injected anpan-os block from smb.conf text.
+ * Matches the exact 3-line structure that includeBlock() produces:
+ *   [global]
+ *      # managed by anpan-os
+ *      include = <sambaSharesPath>
+ * Only those three consecutive lines are removed; unrelated content is untouched.
+ */
+function stripAnpanBlock(raw: string): string {
+  const lines = raw.split("\n");
+  const result: string[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    if (
+      lines[i]?.trim() === "[global]" &&
+      lines[i + 1]?.includes(INCLUDE_MARKER) &&
+      lines[i + 2]?.includes(config.sambaSharesPath)
+    ) {
+      i += 3; // skip the entire injected block
+      continue;
+    }
+    result.push(lines[i]!);
+    i++;
+  }
+  return result.join("\n");
 }
 
 /**
@@ -147,7 +166,7 @@ async function addIncludeToSystemConf(): Promise<void> {
   const raw = await readSystemConf();
   if (!raw) throw new Error(`${config.smbConfPath} not found`);
   if (await isIncludePresent()) return;
-  const cleaned = stripAnpanLines(raw);
+  const cleaned = stripAnpanBlock(raw);
   await Bun.write(config.smbConfPath, cleaned.trimEnd() + "\n" + includeBlock() + "\n");
 }
 
@@ -159,10 +178,22 @@ async function removeIncludeFromSystemConf(): Promise<void> {
   const raw = await readSystemConf();
   if (!raw) throw new Error(`${config.smbConfPath} not found`);
   if (!raw.includes(INCLUDE_MARKER)) return;
-  await Bun.write(config.smbConfPath, stripAnpanLines(raw).trimEnd() + "\n");
+  await Bun.write(config.smbConfPath, stripAnpanBlock(raw).trimEnd() + "\n");
 }
 
 // ─── Reload smbd ─────────────────────────────────────────────────────────────
+
+/**
+ * Rethrows unless the error looks like "smbd not running / not loaded".
+ * exit 1 = service inactive; exit 5 = unit not loaded (systemd).
+ * Passed as a .catch() handler so other failures (permission, bad path, etc.)
+ * still propagate and surface as API errors.
+ */
+function rethrowUnlessNotRunning(e: unknown): void {
+  const msg = e instanceof Error ? e.message : String(e);
+  if (/exited [15]$/.test(msg)) return;
+  throw e;
+}
 
 async function reloadSmbd(): Promise<void> {
   const hasSmbcontrol = await commands.isAvailable("smbcontrol");
@@ -277,7 +308,7 @@ export function sambaPlugin(jwtSecret: string) {
         });
 
         await rebuildConfFromDb();
-        await reloadSmbd().catch(() => { /* smbd may not be running yet */ });
+        await reloadSmbd().catch(rethrowUnlessNotRunning);
         return { ok: true };
       } catch (e) {
         set.status = 500;
@@ -302,7 +333,7 @@ export function sambaPlugin(jwtSecret: string) {
         const updated = await SambaShareStore.updateByName(params.name, body);
         if (!updated) { set.status = 404; return { error: "Share not found" }; }
         await rebuildConfFromDb();
-        await reloadSmbd().catch(() => { /* smbd may not be running yet */ });
+        await reloadSmbd().catch(rethrowUnlessNotRunning);
         return { ok: true };
       } catch (e) {
         set.status = 500;
@@ -322,7 +353,7 @@ export function sambaPlugin(jwtSecret: string) {
         const deleted = await SambaShareStore.deleteByName(params.name);
         if (!deleted) { set.status = 404; return { error: "Share not found" }; }
         await rebuildConfFromDb();
-        await reloadSmbd().catch(() => { /* smbd may not be running yet */ });
+        await reloadSmbd().catch(rethrowUnlessNotRunning);
         return { ok: true };
       } catch (e) {
         set.status = 500;
