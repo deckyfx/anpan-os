@@ -32,4 +32,6 @@ export interface SambaShare {
   comment:    string;
   readOnly:   boolean;
   browseable: boolean;
+  /** "anpan" = managed by anpan-os | "external" = from another config (casaos, etc.) */
+  source:     "anpan" | "external";
 }

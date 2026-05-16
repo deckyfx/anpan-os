@@ -70,11 +70,31 @@ const TOOLS = {
   systemctl: {
     name:        "systemctl",
     description: "Systemd service manager",
-    feature:     "samba — service reload",
+    feature:     "samba — service reload (fallback)",
     binary:      { linux: "systemctl" }, // not present on macOS
     installHint: {
       linux:  "Built-in (systemd)",
       darwin: "Not applicable — use: brew services restart samba",
+    },
+  },
+  smbcontrol: {
+    name:        "smbcontrol",
+    description: "Samba control tool",
+    feature:     "samba — reload config without restart",
+    binary:      { linux: "smbcontrol", darwin: "smbcontrol" },
+    installHint: {
+      linux:  "apt install samba-common-bin  /  yum install samba",
+      darwin: "brew install samba",
+    },
+  },
+  smbd: {
+    name:        "smbd",
+    description: "Samba daemon",
+    feature:     "samba — file sharing service",
+    binary:      { linux: "smbd", darwin: "smbd" },
+    installHint: {
+      linux:  "apt install samba  /  yum install samba",
+      darwin: "brew install samba",
     },
   },
 } as const satisfies Record<string, ToolDef>;
@@ -113,12 +133,17 @@ class CommandRegistry {
     return binaries[platform] ?? binaries.linux;
   }
 
-  /** Returns true if the binary is present on $PATH. */
+  /** Returns true if the binary is present on $PATH or a common system directory. */
   async isAvailable(id: ToolId): Promise<boolean> {
     const binary = this.bin(id);
     if (!binary) return false;
     const result = await Bun.$`which ${binary}`.quiet().nothrow();
-    return result.exitCode === 0;
+    if (result.exitCode === 0) return true;
+    // sudo sanitises PATH and may exclude /usr/sbin; check common locations
+    for (const dir of ["/usr/sbin", "/sbin", "/usr/local/sbin"]) {
+      if (await Bun.file(`${dir}/${binary}`).exists()) return true;
+    }
+    return false;
   }
 
   /** Run a full doctor check — returns one result per registered tool. */

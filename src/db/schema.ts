@@ -71,3 +71,22 @@ export type NewStack = typeof stacks.$inferInsert;
 
 export type Passkey    = typeof passkeys.$inferSelect;
 export type NewPasskey = typeof passkeys.$inferInsert;
+
+/**
+ * Samba shares managed by anpan-os.
+ * This is the source of truth — the flat-file samba.conf is regenerated from this table.
+ */
+export const sambaShares = sqliteTable("samba_shares", {
+  id:         integer("id").primaryKey({ autoIncrement: true }),
+  name:       text("name").notNull().unique(),
+  path:       text("path").notNull(),
+  comment:    text("comment").notNull().default(""),
+  readOnly:   integer("read_only", { mode: "boolean" }).notNull().default(false),
+  browseable: integer("browseable", { mode: "boolean" }).notNull().default(true),
+  createdAt:  integer("created_at", { mode: "timestamp" })
+    .notNull()
+    .default(sql`(unixepoch())`),
+});
+
+export type SambaShareRow    = typeof sambaShares.$inferSelect;
+export type NewSambaShareRow = typeof sambaShares.$inferInsert;

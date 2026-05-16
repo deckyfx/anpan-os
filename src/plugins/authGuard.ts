@@ -1,4 +1,4 @@
-import { Elysia, t } from "elysia";
+import { Elysia, t, status } from "elysia";
 import { jwt } from "@elysiajs/jwt";
 import { UserStore } from "../stores/user-store";
 
@@ -19,26 +19,17 @@ export function authGuard(jwtSecret: string) {
         anpan_session: t.Optional(t.String()),
       }),
     })
-    .resolve(async ({ jwt: jwtCtx, cookie: { anpan_session }, set }) => {
+    .resolve(async ({ jwt: jwtCtx, cookie: { anpan_session } }) => {
       const token = anpan_session.value;
-      if (!token) {
-        set.status = 401;
-        throw new Error("Unauthorized");
-      }
+      if (!token) return status(401, "Unauthorized");
 
       const payload = await jwtCtx.verify(token);
-      if (!payload) {
-        set.status = 401;
-        throw new Error("Unauthorized");
-      }
+      if (!payload) return status(401, "Unauthorized");
 
       // Verify tokenVersion to invalidate old JWTs after password change
       const userId = parseInt(String(payload.sub), 10);
       const user = await UserStore.findById(userId);
-      if (!user || (payload.tokenVersion !== user.tokenVersion)) {
-        set.status = 401;
-        throw new Error("Unauthorized");
-      }
+      if (!user || (payload.tokenVersion !== user.tokenVersion)) return status(401, "Unauthorized");
 
       return {
         user: {
