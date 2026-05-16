@@ -197,11 +197,11 @@ function rethrowUnlessNotRunning(e: unknown): void {
 
 async function reloadSmbd(): Promise<void> {
   const hasSmbcontrol = await commands.isAvailable("smbcontrol");
-  if (hasSmbcontrol) {
+  if (hasSmbcontrol && bins.smbcontrol) {
     const proc = Bun.spawn([bins.smbcontrol, "smbd", "reload-config"], { stdout: "pipe", stderr: "pipe" });
     const code = await proc.exited;
     if (code !== 0) throw new Error(`smbcontrol exited ${code}`);
-  } else {
+  } else if (bins.systemctl) {
     const proc = Bun.spawn([bins.systemctl, "reload", "smbd"], { stdout: "pipe", stderr: "pipe" });
     const code = await proc.exited;
     if (code !== 0) throw new Error(`systemctl reload smbd exited ${code}`);

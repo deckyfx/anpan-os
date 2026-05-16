@@ -16,9 +16,7 @@ interface StacksState {
   detailStack:     Stack | null;
   noteStack:       Stack | null;
   deleteStack:     Stack | null;
-  logsFor:         Stack | null;
-  logText:         string;
-  logsLoading:     boolean;
+  logsFor: Stack | null;
   guidedEditStack:   Stack | null;
   pullStack:         Stack | null;
   installLogStack:   Stack | null;
@@ -58,9 +56,7 @@ export const useStacksStore = create<StacksState>((set, get) => ({
   detailStack:  null,
   noteStack:    null,
   deleteStack:  null,
-  logsFor:      null,
-  logText:      "",
-  logsLoading:  false,
+  logsFor: null,
   guidedEditStack:   null,
   pullStack:         null,
   installLogStack:   null,
@@ -115,16 +111,7 @@ export const useStacksStore = create<StacksState>((set, get) => ({
 
   stackAction: async (stack, action) => {
     if (action === "logs") {
-      set({ logsFor: stack, logText: "", logsLoading: true });
-      try {
-        const target = stack.services.find((s) => s.state === "running") ?? stack.services[0];
-        if (!target) { set({ logText: "(no services)" }); return; }
-        const { data } = await api.api.docker.containers({ id: target.id }).logs.get({ query: { tail: "100" } });
-        const d = data as { logs?: string; error?: string } | null;
-        set({ logText: d?.logs ?? d?.error ?? "(empty)" });
-      } finally {
-        set({ logsLoading: false });
-      }
+      set({ logsFor: stack });
       return;
     }
     if (action === "note")             { set({ noteStack: stack });       return; }

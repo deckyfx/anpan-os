@@ -274,7 +274,7 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone }: {
       }
 
       if (!data) { setError("No stream received from server"); setBusy(false); return; }
-      for await (const event of data) {
+      for await (const event of data as AsyncIterable<{ data: SSEMsg }>) {
         const m = event.data as SSEMsg | undefined;
         if (!m) continue;
         if (m.log !== undefined) {
@@ -368,7 +368,7 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone }: {
       }
 
       if (!sseData) { setError("No stream received from server"); setBusy(false); return; }
-      for await (const event of sseData) {
+      for await (const event of sseData as AsyncIterable<{ data: SSEMsg }>) {
         const m = event.data as SSEMsg | undefined;
         if (!m) continue;
         if (m.log !== undefined) {

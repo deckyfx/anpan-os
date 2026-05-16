@@ -8,7 +8,8 @@ import { bins } from "../lib/commands";
 import { StackStore } from "../stores/stack-store";
 import { envConfig } from "../env-config";
 
-const STACK_NAME_RE = /^[a-zA-Z0-9_-]+$/;
+const STACK_NAME_RE     = /^[a-zA-Z0-9_-]+$/;
+const CONTAINER_NAME_RE = /^[a-zA-Z0-9_.\-]+$/;
 
 type LogWriter = { write(s: string): Promise<void>; flush(): Promise<void> };
 
@@ -114,8 +115,13 @@ async function openLogWriter(name: string, label: string): Promise<LogWriter> {
  * GET  /api/compose/templates/:id            — get template detail (includes composeYaml)
  */
 export function composePlugin(jwtSecret: string) {
+  const docker = bins.docker; // resolved once; undefined = docker not installed on this OS
+
   return new Elysia({ prefix: "/api/compose" })
     .use(authGuard(jwtSecret))
+    .onBeforeHandle(({ set }) => {
+      if (!docker) { set.status = 503; return { error: "Docker is not available on this system" }; }
+    })
 
     .post(
       "/stacks",
@@ -141,7 +147,7 @@ export function composePlugin(jwtSecret: string) {
           return;
         }
 
-        const proc = Bun.spawn([bins.docker, "compose", "up", "-d"], {
+        const proc = Bun.spawn([docker!, "compose", "up", "-d"], {
           cwd: stackDir,
           stdout: "pipe",
           stderr: "pipe",
@@ -209,7 +215,7 @@ export function composePlugin(jwtSecret: string) {
           return;
         }
 
-        const proc = Bun.spawn([bins.docker, "compose", "up", "-d"], {
+        const proc = Bun.spawn([docker!, "compose", "up", "-d"], {
           cwd: stackDir,
           stdout: "pipe",
           stderr: "pipe",
@@ -270,7 +276,7 @@ export function composePlugin(jwtSecret: string) {
         try {
           // Phase 1: pull images
           const pullProc = Bun.spawn(
-            [bins.docker, "compose", "pull", "--progress", "plain"],
+            [docker!, "compose", "pull", "--progress", "plain"],
             { cwd: dir, stdout: "pipe", stderr: "pipe" },
           );
           const [, , pullExit] = await Promise.all([
@@ -286,7 +292,7 @@ export function composePlugin(jwtSecret: string) {
 
           // Phase 2: re-deploy with updated images
           const upProc = Bun.spawn(
-            [bins.docker, "compose", "up", "-d"],
+            [docker!, "compose", "up", "-d"],
             { cwd: dir, stdout: "pipe", stderr: "pipe" },
           );
           const [, , upExit] = await Promise.all([
@@ -312,7 +318,7 @@ export function composePlugin(jwtSecret: string) {
         set.status = 422;
         return { error: "Invalid stack name" };
       }
-      const result = await Bun.$`${bins.docker} compose down`.cwd(stackDir).nothrow();
+      const result = await Bun.$`${docker!} compose down`.cwd(stackDir).nothrow();
       if (result.exitCode !== 0) return { ok: false, error: result.stderr.toString() };
       return { ok: true };
     })
@@ -323,7 +329,7 @@ export function composePlugin(jwtSecret: string) {
         set.status = 422;
         return { error: "Invalid stack name" };
       }
-      const result = await Bun.$`${bins.docker} compose restart`.cwd(stackDir).nothrow();
+      const result = await Bun.$`${docker!} compose restart`.cwd(stackDir).nothrow();
       if (result.exitCode !== 0) return { ok: false, error: result.stderr.toString() };
       return { ok: true };
     })
@@ -334,7 +340,7 @@ export function composePlugin(jwtSecret: string) {
         set.status = 422;
         return { error: "Invalid stack name" };
       }
-      const result = await Bun.$`${bins.docker} compose logs --tail=100`.cwd(stackDir).nothrow();
+      const result = await Bun.$`${docker!} compose logs --tail=100`.cwd(stackDir).nothrow();
       return { logs: result.stdout.toString() };
     })
 
@@ -434,6 +440,90 @@ export function composePlugin(jwtSecret: string) {
       },
       { body: t.Object({ content: t.String() }) },
     )
+
+    // ── Per-container live logs ────────────────────────────────────────────────
+
+    /** List containers in a compose project (includes stopped). */
+    .get("/stacks/:name/containers", async ({ params, set }) => {
+      const { name } = params;
+      if (!STACK_NAME_RE.test(name)) {
+        set.status = 422;
+        return { error: "Invalid stack name" };
+      }
+      // Use docker ps with project label filter — works regardless of compose file location
+      const result = await Bun.$`${docker!} ps -a --filter ${"label=com.docker.compose.project=" + name} --format json`.nothrow();
+      if (result.exitCode !== 0) {
+        set.status = 502;
+        return { error: result.stderr.toString() || "docker ps failed" };
+      }
+      const containers = result.stdout.toString().trim().split("\n").filter(Boolean).flatMap(line => {
+        try {
+          const obj = JSON.parse(line) as Record<string, string>;
+          const labels: Record<string, string> = {};
+          for (const kv of (obj.Labels ?? "").split(",")) {
+            const eq = kv.indexOf("=");
+            if (eq > 0) labels[kv.slice(0, eq)] = kv.slice(eq + 1);
+          }
+          return [{
+            name:    (obj.Names ?? "").replace(/^\//, ""),
+            service: labels["com.docker.compose.service"] ?? "",
+            state:   obj.State ?? "",
+            status:  obj.Status ?? "",
+          }];
+        } catch { return []; }
+      });
+      return containers;
+    })
+
+    /** Stream live logs for a specific container via SSE (docker logs --tail=100 -f). */
+    .get("/stacks/:name/containers/:container/logs", async function*({ params, request }) {
+      const { name, container } = params;
+      if (!STACK_NAME_RE.test(name) || !CONTAINER_NAME_RE.test(container)) {
+        yield sse({ data: { error: "Invalid name" } satisfies SSEMsg });
+        return;
+      }
+
+      // Verify the container actually belongs to this compose project before streaming.
+      const checkProc = Bun.spawn(
+        [docker!, "ps", "-a",
+         "--filter", `label=com.docker.compose.project=${name}`,
+         "--filter", `name=^${container}$`,
+         "--format", "{{.Names}}"],
+        { stdout: "pipe", stderr: "pipe" },
+      );
+      await checkProc.exited;
+      const matched = (await new Response(checkProc.stdout).text()).trim();
+      if (!matched) {
+        yield sse({ data: { error: "Container not found in this stack" } satisfies SSEMsg });
+        return;
+      }
+
+      const proc = Bun.spawn(
+        [docker!, "logs", "--tail=100", "-f", container],
+        { stdout: "pipe", stderr: "pipe" },
+      );
+
+      // Kill the subprocess when the HTTP connection closes
+      request.signal.addEventListener("abort", () => { proc.kill(); }, { once: true });
+
+      const agg = new StreamAggregator();
+
+      void (async () => {
+        try {
+          await Promise.all([
+            drainStream(proc.stdout, data => agg.push(data)),
+            drainStream(proc.stderr, data => agg.push(data)),
+            proc.exited,
+          ]);
+        } catch {
+          // Expected when process is killed on disconnect
+        } finally {
+          agg.end();
+        }
+      })();
+
+      for await (const msg of agg) yield sse({ data: msg });
+    })
 
     // ── Docker Hub tag proxy ───────────────────────────────────────────────────
     // Proxies to hub.docker.com so the browser avoids CORS and rate-limit issues.
