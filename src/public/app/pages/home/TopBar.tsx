@@ -1,7 +1,8 @@
 import { useState, useRef, useEffect } from "react";
-import { Menu, X, LayoutGrid, FolderOpen, Activity, LogOut, KeyRound, RotateCcw, PowerOff, Lock, Container } from "lucide-react";
+import { Menu, X, LayoutGrid, FolderOpen, Activity, Network, LogOut, KeyRound, RotateCcw, PowerOff, Lock, Container } from "lucide-react";
 import { api } from "../../lib/api";
 import { DoctorDialog } from "../../components/DoctorDialog";
+import { PortsDialog }  from "./PortsDialog";
 import { ChangePasswordDialog } from "./ChangePasswordDialog";
 import { DockerHubDialog } from "./DockerHubDialog";
 import { browserSupportsWebAuthn } from "@simplewebauthn/browser";
@@ -16,9 +17,10 @@ interface NavItem {
 }
 
 const MENU_ITEMS: NavItem[] = [
-  { icon: <LayoutGrid size={14} />, label: "Home",   path: "/",       section: "Navigation" },
-  { icon: <FolderOpen  size={14} />, label: "Files",  path: "/files",  section: "Navigation" },
-  { icon: <Activity    size={14} />, label: "Doctor", path: "/doctor", section: "Tools"      },
+  { icon: <LayoutGrid size={14} />, label: "Home",       path: "/",       section: "Navigation" },
+  { icon: <FolderOpen  size={14} />, label: "Files",     path: "/files",  section: "Navigation" },
+  { icon: <Activity    size={14} />, label: "Doctor",    path: "/doctor", section: "Tools"      },
+  { icon: <Network     size={14} />, label: "Port Scan", path: "/ports",  section: "Tools"      },
 ];
 
 export function TopBar({ username, version, hasPasskey, onLogout, onNavigate, onAddPasskey, currentPath = "/" }: {
@@ -36,6 +38,7 @@ export function TopBar({ username, version, hasPasskey, onLogout, onNavigate, on
   const [open, setOpen]                   = useState(false);
   const [pos,  setPos]                    = useState({ left: 0, top: 0 });
   const [doctorOpen, setDoctorOpen]       = useState(false);
+  const [portsOpen,  setPortsOpen]        = useState(false);
   const [changePwOpen, setChangePwOpen]   = useState(false);
   const [dockerHubOpen, setDockerHubOpen] = useState(false);
   const [pkLoading, setPkLoading]   = useState(false);
@@ -94,6 +97,8 @@ export function TopBar({ username, version, hasPasskey, onLogout, onNavigate, on
     setOpen(false);
     if (path === "/doctor") {
       setDoctorOpen(true);
+    } else if (path === "/ports") {
+      setPortsOpen(true);
     } else {
       onNavigate(path);
     }
@@ -251,6 +256,7 @@ export function TopBar({ username, version, hasPasskey, onLogout, onNavigate, on
     </header>
 
     <DoctorDialog open={doctorOpen} onClose={() => setDoctorOpen(false)} />
+    <PortsDialog  open={portsOpen}  onClose={() => setPortsOpen(false)}  />
     <ChangePasswordDialog open={changePwOpen} onClose={() => setChangePwOpen(false)} />
     <DockerHubDialog open={dockerHubOpen} onClose={() => setDockerHubOpen(false)} />
     </>

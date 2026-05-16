@@ -10,10 +10,11 @@ import { StackTile }         from "./home/StackTile";
 import { StackDetailDialog } from "./home/StackDetailDialog";
 import { NoteDialog }        from "./home/NoteDialog";
 import { LogsDialog }        from "./home/LogsDialog";
-import { GuidedStackDialog } from "./home/GuidedStackDialog";
-import { DeleteStackDialog } from "./home/DeleteStackDialog";
-import { PullUpdateDialog }  from "./home/PullUpdateDialog";
-import { ConfirmDialog }     from "../components/ConfirmDialog";
+import { GuidedStackDialog }    from "./home/GuidedStackDialog";
+import { DeleteStackDialog }    from "./home/DeleteStackDialog";
+import { PullUpdateDialog }     from "./home/PullUpdateDialog";
+import { ContainerLogsDialog }  from "./home/ContainerLogsDialog";
+import { ConfirmDialog }        from "../components/ConfirmDialog";
 
 import type { Stack, StackAction } from "./home/types";
 
@@ -32,7 +33,7 @@ export function HomePage({ username, onLogout, onNavigate }: {
     detailStack, setDetailStack,
     noteStack, setNoteStack,
     deleteStack, setDeleteStack,
-    logsFor, logText, logsLoading,
+    logsFor,
     guidedEditStack, setGuidedEditStack,
     pullStack, setPullStack,
     installLogStack, installLogText, installLogLoading,
@@ -215,11 +216,9 @@ export function HomePage({ username, onLogout, onNavigate }: {
         onSaved={() => { void loadStacks(); }}
       />
 
-      <LogsDialog
+      <ContainerLogsDialog
         open={logsFor !== null}
         stack={logsFor}
-        logs={logText}
-        loading={logsLoading}
         onClose={() => useStacksStore.setState({ logsFor: null })}
       />
 

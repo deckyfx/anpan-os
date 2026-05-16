@@ -8,6 +8,7 @@ import { systemPlugin } from "./plugins/routeSystem";
 import { filesPlugin } from "./plugins/routeFiles";
 import { sambaPlugin } from "./plugins/routeSamba";
 import { casaosPlugin } from "./plugins/routeCasaos";
+import { portsPlugin }  from "./plugins/routePorts";
 
 function errorPage(title: string, detail: string, stack?: string): Response {
   const rows = stack
@@ -71,6 +72,7 @@ export function createApp(jwtSecret: string) {
     .use(filesPlugin(jwtSecret))
     .use(sambaPlugin(jwtSecret))
     .use(casaosPlugin(jwtSecret))
+    .use(portsPlugin(jwtSecret))
     .get("/api/health", () => ({ status: "ok" }));
 }
 

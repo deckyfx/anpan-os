@@ -8,7 +8,8 @@ import { bins } from "../lib/commands";
 import { StackStore } from "../stores/stack-store";
 import { envConfig } from "../env-config";
 
-const STACK_NAME_RE = /^[a-zA-Z0-9_-]+$/;
+const STACK_NAME_RE     = /^[a-zA-Z0-9_-]+$/;
+const CONTAINER_NAME_RE = /^[a-zA-Z0-9_.\-]+$/;
 
 type LogWriter = { write(s: string): Promise<void>; flush(): Promise<void> };
 
@@ -434,6 +435,75 @@ export function composePlugin(jwtSecret: string) {
       },
       { body: t.Object({ content: t.String() }) },
     )
+
+    // ── Per-container live logs ────────────────────────────────────────────────
+
+    /** List containers in a compose project (includes stopped). */
+    .get("/stacks/:name/containers", async ({ params, set }) => {
+      const { name } = params;
+      if (!STACK_NAME_RE.test(name)) {
+        set.status = 422;
+        return { error: "Invalid stack name" };
+      }
+      // Use docker ps with project label filter — works regardless of compose file location
+      const result = await Bun.$`${bins.docker} ps -a --filter ${"label=com.docker.compose.project=" + name} --format json`.nothrow();
+      if (result.exitCode !== 0) {
+        set.status = 502;
+        return { error: result.stderr.toString() || "docker ps failed" };
+      }
+      const containers = result.stdout.toString().trim().split("\n").filter(Boolean).flatMap(line => {
+        try {
+          const obj = JSON.parse(line) as Record<string, string>;
+          const labels: Record<string, string> = {};
+          for (const kv of (obj.Labels ?? "").split(",")) {
+            const eq = kv.indexOf("=");
+            if (eq > 0) labels[kv.slice(0, eq)] = kv.slice(eq + 1);
+          }
+          return [{
+            name:    (obj.Names ?? "").replace(/^\//, ""),
+            service: labels["com.docker.compose.service"] ?? "",
+            state:   obj.State ?? "",
+            status:  obj.Status ?? "",
+          }];
+        } catch { return []; }
+      });
+      return containers;
+    })
+
+    /** Stream live logs for a specific container via SSE (docker logs --tail=100 -f). */
+    .get("/stacks/:name/containers/:container/logs", async function*({ params, request }) {
+      const { name, container } = params;
+      if (!STACK_NAME_RE.test(name) || !CONTAINER_NAME_RE.test(container)) {
+        yield sse({ data: { error: "Invalid name" } satisfies SSEMsg });
+        return;
+      }
+
+      const proc = Bun.spawn(
+        [bins.docker, "logs", "--tail=100", "-f", container],
+        { stdout: "pipe", stderr: "pipe" },
+      );
+
+      // Kill the subprocess when the HTTP connection closes
+      request.signal.addEventListener("abort", () => { proc.kill(); }, { once: true });
+
+      const agg = new StreamAggregator();
+
+      void (async () => {
+        try {
+          await Promise.all([
+            drainStream(proc.stdout, data => agg.push(data)),
+            drainStream(proc.stderr, data => agg.push(data)),
+            proc.exited,
+          ]);
+        } catch {
+          // Expected when process is killed on disconnect
+        } finally {
+          agg.end();
+        }
+      })();
+
+      for await (const msg of agg) yield sse({ data: msg });
+    })
 
     // ── Docker Hub tag proxy ───────────────────────────────────────────────────
     // Proxies to hub.docker.com so the browser avoids CORS and rate-limit issues.
