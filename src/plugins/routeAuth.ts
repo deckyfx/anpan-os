@@ -190,48 +190,58 @@ export function authPlugin(jwtSecret: string) {
 
     // ── Docker Hub auth ───────────────────────────────────────────────────────
 
-    .get("/dockerhub", ({ jwt: jwtCtx, cookie: { anpan_session }, set }) =>
-      withDockerHubAuth(jwtCtx, anpan_session.value, set, async () => {
+    .get("/dockerhub", ({ jwt: jwtCtx, cookie: { anpan_session }, set }) => {
+      if (!bins.docker) { set.status = 503; return { error: "Docker is not available on this system" }; }
+      return withDockerHubAuth(jwtCtx, anpan_session.value, set, async () => {
         const username = await SettingsStore.get("dockerhub_username");
         return { loggedIn: !!username, username: username ?? null };
-      })
-    )
-
-    .post("/dockerhub", ({ body, jwt: jwtCtx, cookie: { anpan_session }, set }) =>
-      withDockerHubAuth(jwtCtx, anpan_session.value, set, async () => {
-        const proc = Bun.spawn(
-          [bins.docker!, "login", "--username", body.username, "--password-stdin"],
-          { stdin: "pipe", stdout: "pipe", stderr: "pipe" },
-        );
-        proc.stdin.write(body.password);
-        proc.stdin.end();
-
-        let loginCode: number;
-        try {
-          loginCode = await runWithTimeout(proc, DOCKER_TIMEOUT_MS);
-        } catch {
-          set.status = 500;
-          return { error: "Docker login timed out" };
-        }
-
-        if (loginCode !== 0) {
-          const stderr = await new Response(proc.stderr).text();
-          set.status = 400;
-          return { error: stderr.trim() || "docker login failed" };
-        }
-
-        await SettingsStore.set("dockerhub_username", body.username);
-        return { ok: true };
-      }), {
-      body: t.Object({
-        username: t.String({ minLength: 1 }),
-        password: t.String({ minLength: 1 }),
-      }),
+      });
     })
 
-    .delete("/dockerhub", ({ jwt: jwtCtx, cookie: { anpan_session }, set }) =>
-      withDockerHubAuth(jwtCtx, anpan_session.value, set, async () => {
-        const proc = Bun.spawn([bins.docker!, "logout"], { stdout: "pipe", stderr: "pipe" });
+    .post(
+      "/dockerhub",
+      ({ body, jwt: jwtCtx, cookie: { anpan_session }, set }) => {
+        if (!bins.docker) { set.status = 503; return Promise.resolve({ error: "Docker is not available on this system" }); }
+        const docker = bins.docker;
+        return withDockerHubAuth(jwtCtx, anpan_session.value, set, async () => {
+          const proc = Bun.spawn(
+            [docker, "login", "--username", body.username, "--password-stdin"],
+            { stdin: "pipe", stdout: "pipe", stderr: "pipe" },
+          );
+          proc.stdin.write(body.password);
+          proc.stdin.end();
+
+          let loginCode: number;
+          try {
+            loginCode = await runWithTimeout(proc, DOCKER_TIMEOUT_MS);
+          } catch {
+            set.status = 500;
+            return { error: "Docker login timed out" };
+          }
+
+          if (loginCode !== 0) {
+            const stderr = await new Response(proc.stderr).text();
+            set.status = 400;
+            return { error: stderr.trim() || "docker login failed" };
+          }
+
+          await SettingsStore.set("dockerhub_username", body.username);
+          return { ok: true };
+        });
+      },
+      {
+        body: t.Object({
+          username: t.String({ minLength: 1 }),
+          password: t.String({ minLength: 1 }),
+        }),
+      },
+    )
+
+    .delete("/dockerhub", ({ jwt: jwtCtx, cookie: { anpan_session }, set }) => {
+      if (!bins.docker) { set.status = 503; return Promise.resolve({ error: "Docker is not available on this system" }); }
+      const docker = bins.docker;
+      return withDockerHubAuth(jwtCtx, anpan_session.value, set, async () => {
+        const proc = Bun.spawn([docker, "logout"], { stdout: "pipe", stderr: "pipe" });
         let logoutCode: number;
         try {
           logoutCode = await runWithTimeout(proc, DOCKER_TIMEOUT_MS);
@@ -243,8 +253,8 @@ export function authPlugin(jwtSecret: string) {
 
         await SettingsStore.set("dockerhub_username", "");
         return { ok: true };
-      })
-    )
+      });
+    })
 
     .put(
       "/password",

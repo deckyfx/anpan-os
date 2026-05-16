@@ -115,8 +115,13 @@ async function openLogWriter(name: string, label: string): Promise<LogWriter> {
  * GET  /api/compose/templates/:id            — get template detail (includes composeYaml)
  */
 export function composePlugin(jwtSecret: string) {
+  const docker = bins.docker; // resolved once; undefined = docker not installed on this OS
+
   return new Elysia({ prefix: "/api/compose" })
     .use(authGuard(jwtSecret))
+    .onBeforeHandle(({ set }) => {
+      if (!docker) { set.status = 503; return { error: "Docker is not available on this system" }; }
+    })
 
     .post(
       "/stacks",
@@ -142,7 +147,7 @@ export function composePlugin(jwtSecret: string) {
           return;
         }
 
-        const proc = Bun.spawn([bins.docker!, "compose", "up", "-d"], {
+        const proc = Bun.spawn([docker!, "compose", "up", "-d"], {
           cwd: stackDir,
           stdout: "pipe",
           stderr: "pipe",
@@ -210,7 +215,7 @@ export function composePlugin(jwtSecret: string) {
           return;
         }
 
-        const proc = Bun.spawn([bins.docker!, "compose", "up", "-d"], {
+        const proc = Bun.spawn([docker!, "compose", "up", "-d"], {
           cwd: stackDir,
           stdout: "pipe",
           stderr: "pipe",
@@ -271,7 +276,7 @@ export function composePlugin(jwtSecret: string) {
         try {
           // Phase 1: pull images
           const pullProc = Bun.spawn(
-            [bins.docker!, "compose", "pull", "--progress", "plain"],
+            [docker!, "compose", "pull", "--progress", "plain"],
             { cwd: dir, stdout: "pipe", stderr: "pipe" },
           );
           const [, , pullExit] = await Promise.all([
@@ -287,7 +292,7 @@ export function composePlugin(jwtSecret: string) {
 
           // Phase 2: re-deploy with updated images
           const upProc = Bun.spawn(
-            [bins.docker!, "compose", "up", "-d"],
+            [docker!, "compose", "up", "-d"],
             { cwd: dir, stdout: "pipe", stderr: "pipe" },
           );
           const [, , upExit] = await Promise.all([
@@ -313,7 +318,7 @@ export function composePlugin(jwtSecret: string) {
         set.status = 422;
         return { error: "Invalid stack name" };
       }
-      const result = await Bun.$`${bins.docker!} compose down`.cwd(stackDir).nothrow();
+      const result = await Bun.$`${docker!} compose down`.cwd(stackDir).nothrow();
       if (result.exitCode !== 0) return { ok: false, error: result.stderr.toString() };
       return { ok: true };
     })
@@ -324,7 +329,7 @@ export function composePlugin(jwtSecret: string) {
         set.status = 422;
         return { error: "Invalid stack name" };
       }
-      const result = await Bun.$`${bins.docker!} compose restart`.cwd(stackDir).nothrow();
+      const result = await Bun.$`${docker!} compose restart`.cwd(stackDir).nothrow();
       if (result.exitCode !== 0) return { ok: false, error: result.stderr.toString() };
       return { ok: true };
     })
@@ -335,7 +340,7 @@ export function composePlugin(jwtSecret: string) {
         set.status = 422;
         return { error: "Invalid stack name" };
       }
-      const result = await Bun.$`${bins.docker!} compose logs --tail=100`.cwd(stackDir).nothrow();
+      const result = await Bun.$`${docker!} compose logs --tail=100`.cwd(stackDir).nothrow();
       return { logs: result.stdout.toString() };
     })
 
@@ -446,7 +451,7 @@ export function composePlugin(jwtSecret: string) {
         return { error: "Invalid stack name" };
       }
       // Use docker ps with project label filter — works regardless of compose file location
-      const result = await Bun.$`${bins.docker!} ps -a --filter ${"label=com.docker.compose.project=" + name} --format json`.nothrow();
+      const result = await Bun.$`${docker!} ps -a --filter ${"label=com.docker.compose.project=" + name} --format json`.nothrow();
       if (result.exitCode !== 0) {
         set.status = 502;
         return { error: result.stderr.toString() || "docker ps failed" };
@@ -480,9 +485,9 @@ export function composePlugin(jwtSecret: string) {
 
       // Verify the container actually belongs to this compose project before streaming.
       const checkProc = Bun.spawn(
-        [bins.docker!, "ps", "-a",
+        [docker!, "ps", "-a",
          "--filter", `label=com.docker.compose.project=${name}`,
-         "--filter", `name=^/${container}$`,
+         "--filter", `name=^${container}$`,
          "--format", "{{.Names}}"],
         { stdout: "pipe", stderr: "pipe" },
       );
@@ -494,7 +499,7 @@ export function composePlugin(jwtSecret: string) {
       }
 
       const proc = Bun.spawn(
-        [bins.docker!, "logs", "--tail=100", "-f", container],
+        [docker!, "logs", "--tail=100", "-f", container],
         { stdout: "pipe", stderr: "pipe" },
       );
 

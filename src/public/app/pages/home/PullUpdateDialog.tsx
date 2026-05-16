@@ -46,7 +46,7 @@ function PullUpdateDialogInner({ stack, onClose, onUpdated }: {
         setPhase("idle");
         return;
       }
-      for await (const event of data!) {
+      for await (const event of data as AsyncIterable<{ data: SSEMsg }>) {
         const m = event.data as SSEMsg;
         if (m.log !== undefined) {
           setLog(prev => [...prev, m.log!]);
