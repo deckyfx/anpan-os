@@ -124,11 +124,11 @@ async function readSystemConf(): Promise<string | null> {
   return file.text();
 }
 
-/** True if our include line (with the current path) is already present in smb.conf. */
+/** True if our managed block is already present in smb.conf (detects any path, not just current). */
 async function isIncludePresent(): Promise<boolean> {
   const raw = await readSystemConf();
   if (!raw) return false;
-  return raw.includes(INCLUDE_MARKER) && raw.includes(config.sambaSharesPath);
+  return raw.includes(INCLUDE_MARKER);
 }
 
 /**
@@ -147,7 +147,7 @@ function stripAnpanBlock(raw: string): string {
     if (
       lines[i]?.trim() === "[global]" &&
       lines[i + 1]?.includes(INCLUDE_MARKER) &&
-      lines[i + 2]?.includes(config.sambaSharesPath)
+      lines[i + 2]?.trim().startsWith("include =")
     ) {
       i += 3; // skip the entire injected block
       continue;
@@ -293,13 +293,18 @@ export function sambaPlugin(jwtSecret: string) {
           return { error: "Path is not a directory" };
         }
 
+        if (/[\n\r]/.test(body.path) || /[\n\r]/.test(body.comment ?? "")) {
+          set.status = 422;
+          return { error: "path and comment must not contain newline characters" };
+        }
+
         const existing = await SambaShareStore.findByName(body.name);
         if (existing) {
           set.status = 409;
           return { error: "Share name already exists" };
         }
 
-        await SambaShareStore.create({
+        const created = await SambaShareStore.create({
           name:       body.name,
           path:       body.path,
           comment:    body.comment ?? "",
@@ -307,8 +312,14 @@ export function sambaPlugin(jwtSecret: string) {
           browseable: true,
         });
 
-        await rebuildConfFromDb();
-        await reloadSmbd().catch(rethrowUnlessNotRunning);
+        try {
+          await rebuildConfFromDb();
+          await reloadSmbd().catch(rethrowUnlessNotRunning);
+        } catch (e) {
+          // Roll back the DB insert so SQLite and conf stay in sync.
+          await SambaShareStore.deleteByName(created.name).catch(() => {});
+          throw e;
+        }
         return { ok: true };
       } catch (e) {
         set.status = 500;
@@ -330,10 +341,28 @@ export function sambaPlugin(jwtSecret: string) {
         return { error: "At least one of comment, readOnly, or browseable must be provided" };
       }
       try {
-        const updated = await SambaShareStore.updateByName(params.name, body);
-        if (!updated) { set.status = 404; return { error: "Share not found" }; }
-        await rebuildConfFromDb();
-        await reloadSmbd().catch(rethrowUnlessNotRunning);
+        if (body.comment !== undefined && /[\n\r]/.test(body.comment)) {
+          set.status = 422;
+          return { error: "comment must not contain newline characters" };
+        }
+
+        const before = await SambaShareStore.findByName(params.name);
+        if (!before) { set.status = 404; return { error: "Share not found" }; }
+
+        await SambaShareStore.updateByName(params.name, body);
+
+        try {
+          await rebuildConfFromDb();
+          await reloadSmbd().catch(rethrowUnlessNotRunning);
+        } catch (e) {
+          // Roll back to the previous field values.
+          await SambaShareStore.updateByName(params.name, {
+            comment:    before.comment,
+            readOnly:   before.readOnly,
+            browseable: before.browseable,
+          }).catch(() => {});
+          throw e;
+        }
         return { ok: true };
       } catch (e) {
         set.status = 500;
@@ -350,10 +379,25 @@ export function sambaPlugin(jwtSecret: string) {
     // DELETE /api/samba/shares/:name
     .delete("/shares/:name", async ({ params, set }) => {
       try {
-        const deleted = await SambaShareStore.deleteByName(params.name);
-        if (!deleted) { set.status = 404; return { error: "Share not found" }; }
-        await rebuildConfFromDb();
-        await reloadSmbd().catch(rethrowUnlessNotRunning);
+        const before = await SambaShareStore.findByName(params.name);
+        if (!before) { set.status = 404; return { error: "Share not found" }; }
+
+        await SambaShareStore.deleteByName(params.name);
+
+        try {
+          await rebuildConfFromDb();
+          await reloadSmbd().catch(rethrowUnlessNotRunning);
+        } catch (e) {
+          // Roll back: re-insert the deleted share.
+          await SambaShareStore.create({
+            name:       before.name,
+            path:       before.path,
+            comment:    before.comment,
+            readOnly:   before.readOnly,
+            browseable: before.browseable,
+          }).catch(() => {});
+          throw e;
+        }
         return { ok: true };
       } catch (e) {
         set.status = 500;
