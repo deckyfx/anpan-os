@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { useRouter }        from "./router";
 import { SetupPage }        from "./pages/SetupPage";
 import { LoginPage }        from "./pages/LoginPage";
@@ -12,12 +12,23 @@ import { ToastContainer }   from "./components/Toast";
 export function App() {
   const { view, username, checkAuth, login, afterSetup, logout } = useAuthStore();
   const { path, navigate } = useRouter();
+  const prevViewRef = useRef<string>("");
 
   // Lazy-init: run once on first render, no useEffect needed.
   useState(() => {
     void checkAuth();
     void useSystemStore.getState().load();
   });
+
+  // Reload system info whenever the user transitions into the app (after login
+  // or passkey auth). The initial load() runs before any session cookie exists
+  // and may cache empty/default values with loaded=true.
+  useEffect(() => {
+    if (view === "app" && prevViewRef.current !== "app") {
+      void useSystemStore.getState().reload();
+    }
+    prevViewRef.current = view;
+  }, [view]);
 
   if (view === "loading") {
     return (

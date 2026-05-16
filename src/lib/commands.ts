@@ -133,12 +133,17 @@ class CommandRegistry {
     return binaries[platform] ?? binaries.linux;
   }
 
-  /** Returns true if the binary is present on $PATH. */
+  /** Returns true if the binary is present on $PATH or a common system directory. */
   async isAvailable(id: ToolId): Promise<boolean> {
     const binary = this.bin(id);
     if (!binary) return false;
     const result = await Bun.$`which ${binary}`.quiet().nothrow();
-    return result.exitCode === 0;
+    if (result.exitCode === 0) return true;
+    // sudo sanitises PATH and may exclude /usr/sbin; check common locations
+    for (const dir of ["/usr/sbin", "/sbin", "/usr/local/sbin"]) {
+      if (await Bun.file(`${dir}/${binary}`).exists()) return true;
+    }
+    return false;
   }
 
   /** Run a full doctor check — returns one result per registered tool. */

@@ -29,16 +29,21 @@ export function systemPlugin(jwtSecret: string) {
       return { ok: true };
     })
     .get("/environment", async () => {
-      const [whoamiRes, uidRes, sambaRes] = await Promise.all([
+      const [whoamiRes, uidRes, sambaWhichRes] = await Promise.all([
         Bun.$`whoami`.quiet().nothrow(),
         Bun.$`id -u`.quiet().nothrow(),
         Bun.$`which smbd`.quiet().nothrow(),
       ]);
 
-      const user      = whoamiRes.stdout.toString().trim()  || (process.env.USER ?? "unknown");
-      const uid       = parseInt(uidRes.stdout.toString().trim(), 10);
-      const isRoot    = uid === 0;
-      const sambaInstalled = sambaRes.exitCode === 0;
+      const user   = whoamiRes.stdout.toString().trim() || (process.env.USER ?? "unknown");
+      const uid    = parseInt(uidRes.stdout.toString().trim(), 10);
+      const isRoot = uid === 0;
+
+      // sudo sanitises PATH; fall back to common system locations
+      const sambaInstalled = sambaWhichRes.exitCode === 0
+        || await Bun.file("/usr/sbin/smbd").exists()
+        || await Bun.file("/usr/local/sbin/smbd").exists()
+        || await Bun.file("/sbin/smbd").exists();
 
       let sambaActive  = false;
       let sambaEnabled = false;
