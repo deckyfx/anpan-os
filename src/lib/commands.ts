@@ -70,11 +70,31 @@ const TOOLS = {
   systemctl: {
     name:        "systemctl",
     description: "Systemd service manager",
-    feature:     "samba — service reload",
+    feature:     "samba — service reload (fallback)",
     binary:      { linux: "systemctl" }, // not present on macOS
     installHint: {
       linux:  "Built-in (systemd)",
       darwin: "Not applicable — use: brew services restart samba",
+    },
+  },
+  smbcontrol: {
+    name:        "smbcontrol",
+    description: "Samba control tool",
+    feature:     "samba — reload config without restart",
+    binary:      { linux: "smbcontrol", darwin: "smbcontrol" },
+    installHint: {
+      linux:  "apt install samba-common-bin  /  yum install samba",
+      darwin: "brew install samba",
+    },
+  },
+  smbd: {
+    name:        "smbd",
+    description: "Samba daemon",
+    feature:     "samba — file sharing service",
+    binary:      { linux: "smbd", darwin: "smbd" },
+    installHint: {
+      linux:  "apt install samba  /  yum install samba",
+      darwin: "brew install samba",
     },
   },
 } as const satisfies Record<string, ToolDef>;

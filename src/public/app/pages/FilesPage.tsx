@@ -1,11 +1,12 @@
-import { useRef, useEffect } from "react";
+import { useRef, useEffect, useState } from "react";
 import { useFileStore }  from "../stores/fileStore";
 import { useAuthStore }  from "../stores/authStore";
 import { useStacksStore } from "../stores/stacksStore";
+import { useSystemStore } from "../stores/systemStore";
 import { TopBar }        from "./home/TopBar";
 import { ChevronLeft, ChevronRight, FolderUp, House, LayoutGrid, List,
          FolderOpen, Pencil, Download, Archive, PackageOpen, ShieldCheck, Info,
-         Trash2, FolderPlus, Upload } from "lucide-react";
+         Trash2, FolderPlus, Upload, Network } from "lucide-react";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { Dialog }        from "../components/Dialog";
 import type { FileEntry } from "./files/types";
@@ -17,6 +18,7 @@ import { ChmodDialog }   from "./files/ChmodDialog";
 import { ListingTable }  from "./files/ListingTable";
 import { GridView }      from "./files/GridView";
 import { SambaSection }  from "./files/SambaSection";
+import { SambaManagerDialog } from "./files/SambaManagerDialog";
 import { UploadProgressDialog } from "./files/UploadProgressDialog";
 
 // ─── Component ───────────────────────────────────────────────────────────────
@@ -52,6 +54,10 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
 
   const { username, logout, hasPasskey, registerPasskey } = useAuthStore();
   const version = useStacksStore(s => s.version);
+  const { isRoot, hasBin } = useSystemStore();
+  const sambaAvailable = isRoot && hasBin("smbd");
+
+  const [sambaManagerOpen, setSambaManagerOpen] = useState(false);
 
   useEffect(() => { useFileStore.getState().initialize(); }, []);
 
@@ -157,6 +163,17 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
           + Folder
         </button>
 
+        {sambaAvailable && (
+          <button
+            onClick={() => setSambaManagerOpen(true)}
+            title="Samba Manager"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-gray-800 hover:bg-gray-700 text-gray-300 hover:text-white transition-colors shrink-0"
+          >
+            <Network size={13} />
+            Samba
+          </button>
+        )}
+
         <button onClick={() => setViewMode(viewMode === "list" ? "grid" : "list")}
           title={viewMode === "list" ? "Grid view" : "List view"}
           className="p-1.5 rounded-lg text-gray-400 hover:text-white hover:bg-gray-800 transition-colors shrink-0">
@@ -181,6 +198,8 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
       <SambaSection />
 
       {/* ── Dialogs ───────────────────────────────────────────────────────── */}
+
+      <SambaManagerDialog open={sambaManagerOpen} onClose={() => setSambaManagerOpen(false)} />
 
       {/* File preview */}
       <Dialog open={!!drawerEntry} title={drawerEntry?.name ?? ""} onClose={() => setDrawerEntry(null)} size="xl">

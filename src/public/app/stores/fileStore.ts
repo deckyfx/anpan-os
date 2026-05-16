@@ -66,12 +66,15 @@ interface FileState {
   archivePaths:  string[];
 
   // ── Samba ─────────────────────────────────────────────────────────────────
-  shares:            SambaShare[];
-  sambaOpen:         boolean;
-  removeShareTarget: SambaShare | null;
-  addShareOpen:      boolean;
-  newShare:          NewShare;
-  reloadingSmbd:     boolean;
+  shares:             SambaShare[];
+  sambaOpen:          boolean;
+  removeShareTarget:  SambaShare | null;
+  addShareOpen:       boolean;
+  newShare:           NewShare;
+  reloadingSmbd:      boolean;
+  /** null = not yet checked, true/false = include present in smb.conf */
+  sambaSetupPresent:  boolean | null;
+  sambaError:         string;
 
   // ── Init ──────────────────────────────────────────────────────────────────
   initialized: boolean;
@@ -82,7 +85,6 @@ interface FileState {
   navigateTo:       (path: string) => Promise<void>;
   goBack:           () => void;
   goForward:        () => void;
-  loadShares:       () => Promise<void>;
 
   // File ops
   openFile:         (entry: FileEntry) => Promise<void>;
@@ -96,6 +98,11 @@ interface FileState {
   handleExtract:    (entry: FileEntry) => Promise<void>;
 
   // Samba
+  loadShares:       () => Promise<void>;
+  checkSambaSetup:  () => Promise<void>;
+  doSambaSetup:     () => Promise<void>;
+  doSambaUnpatch:   () => Promise<void>;
+  doSambaRebuild:   () => Promise<void>;
   addShare:         () => Promise<void>;
   removeShare:      () => Promise<void>;
   reloadSmbd:       () => Promise<void>;
@@ -128,6 +135,7 @@ interface FileState {
   setRemoveShareTarget: (s: SambaShare | null) => void;
   setAddShareOpen:      (v: boolean) => void;
   setNewShare:          (s: NewShare) => void;
+  setSambaError:        (v: string) => void;
 }
 
 export const useFileStore = create<FileState>((set, get) => ({
@@ -169,12 +177,14 @@ export const useFileStore = create<FileState>((set, get) => ({
   archiveName:   "",
   archivePaths:  [],
 
-  shares:            [],
-  sambaOpen:         false,
-  removeShareTarget: null,
-  addShareOpen:      false,
-  newShare:          { name: "", path: "/", comment: "", readOnly: false },
-  reloadingSmbd:     false,
+  shares:             [],
+  sambaOpen:          false,
+  removeShareTarget:  null,
+  addShareOpen:       false,
+  newShare:           { name: "", path: "/", comment: "", readOnly: false },
+  reloadingSmbd:      false,
+  sambaSetupPresent:  null,
+  sambaError:         "",
 
   initialized: false,
 
@@ -193,6 +203,7 @@ export const useFileStore = create<FileState>((set, get) => ({
       .catch(() => get().navigateTo("/"));
 
     void get().loadShares();
+    void get().checkSambaSetup();
   },
 
   // ── Navigation ───────────────────────────────────────────────────────────
@@ -254,9 +265,60 @@ export const useFileStore = create<FileState>((set, get) => ({
 
   loadShares: async () => {
     try {
-      const { data } = await api.api.samba.shares.get();
+      // Load all shares (our + external) for display in the file browser.
+      const { data } = await (api.api.samba as unknown as { "all-shares": { get: () => Promise<{ data: unknown }> } })["all-shares"].get();
       if (data) set({ shares: data as unknown as SambaShare[] });
     } catch { /* ignore */ }
+  },
+
+  checkSambaSetup: async () => {
+    try {
+      const { data } = await (api.api.samba as unknown as { "setup-status": { get: () => Promise<{ data: unknown }> } })["setup-status"].get();
+      const d = data as { present?: boolean } | null;
+      set({ sambaSetupPresent: d?.present ?? false });
+    } catch { /* ignore */ }
+  },
+
+  doSambaSetup: async () => {
+    try {
+      const { data } = await (api.api.samba as unknown as { setup: { post: () => Promise<{ data: unknown }> } }).setup.post();
+      const d = data as { ok?: boolean; error?: string } | null;
+      if (d?.ok) {
+        set({ sambaSetupPresent: true, sambaError: "" });
+      } else {
+        set({ sambaError: d?.error ?? "Setup failed" });
+      }
+    } catch (e) {
+      set({ sambaError: e instanceof Error ? e.message : "Setup failed" });
+    }
+  },
+
+  doSambaUnpatch: async () => {
+    try {
+      const { data } = await (api.api.samba as unknown as { setup: { delete: () => Promise<{ data: unknown }> } }).setup.delete();
+      const d = data as { ok?: boolean; error?: string } | null;
+      if (d?.ok) {
+        set({ sambaSetupPresent: false, sambaError: "" });
+      } else {
+        set({ sambaError: d?.error ?? "Unpatch failed" });
+      }
+    } catch (e) {
+      set({ sambaError: e instanceof Error ? e.message : "Unpatch failed" });
+    }
+  },
+
+  doSambaRebuild: async () => {
+    try {
+      const { data } = await (api.api.samba as unknown as { rebuild: { post: () => Promise<{ data: unknown }> } }).rebuild.post();
+      const d = data as { ok?: boolean; error?: string } | null;
+      if (!d?.ok) {
+        set({ sambaError: d?.error ?? "Rebuild failed" });
+      } else {
+        set({ sambaError: "" });
+      }
+    } catch (e) {
+      set({ sambaError: e instanceof Error ? e.message : "Rebuild failed" });
+    }
   },
 
   // ── File ops ─────────────────────────────────────────────────────────────
@@ -387,18 +449,23 @@ export const useFileStore = create<FileState>((set, get) => ({
   addShare: async () => {
     const { newShare, currentPath, loadShares } = get();
     if (!newShare.name.trim() || !newShare.path.trim()) return;
+    set({ sambaError: "" });
     try {
-      const { error } = await api.api.samba.shares.post(newShare);
-      if (!error) {
-        await loadShares();
-        set({ addShareOpen: false, newShare: { name: "", path: currentPath, comment: "", readOnly: false } });
-      }
-    } catch { /* ignore */ }
+      const { data, error } = await api.api.samba.shares.post(newShare);
+      const errMsg = (error?.value as { error?: string })?.error
+        ?? (data as { error?: string } | null)?.error;
+      if (errMsg) { set({ sambaError: errMsg }); return; }
+      await loadShares();
+      set({ addShareOpen: false, newShare: { name: "", path: currentPath, comment: "", readOnly: false } });
+    } catch (e) {
+      set({ sambaError: e instanceof Error ? e.message : "Failed to add share" });
+    }
   },
 
   removeShare: async () => {
     const { removeShareTarget, loadShares } = get();
     if (!removeShareTarget) return;
+    set({ sambaError: "" });
     try {
       const { error } = await api.api.samba.shares({ name: removeShareTarget.name }).delete();
       if (!error) await loadShares();
@@ -407,8 +474,12 @@ export const useFileStore = create<FileState>((set, get) => ({
   },
 
   reloadSmbd: async () => {
-    set({ reloadingSmbd: true });
-    try { await api.api.samba.reload.post(); } catch { /* ignore */ }
+    set({ reloadingSmbd: true, sambaError: "" });
+    try {
+      await api.api.samba.reload.post();
+    } catch (e) {
+      set({ sambaError: e instanceof Error ? e.message : "Reload failed" });
+    }
     set({ reloadingSmbd: false });
   },
 
@@ -454,4 +525,5 @@ export const useFileStore = create<FileState>((set, get) => ({
   setRemoveShareTarget: (removeShareTarget) => set({ removeShareTarget }),
   setAddShareOpen:      (addShareOpen) => set({ addShareOpen }),
   setNewShare:          (newShare)     => set({ newShare }),
+  setSambaError:        (sambaError)   => set({ sambaError }),
 }));

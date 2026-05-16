@@ -1,117 +1,205 @@
 import { Elysia, t } from "elysia";
+import { mkdirSync } from "node:fs";
 import { authGuard } from "./authGuard";
 import { config } from "../config";
-import { bins } from "../lib/commands";
+import { envConfig } from "../env-config";
+import { bins, commands } from "../lib/commands";
+import { SambaShareStore } from "../stores/samba-share-store";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-interface SambaShare {
-  name:      string;
-  path:      string;
-  comment:   string;
-  readOnly:  boolean;
+export interface SambaShare {
+  name:       string;
+  path:       string;
+  comment:    string;
+  readOnly:   boolean;
   browseable: boolean;
+  /** "anpan" = managed by anpan-os | "external" = from another config (casaos, etc.) */
+  source:     "anpan" | "external";
 }
 
-// ─── smb.conf parser ─────────────────────────────────────────────────────────
+// ─── Share-section parser ─────────────────────────────────────────────────────
 
-/** Split smb.conf into {global: string, shares: SambaShare[]}. */
-function parseConf(raw: string): { global: string; shares: SambaShare[] } {
-  const lines  = raw.split("\n");
-  const shares: SambaShare[] = [];
-
-  // Collect the [global] section as raw text — never touched.
-  let globalLines: string[] = [];
-  let inGlobal = false;
-
-  // Current share being accumulated.
-  let current: Partial<SambaShare> | null = null;
+/** Parse a conf file that contains only [ShareName] sections (no [global]). */
+function parseShares(raw: string, source: SambaShare["source"] = "anpan"): SambaShare[] {
+  const shares: SambaShare[]         = [];
+  let current:  Partial<SambaShare> | null = null;
 
   function flush() {
     if (current?.name) {
       shares.push({
         name:       current.name,
-        path:       current.path ?? "",
-        comment:    current.comment ?? "",
-        readOnly:   current.readOnly ?? false,
+        path:       current.path       ?? "",
+        comment:    current.comment    ?? "",
+        readOnly:   current.readOnly   ?? false,
         browseable: current.browseable ?? true,
+        source,
       });
     }
     current = null;
   }
 
-  for (const line of lines) {
-    const trimmed = line.trim();
+  for (const line of raw.split("\n")) {
+    const trimmed    = line.trim();
     const sectionMatch = trimmed.match(/^\[(.+)\]$/);
 
     if (sectionMatch) {
       const sectionName = sectionMatch[1]!;
-
-      if (sectionName.toLowerCase() === "global") {
-        flush();
-        inGlobal = true;
-        globalLines.push(line);
-        continue;
-      }
-
-      // Non-global section — flush previous share and start new one.
       flush();
-      inGlobal  = false;
-      current   = { name: sectionName };
-      continue;
-    }
-
-    if (inGlobal) {
-      globalLines.push(line);
+      if (sectionName.toLowerCase() !== "global") {
+        current = { name: sectionName };
+      }
       continue;
     }
 
     if (current) {
-      const kvMatch = trimmed.match(/^([^=]+?)\s*=\s*(.*)$/);
-      if (kvMatch) {
-        const key = kvMatch[1]!.trim().toLowerCase().replace(/\s+/g, " ");
-        const val = kvMatch[2]!.trim();
+      const kv = trimmed.match(/^([^=]+?)\s*=\s*(.*)$/);
+      if (kv) {
+        const key = kv[1]!.trim().toLowerCase().replace(/\s+/g, " ");
+        const val = kv[2]!.trim();
         switch (key) {
-          case "path":        current.path       = val; break;
-          case "comment":     current.comment    = val; break;
-          case "read only":   current.readOnly   = val.toLowerCase() === "yes"; break;
-          case "browseable":  current.browseable = val.toLowerCase() !== "no";  break;
+          case "path":       current.path       = val; break;
+          case "comment":    current.comment    = val; break;
+          case "read only":  current.readOnly   = val.toLowerCase() === "yes"; break;
+          case "browseable": current.browseable = val.toLowerCase() !== "no";  break;
         }
       }
     }
   }
-
   flush();
-
-  // Trim trailing empty lines from global section but preserve a terminating newline.
-  const globalStr = globalLines.join("\n");
-  return { global: globalStr, shares };
+  return shares;
 }
 
-/** Serialise shares back to smb.conf text. */
+/** Serialise an array of shares to conf-file text (no [global]). */
 function sharesToConf(shares: SambaShare[]): string {
   return shares.map((s) => [
     `[${s.name}]`,
-    `   path = ${s.path}`,
     `   comment = ${s.comment}`,
-    `   read only = ${s.readOnly ? "yes" : "no"}`,
-    `   browseable = ${s.browseable ? "yes" : "no"}`,
+    `   path = ${s.path}`,
+    `   public = Yes`,
+    `   browseable = ${s.browseable ? "Yes" : "No"}`,
+    `   read only = ${s.readOnly ? "Yes" : "No"}`,
+    `   guest ok = Yes`,
+    `   create mask = 0777`,
+    `   directory mask = 0777`,
+    `   force user = root`,
   ].join("\n")).join("\n\n");
 }
 
-/** Read, parse, modify, write smb.conf atomically. */
-async function readConf(): Promise<{ global: string; shares: SambaShare[] }> {
-  const file = Bun.file(config.sambaConfigPath);
-  if (!(await file.exists())) return { global: "", shares: [] };
-  return parseConf(await file.text());
+// ─── Our managed config (RUNTIME_CONFIG_DIR/samba.conf) ──────────────────────
+
+async function writeAnpanShares(shares: SambaShare[]): Promise<void> {
+  mkdirSync(envConfig.RUNTIME_CONFIG_DIR, { recursive: true });
+  const text = sharesToConf(shares);
+  await Bun.write(config.sambaSharesPath, text ? text + "\n" : "");
 }
 
-async function writeConf(globalSection: string, shares: SambaShare[]): Promise<void> {
-  const parts: string[] = [];
-  if (globalSection) parts.push(globalSection);
-  const shareText = sharesToConf(shares);
-  if (shareText) parts.push(shareText);
-  await Bun.write(config.sambaConfigPath, parts.join("\n\n") + "\n");
+/** Rebuild the conf file from SQLite — source of truth. */
+async function rebuildConfFromDb(): Promise<void> {
+  const rows = await SambaShareStore.findAll();
+  const shares: SambaShare[] = rows.map((r) => ({
+    name:       r.name,
+    path:       r.path,
+    comment:    r.comment,
+    readOnly:   r.readOnly,
+    browseable: r.browseable,
+    source:     "anpan",
+  }));
+  await writeAnpanShares(shares);
+}
+
+// ─── System smb.conf include management ──────────────────────────────────────
+
+const INCLUDE_MARKER = "# managed by anpan-os";
+
+function includeDirective(): string {
+  return `include = ${config.sambaSharesPath}   ${INCLUDE_MARKER}`;
+}
+
+async function readSystemConf(): Promise<string | null> {
+  const file = Bun.file(config.smbConfPath);
+  if (!(await file.exists())) return null;
+  return file.text();
+}
+
+/** True if our include line is already present in smb.conf. */
+async function isIncludePresent(): Promise<boolean> {
+  const raw = await readSystemConf();
+  if (!raw) return false;
+  return raw.includes(INCLUDE_MARKER);
+}
+
+/**
+ * Append our include directive to smb.conf.
+ * Requires root write permission.
+ */
+async function addIncludeToSystemConf(): Promise<void> {
+  const raw = await readSystemConf();
+  if (!raw) throw new Error(`${config.smbConfPath} not found`);
+  if (raw.includes(INCLUDE_MARKER)) return;
+  await Bun.write(config.smbConfPath, raw.trimEnd() + "\n" + includeDirective() + "\n");
+}
+
+/**
+ * Remove our include directive from smb.conf.
+ * Requires root write permission.
+ */
+async function removeIncludeFromSystemConf(): Promise<void> {
+  const raw = await readSystemConf();
+  if (!raw) throw new Error(`${config.smbConfPath} not found`);
+  if (!raw.includes(INCLUDE_MARKER)) return;
+  const lines = raw.split("\n").filter((l) => !l.includes(INCLUDE_MARKER));
+  await Bun.write(config.smbConfPath, lines.join("\n").trimEnd() + "\n");
+}
+
+// ─── Reload smbd ─────────────────────────────────────────────────────────────
+
+async function reloadSmbd(): Promise<void> {
+  const hasSmbcontrol = await commands.isAvailable("smbcontrol");
+  if (hasSmbcontrol) {
+    const proc = Bun.spawn([bins.smbcontrol, "smbd", "reload-config"], { stdout: "pipe", stderr: "pipe" });
+    const code = await proc.exited;
+    if (code !== 0) throw new Error(`smbcontrol exited ${code}`);
+  } else {
+    const proc = Bun.spawn([bins.systemctl, "reload", "smbd"], { stdout: "pipe", stderr: "pipe" });
+    const code = await proc.exited;
+    if (code !== 0) throw new Error(`systemctl reload smbd exited ${code}`);
+  }
+}
+
+// ─── Aggregate all shares from all included config files ─────────────────────
+
+async function readAllShares(): Promise<SambaShare[]> {
+  const rows = await SambaShareStore.findAll();
+  const anpan: SambaShare[] = rows.map((r) => ({
+    name:       r.name,
+    path:       r.path,
+    comment:    r.comment,
+    readOnly:   r.readOnly,
+    browseable: r.browseable,
+    source:     "anpan",
+  }));
+
+  const rawConf = await readSystemConf();
+  const external: SambaShare[] = [];
+
+  if (rawConf) {
+    const includePattern = /^[ \t]*include\s*=\s*(.+?)(?:\s*#.*)?$/gm;
+    let match: RegExpExecArray | null;
+    while ((match = includePattern.exec(rawConf)) !== null) {
+      const includePath = match[1]!.trim();
+      if (includePath === config.sambaSharesPath) continue;
+      try {
+        const file = Bun.file(includePath);
+        if (await file.exists()) {
+          const shares = parseShares(await file.text(), "external");
+          external.push(...shares);
+        }
+      } catch { /* unreadable — skip */ }
+    }
+  }
+
+  return [...anpan, ...external];
 }
 
 // ─── Plugin ───────────────────────────────────────────────────────────────────
@@ -120,26 +208,42 @@ export function sambaPlugin(jwtSecret: string) {
   return new Elysia({ prefix: "/api/samba" })
     .use(authGuard(jwtSecret))
 
-    // GET /api/samba/shares
+    // GET /api/samba/shares — our managed shares (from SQLite)
     .get("/shares", async () => {
       try {
-        const { shares } = await readConf();
-        return shares;
+        const rows = await SambaShareStore.findAll();
+        return rows.map((r) => ({
+          name:       r.name,
+          path:       r.path,
+          comment:    r.comment,
+          readOnly:   r.readOnly,
+          browseable: r.browseable,
+          source:     "anpan" as const,
+        }));
+      } catch {
+        return Response.json({ error: "Failed to read samba shares" }, { status: 500 });
+      }
+    })
+
+    // GET /api/samba/all-shares — all shares from all sources
+    .get("/all-shares", async () => {
+      try {
+        return await readAllShares();
       } catch {
         return Response.json({ error: "Failed to read samba config" }, { status: 500 });
       }
     })
 
-    // POST /api/samba/shares
-    .post("/shares", async ({ body }) => {
+    // POST /api/samba/shares — add a new share (writes SQLite + conf file)
+    .post("/shares", async ({ body, set }) => {
       try {
-        const { global: globalSection, shares } = await readConf();
-
-        if (shares.some((s) => s.name.toLowerCase() === body.name.toLowerCase())) {
-          return Response.json({ error: "Share name already exists" }, { status: 409 });
+        const existing = await SambaShareStore.findByName(body.name);
+        if (existing) {
+          set.status = 409;
+          return { error: "Share name already exists" };
         }
 
-        shares.push({
+        await SambaShareStore.create({
           name:       body.name,
           path:       body.path,
           comment:    body.comment ?? "",
@@ -147,10 +251,11 @@ export function sambaPlugin(jwtSecret: string) {
           browseable: true,
         });
 
-        await writeConf(globalSection, shares);
+        await rebuildConfFromDb();
         return { ok: true };
-      } catch {
-        return Response.json({ error: "Failed to update samba config" }, { status: 500 });
+      } catch (e) {
+        set.status = 500;
+        return { error: e instanceof Error ? e.message : "Failed to update samba config" };
       }
     }, {
       body: t.Object({
@@ -161,32 +266,91 @@ export function sambaPlugin(jwtSecret: string) {
       }),
     })
 
-    // DELETE /api/samba/shares/:name
-    .delete("/shares/:name", async ({ params }) => {
+    // PATCH /api/samba/shares/:name — update an existing share
+    .patch("/shares/:name", async ({ params, body, set }) => {
       try {
-        const { global: globalSection, shares } = await readConf();
-        const filtered = shares.filter(
-          (s) => s.name.toLowerCase() !== params.name.toLowerCase()
-        );
-
-        if (filtered.length === shares.length) {
-          return Response.json({ error: "Share not found" }, { status: 404 });
-        }
-
-        await writeConf(globalSection, filtered);
+        const updated = await SambaShareStore.updateByName(params.name, body);
+        if (!updated) { set.status = 404; return { error: "Share not found" }; }
+        await rebuildConfFromDb();
         return { ok: true };
-      } catch {
-        return Response.json({ error: "Failed to update samba config" }, { status: 500 });
+      } catch (e) {
+        set.status = 500;
+        return { error: e instanceof Error ? e.message : "Failed to update samba config" };
+      }
+    }, {
+      body: t.Object({
+        comment:    t.Optional(t.String()),
+        readOnly:   t.Optional(t.Boolean()),
+        browseable: t.Optional(t.Boolean()),
+      }),
+    })
+
+    // DELETE /api/samba/shares/:name
+    .delete("/shares/:name", async ({ params, set }) => {
+      try {
+        const deleted = await SambaShareStore.deleteByName(params.name);
+        if (!deleted) { set.status = 404; return { error: "Share not found" }; }
+        await rebuildConfFromDb();
+        return { ok: true };
+      } catch (e) {
+        set.status = 500;
+        return { error: e instanceof Error ? e.message : "Failed to update samba config" };
       }
     })
 
-    // POST /api/samba/reload
-    .post("/reload", async () => {
+    // GET /api/samba/setup-status
+    .get("/setup-status", async () => {
       try {
-        await Bun.$`${bins.systemctl} reload smbd`.quiet();
+        const present    = await isIncludePresent();
+        const sharesPath = config.sambaSharesPath;
+        const smbConf    = config.smbConfPath;
+        return { present, sharesPath, smbConf };
+      } catch (e) {
+        return Response.json({ error: e instanceof Error ? e.message : "Unknown error" }, { status: 500 });
+      }
+    })
+
+    // POST /api/samba/setup — patch smb.conf to include our shares file
+    .post("/setup", async ({ set }) => {
+      try {
+        await addIncludeToSystemConf();
         return { ok: true };
-      } catch {
-        return Response.json({ error: "Failed to reload smbd" }, { status: 500 });
+      } catch (e) {
+        set.status = 500;
+        return { error: e instanceof Error ? e.message : "Failed to patch smb.conf" };
+      }
+    })
+
+    // DELETE /api/samba/setup — remove our include directive from smb.conf
+    .delete("/setup", async ({ set }) => {
+      try {
+        await removeIncludeFromSystemConf();
+        return { ok: true };
+      } catch (e) {
+        set.status = 500;
+        return { error: e instanceof Error ? e.message : "Failed to unpatch smb.conf" };
+      }
+    })
+
+    // POST /api/samba/rebuild — rebuild conf file from SQLite
+    .post("/rebuild", async ({ set }) => {
+      try {
+        await rebuildConfFromDb();
+        return { ok: true };
+      } catch (e) {
+        set.status = 500;
+        return { error: e instanceof Error ? e.message : "Failed to rebuild samba config" };
+      }
+    })
+
+    // POST /api/samba/reload — reload smbd
+    .post("/reload", async ({ set }) => {
+      try {
+        await reloadSmbd();
+        return { ok: true };
+      } catch (e) {
+        set.status = 500;
+        return { error: e instanceof Error ? e.message : "Failed to reload smbd" };
       }
     });
 }
