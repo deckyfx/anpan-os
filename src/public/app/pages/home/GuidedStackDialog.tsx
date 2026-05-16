@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Editor from "@monaco-editor/react";
 import { FileCode, FileText, Loader2, Wand2 } from "lucide-react";
 import { Dialog } from "../../components/Dialog";
@@ -134,11 +134,20 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone }: {
   const [installLogBusy,   setInstallLogBusy]   = useState(false);
   const [error,            setError]            = useState("");
 
-  const logRef = useRef<HTMLPreElement | null>(null);
+  const logRef   = useRef<HTMLPreElement | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
   }, [actionLog]);
+
+  // Cancel any in-flight SSE when the component unmounts
+  useEffect(() => {
+    return () => { abortRef.current?.abort(); };
+  }, []);
+
+  // Block close while an install/deploy is streaming
+  const handleClose = useCallback(() => { if (!busy) onClose(); }, [busy, onClose]);
 
   // Edit mode: load existing YAML + env file on mount
   useEffect(() => {
@@ -247,12 +256,17 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone }: {
     const yaml = syncYaml();
     if (!yaml.trim()) { setError("Compose content cannot be empty."); return; }
 
+    const controller = new AbortController();
+    abortRef.current = controller;
     setBusy(true);
     setActionLog([]);
     setActiveTab("action-log");
 
     try {
-      const { data, error: err } = await api.api.compose.stacks.post({ name, content: yaml });
+      const { data, error: err } = await api.api.compose.stacks.post(
+        { name, content: yaml },
+        { fetch: { signal: controller.signal } },
+      );
       if (err) {
         setError((err.value as { error?: string })?.error ?? "Request failed");
         setBusy(false);
@@ -292,8 +306,11 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone }: {
         }
       }
     } catch (err) {
+      if (err instanceof Error && err.name === "AbortError") return;
       setError(err instanceof Error ? err.message : String(err));
       setBusy(false);
+    } finally {
+      abortRef.current = null;
     }
   };
 
@@ -306,13 +323,18 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone }: {
 
     const yaml = syncYaml();
 
+    const controller = new AbortController();
+    abortRef.current = controller;
     setBusy(true);
     setActionLog([]);
     setActiveTab("action-log");
 
     try {
       if (envTouched) {
-        const { error: envErr } = await api.api.compose.stacks({ name: stack!.name }).envfile.put({ content: envContent });
+        const { error: envErr } = await api.api.compose.stacks({ name: stack!.name }).envfile.put(
+          { content: envContent },
+          { fetch: { signal: controller.signal } },
+        );
         if (envErr) {
           setError((envErr.value as { error?: string })?.error ?? "Failed to save .env file");
           setBusy(false);
@@ -320,19 +342,25 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone }: {
         }
       }
 
-      await api.api.docker.stacks({ name: stack!.name }).patch({
-        title:     appConfig.title     || undefined,
-        icon:      appConfig.icon      || undefined,
-        scheme:    appConfig.scheme    || undefined,
-        portMap:   appConfig.portMap   || undefined,
-        indexPath: appConfig.indexPath || undefined,
-        address:   appConfig.address   || undefined,
-        note:      appConfig.note      || undefined,
-        openMode:  appConfig.openMode  || undefined,
-      });
+      await api.api.docker.stacks({ name: stack!.name }).patch(
+        {
+          title:     appConfig.title     || undefined,
+          icon:      appConfig.icon      || undefined,
+          scheme:    appConfig.scheme    || undefined,
+          portMap:   appConfig.portMap   || undefined,
+          indexPath: appConfig.indexPath || undefined,
+          address:   appConfig.address   || undefined,
+          note:      appConfig.note      || undefined,
+          openMode:  appConfig.openMode  || undefined,
+        },
+        { fetch: { signal: controller.signal } },
+      );
 
       const { data: sseData, error: sseErr } =
-        await api.api.compose.stacks({ name: stack!.name }).file.put({ content: yaml });
+        await api.api.compose.stacks({ name: stack!.name }).file.put(
+          { content: yaml },
+          { fetch: { signal: controller.signal } },
+        );
       if (sseErr) {
         setError((sseErr.value as { error?: string })?.error ?? "Request failed");
         setBusy(false);
@@ -357,8 +385,11 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone }: {
         }
       }
     } catch (err) {
+      if (err instanceof Error && err.name === "AbortError") return;
       setError(err instanceof Error ? err.message : String(err));
       setBusy(false);
+    } finally {
+      abortRef.current = null;
     }
   };
 
@@ -404,7 +435,7 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone }: {
 
       <button
         type="button"
-        onClick={onClose}
+        onClick={handleClose}
         disabled={busy}
         className="px-4 py-2 text-sm text-gray-400 hover:text-white transition-colors"
       >
@@ -426,7 +457,7 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone }: {
 
   if (loading) {
     return (
-      <Dialog open title={title} onClose={onClose} size="2xl" disableBackdropClose footer={footer}>
+      <Dialog open title={title} onClose={handleClose} size="2xl" disableBackdropClose footer={footer}>
         <div className="h-64 flex items-center justify-center text-gray-600 text-sm">
           <Loader2 size={18} className="animate-spin mr-2" /> Loading stack data…
         </div>
@@ -438,7 +469,7 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone }: {
     <Dialog
       open
       title={title}
-      onClose={onClose}
+      onClose={handleClose}
       size="2xl"
       disableBackdropClose
       notification={errorNotif}

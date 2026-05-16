@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { mkdirSync } from "node:fs";
 import { envConfig } from "./env-config";
 
@@ -30,7 +30,7 @@ passkey_allowed_origins = []
 root = "/"   # root path the file manager is allowed to browse
 
 [samba]
-config_path = "/etc/samba/smb.conf"
+# smb_conf = "/etc/samba/smb.conf"   # system smb.conf (anpan-os adds one include line here)
 `;
 
 interface ServerConfig {
@@ -56,7 +56,8 @@ interface FilesConfig {
 }
 
 interface SambaConfig {
-  config_path?: string;
+  /** Path to the system smb.conf (read to detect/add our include line). */
+  smb_conf?: string;
 }
 
 interface AppConfig {
@@ -144,9 +145,23 @@ class Config {
     return this.data.files.root ?? "/";
   }
 
-  /** Path to smb.conf — defaults to /etc/samba/smb.conf. */
-  get sambaConfigPath(): string {
-    return this.data.samba.config_path ?? "/etc/samba/smb.conf";
+  /**
+   * Path to our managed share list — always RUNTIME_CONFIG_DIR/samba.conf.
+   * Contains only [ShareName] sections; no [global] block.
+   * Writable by the app process without root.
+   */
+  get sambaSharesPath(): string {
+    return resolve(envConfig.RUNTIME_CONFIG_DIR, "samba.conf");
+  }
+
+  /**
+   * Path to the system smb.conf — defaults to /etc/samba/smb.conf.
+   * anpan-os adds a single `include = <sambaSharesPath>` line here (requires root).
+   */
+  get smbConfPath(): string {
+    const raw = this.data.samba.smb_conf;
+    if (!raw) return "/etc/samba/smb.conf";
+    return resolve(raw);
   }
 
   /** Server port — defaults to 3000. */

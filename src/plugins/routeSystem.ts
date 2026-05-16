@@ -29,16 +29,17 @@ export function systemPlugin(jwtSecret: string) {
       return { ok: true };
     })
     .get("/environment", async () => {
-      const [whoamiRes, uidRes, sambaRes] = await Promise.all([
+      const [whoamiRes, uidRes, sambaWhichRes] = await Promise.all([
         Bun.$`whoami`.quiet().nothrow(),
         Bun.$`id -u`.quiet().nothrow(),
         Bun.$`which smbd`.quiet().nothrow(),
       ]);
 
-      const user      = whoamiRes.stdout.toString().trim()  || (process.env.USER ?? "unknown");
-      const uid       = parseInt(uidRes.stdout.toString().trim(), 10);
-      const isRoot    = uid === 0;
-      const sambaInstalled = sambaRes.exitCode === 0;
+      const user   = whoamiRes.stdout.toString().trim() || (process.env.USER ?? "unknown");
+      const uid    = parseInt(uidRes.stdout.toString().trim(), 10);
+      const isRoot = uid === 0;
+
+      const sambaInstalled = sambaWhichRes.exitCode === 0;
 
       let sambaActive  = false;
       let sambaEnabled = false;

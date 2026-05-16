@@ -191,7 +191,7 @@ export function authPlugin(jwtSecret: string) {
     // ── Docker Hub auth ───────────────────────────────────────────────────────
 
     .get("/dockerhub", ({ jwt: jwtCtx, cookie: { anpan_session }, set }) => {
-      if (!bins.docker) { set.status = 503; return { error: "Docker is not available on this system" }; }
+      if (!bins.docker) { set.status = 503; return Promise.resolve({ error: "Docker is not available on this system" }); }
       return withDockerHubAuth(jwtCtx, anpan_session.value, set, async () => {
         const username = await SettingsStore.get("dockerhub_username");
         return { loggedIn: !!username, username: username ?? null };

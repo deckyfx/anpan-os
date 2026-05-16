@@ -4,7 +4,7 @@ import type { RowProps } from "./ListingTable";
 // ─── Grid view ────────────────────────────────────────────────────────────────
 
 export function GridView(props: RowProps) {
-  const { entries, creatingFolder, newFolderName, renamingPath, renameValue, selectedPaths,
+  const { entries, creatingFolder, newFolderName, renamingPath, renameValue, selectedPaths, sharedPaths,
           onRowClick, onRowCtx, onRenameChange, onRenameCommit, onRenameCancel,
           onFolderNameChange, onFolderCommit, onFolderCancel,
           onToggleSelect } = props;
@@ -47,7 +47,7 @@ export function GridView(props: RowProps) {
                   className="bg-gray-800 border border-gray-600 rounded px-2 py-0.5 text-xs text-white outline-none w-full" />
               ) : (
                 <>
-                  <FileIcon entry={entry} size="lg" />
+                  <FileIcon entry={entry} size="lg" shared={sharedPaths?.has(entry.path)} />
                   <span className="text-xs text-gray-300 text-center w-full truncate leading-tight">{entry.name}</span>
                 </>
               )}
