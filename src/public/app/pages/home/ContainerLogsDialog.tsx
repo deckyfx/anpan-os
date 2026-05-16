@@ -26,31 +26,31 @@ function startLogStream(
   onLine: (line: string) => void,
   onError: (msg: string) => void,
 ): () => void {
-  let cancelled = false;
+  const controller = new AbortController();
 
   void (async () => {
     try {
       const { data, error } = await (
         api.api.compose.stacks({ name: stackName })
           .containers({ container: containerName })
-          .logs.get() as unknown as Promise<{ data: AsyncIterable<{ data: SSEMsg }> | null; error: unknown }>
+          .logs.get({ fetch: { signal: controller.signal } }) as unknown as Promise<{ data: AsyncIterable<{ data: SSEMsg }> | null; error: unknown }>
       );
       if (error || !data) {
-        if (!cancelled) onError("Failed to connect to log stream");
+        if (!controller.signal.aborted) onError("Failed to connect to log stream");
         return;
       }
       for await (const event of data) {
-        if (cancelled) break;
+        if (controller.signal.aborted) break;
         const m = event.data as SSEMsg;
         if (m.log !== undefined) onLine(m.log);
         else if (m.error)        onError(m.error);
       }
     } catch {
-      if (!cancelled) onError("Log stream disconnected");
+      if (!controller.signal.aborted) onError("Log stream disconnected");
     }
   })();
 
-  return () => { cancelled = true; };
+  return () => { controller.abort(); };
 }
 
 export function ContainerLogsDialog({ stack, open, onClose }: {

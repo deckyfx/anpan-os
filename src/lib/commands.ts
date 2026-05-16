@@ -77,6 +77,16 @@ const TOOLS = {
       darwin: "Not applicable — use: brew services restart samba",
     },
   },
+  ss: {
+    name:        "ss",
+    description: "Socket statistics — list listening ports",
+    feature:     "port scanner",
+    binary:      { linux: "ss" }, // not present on macOS (use netstat/lsof there)
+    installHint: {
+      linux:  "Built-in (iproute2) — apt install iproute2  /  yum install iproute",
+      darwin: "Not applicable — use: netstat -an  or  lsof -i",
+    },
+  },
 } as const satisfies Record<string, ToolDef>;
 
 export type ToolId = keyof typeof TOOLS;

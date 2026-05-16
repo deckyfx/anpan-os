@@ -478,6 +478,21 @@ export function composePlugin(jwtSecret: string) {
         return;
       }
 
+      // Verify the container actually belongs to this compose project before streaming.
+      const checkProc = Bun.spawn(
+        [bins.docker, "ps", "-a",
+         "--filter", `label=com.docker.compose.project=${name}`,
+         "--filter", `name=^/${container}$`,
+         "--format", "{{.Names}}"],
+        { stdout: "pipe", stderr: "pipe" },
+      );
+      await checkProc.exited;
+      const matched = (await new Response(checkProc.stdout).text()).trim();
+      if (!matched) {
+        yield sse({ data: { error: "Container not found in this stack" } satisfies SSEMsg });
+        return;
+      }
+
       const proc = Bun.spawn(
         [bins.docker, "logs", "--tail=100", "-f", container],
         { stdout: "pipe", stderr: "pipe" },

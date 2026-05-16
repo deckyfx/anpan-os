@@ -4,6 +4,7 @@ import { Dialog } from "../../components/Dialog";
 import { api }   from "../../lib/api";
 
 interface PortEntry {
+  id:        string; // stable composite key: "<address>:<port>/<proto>"
   port:      number;
   proto:     string;
   address:   string;
@@ -106,8 +107,8 @@ export function PortsDialog({ open, onClose }: { open: boolean; onClose: () => v
     if (open) void load();
   }, [open, load]);
 
-  const updateNote = (idx: number, note: string | null) => {
-    setPorts(prev => prev.map((p, i) => i === idx ? { ...p, note } : p));
+  const updateNote = (id: string, note: string | null) => {
+    setPorts(prev => prev.map(p => p.id === id ? { ...p, note } : p));
   };
 
   const q = filter.trim().toLowerCase();
@@ -196,11 +197,9 @@ export function PortsDialog({ open, onClose }: { open: boolean; onClose: () => v
                   </td>
                 </tr>
               ) : (
-                displayed.map((entry) => {
-                  const origIdx = ports.indexOf(entry);
-                  return (
+                displayed.map((entry) => (
                     <tr
-                      key={`${entry.port}/${entry.proto}`}
+                      key={entry.id}
                       className="border-b border-gray-800/60 hover:bg-gray-900/50 transition-colors group"
                     >
                       <td className="px-4 py-2 font-mono font-semibold text-amber-400">
@@ -227,11 +226,10 @@ export function PortsDialog({ open, onClose }: { open: boolean; onClose: () => v
                         )}
                       </td>
                       <td className="px-4 py-2">
-                        <NoteCell entry={entry} onSaved={(note) => updateNote(origIdx, note)} />
+                        <NoteCell entry={entry} onSaved={(note) => updateNote(entry.id, note)} />
                       </td>
                     </tr>
-                  );
-                })
+                  ))
               )}
             </tbody>
           </table>

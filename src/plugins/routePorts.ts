@@ -5,6 +5,7 @@ import { bins }      from "../lib/commands";
 import { envConfig } from "../env-config";
 
 export interface PortEntry {
+  id:        string; // stable composite key: "<address>:<port>/<proto>"
   port:      number;
   proto:     string;
   address:   string;
@@ -21,12 +22,10 @@ function notesPath(): string {
 }
 
 async function readNotes(): Promise<NotesMap> {
-  try {
-    const text = await Bun.file(notesPath()).text();
-    return JSON.parse(text) as NotesMap;
-  } catch {
-    return {};
-  }
+  const file = Bun.file(notesPath());
+  if (!(await file.exists())) return {};
+  const text = await file.text();
+  return JSON.parse(text) as NotesMap;
 }
 
 async function writeNotes(notes: NotesMap): Promise<void> {
@@ -66,21 +65,21 @@ function parseSsOutput(raw: string): Array<{ port: number; address: string; proc
 }
 
 /**
- * Parse `docker ps --format '{{.Names}}\t{{.Ports}}'` into a map from host port → container name.
+ * Parse `docker ps --format '{{.Names}}\t{{.Ports}}'` into a map from "port/proto" → container name.
  *
  * Port bindings look like: 0.0.0.0:80->80/tcp, 0.0.0.0:443->443/tcp
  */
-function parseDockerPorts(raw: string): Map<number, string> {
-  const map = new Map<number, string>();
+function parseDockerPorts(raw: string): Map<string, string> {
+  const map = new Map<string, string>();
   for (const line of raw.split("\n")) {
     const tab = line.indexOf("\t");
     if (tab < 0) continue;
     const name  = line.slice(0, tab).trim();
     const ports = line.slice(tab + 1).trim();
     for (const binding of ports.split(",")) {
-      // Match "host-addr:port->container-port/proto"
-      const m = binding.trim().match(/:(\d+)->/);
-      if (m) map.set(parseInt(m[1]!, 10), name);
+      // Match "host-addr:port->container-port/proto"  e.g. "0.0.0.0:80->80/tcp"
+      const m = binding.trim().match(/:(\d+)->[\d:]+\/(tcp|udp)/i);
+      if (m) map.set(`${m[1]}/${m[2]!.toLowerCase()}`, name);
     }
   }
   return map;
@@ -126,12 +125,13 @@ export function portsPlugin(jwtSecret: string) {
       const ports: PortEntry[] = unique
         .sort((a, b) => a.port - b.port)
         .map(e => ({
+          id:        `${e.address}:${e.port}/${e.proto}`,
           port:      e.port,
           proto:     e.proto,
           address:   e.address,
           process:   e.process,
           pid:       e.pid,
-          container: containerByPort.get(e.port) ?? null,
+          container: containerByPort.get(`${e.port}/${e.proto}`) ?? null,
           note:      notes[`${e.port}/${e.proto}`] ?? null,
         }));
 
