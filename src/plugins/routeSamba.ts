@@ -1,5 +1,6 @@
 import { Elysia, t } from "elysia";
 import { mkdirSync } from "node:fs";
+import { stat } from "node:fs/promises";
 import { authGuard } from "./authGuard";
 import { config } from "../config";
 import { envConfig } from "../env-config";
@@ -110,10 +111,13 @@ async function rebuildConfFromDb(): Promise<void> {
 
 // ─── System smb.conf include management ──────────────────────────────────────
 
+// Written as a comment line above the include so the path has no inline comment —
+// samba's include parser does not strip inline # comments from the path value.
 const INCLUDE_MARKER = "# managed by anpan-os";
 
-function includeDirective(): string {
-  return `include = ${config.sambaSharesPath}   ${INCLUDE_MARKER}`;
+/** The two-line block we inject into smb.conf (inside an explicit [global] for scope). */
+function includeBlock(): string {
+  return `[global]\n   ${INCLUDE_MARKER}\n   include = ${config.sambaSharesPath}`;
 }
 
 async function readSystemConf(): Promise<string | null> {
@@ -122,34 +126,42 @@ async function readSystemConf(): Promise<string | null> {
   return file.text();
 }
 
-/** True if our include line is already present in smb.conf. */
+/** True if our include line (with the current path) is already present in smb.conf. */
 async function isIncludePresent(): Promise<boolean> {
   const raw = await readSystemConf();
   if (!raw) return false;
-  return raw.includes(INCLUDE_MARKER);
+  return raw.includes(INCLUDE_MARKER) && raw.includes(config.sambaSharesPath);
+}
+
+/** Strip all lines belonging to a previous anpan-os block (marker comment + include path). */
+function stripAnpanLines(raw: string): string {
+  return raw
+    .split("\n")
+    .filter((l) => !l.includes(INCLUDE_MARKER) && !l.includes(config.sambaSharesPath))
+    .join("\n");
 }
 
 /**
- * Append our include directive to smb.conf.
+ * Inject our include block into smb.conf (or update a stale one).
  * Requires root write permission.
  */
 async function addIncludeToSystemConf(): Promise<void> {
   const raw = await readSystemConf();
   if (!raw) throw new Error(`${config.smbConfPath} not found`);
-  if (raw.includes(INCLUDE_MARKER)) return;
-  await Bun.write(config.smbConfPath, raw.trimEnd() + "\n" + includeDirective() + "\n");
+  if (await isIncludePresent()) return;
+  const cleaned = stripAnpanLines(raw);
+  await Bun.write(config.smbConfPath, cleaned.trimEnd() + "\n" + includeBlock() + "\n");
 }
 
 /**
- * Remove our include directive from smb.conf.
+ * Remove our include block from smb.conf.
  * Requires root write permission.
  */
 async function removeIncludeFromSystemConf(): Promise<void> {
   const raw = await readSystemConf();
   if (!raw) throw new Error(`${config.smbConfPath} not found`);
   if (!raw.includes(INCLUDE_MARKER)) return;
-  const lines = raw.split("\n").filter((l) => !l.includes(INCLUDE_MARKER));
-  await Bun.write(config.smbConfPath, lines.join("\n").trimEnd() + "\n");
+  await Bun.write(config.smbConfPath, stripAnpanLines(raw).trimEnd() + "\n");
 }
 
 // ─── Reload smbd ─────────────────────────────────────────────────────────────
@@ -237,6 +249,21 @@ export function sambaPlugin(jwtSecret: string) {
     // POST /api/samba/shares — add a new share (writes SQLite + conf file)
     .post("/shares", async ({ body, set }) => {
       try {
+        if (!/^[a-zA-Z0-9_\-]+$/.test(body.name)) {
+          set.status = 422;
+          return { error: "Share name may only contain letters, numbers, hyphens, and underscores" };
+        }
+
+        const pathStat = await stat(body.path).catch(() => null);
+        if (!pathStat) {
+          set.status = 422;
+          return { error: "Path does not exist" };
+        }
+        if (!pathStat.isDirectory()) {
+          set.status = 422;
+          return { error: "Path is not a directory" };
+        }
+
         const existing = await SambaShareStore.findByName(body.name);
         if (existing) {
           set.status = 409;
@@ -252,6 +279,7 @@ export function sambaPlugin(jwtSecret: string) {
         });
 
         await rebuildConfFromDb();
+        await reloadSmbd().catch(() => { /* smbd may not be running yet */ });
         return { ok: true };
       } catch (e) {
         set.status = 500;
@@ -291,6 +319,7 @@ export function sambaPlugin(jwtSecret: string) {
         const deleted = await SambaShareStore.deleteByName(params.name);
         if (!deleted) { set.status = 404; return { error: "Share not found" }; }
         await rebuildConfFromDb();
+        await reloadSmbd().catch(() => { /* smbd may not be running yet */ });
         return { ok: true };
       } catch (e) {
         set.status = 500;

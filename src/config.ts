@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { mkdirSync } from "node:fs";
 import { envConfig } from "./env-config";
 
@@ -151,7 +151,7 @@ class Config {
    * Writable by the app process without root.
    */
   get sambaSharesPath(): string {
-    return join(envConfig.RUNTIME_CONFIG_DIR, "samba.conf");
+    return resolve(envConfig.RUNTIME_CONFIG_DIR, "samba.conf");
   }
 
   /**

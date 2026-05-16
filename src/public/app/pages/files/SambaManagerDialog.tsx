@@ -1,6 +1,8 @@
 import React, { useState } from "react";
+import { Trash2, Plus } from "lucide-react";
 import { Dialog } from "../../components/Dialog";
 import { useFileStore } from "../../stores/fileStore";
+import { AddShareDialog } from "./AddShareDialog";
 
 // ─── Status badge ─────────────────────────────────────────────────────────────
 
@@ -23,10 +25,11 @@ function SambaManagerDialogInner({ onClose }: Omit<Props, "open">) {
     shares, sambaSetupPresent, sambaError,
     loadShares, checkSambaSetup, doSambaSetup, doSambaUnpatch, doSambaRebuild,
     reloadSmbd, reloadingSmbd,
-    setSambaError,
+    setSambaError, setRemoveShareTarget, removeShare,
   } = useFileStore();
 
-  const [busy, setBusy] = useState(false);
+  const [busy,          setBusy]          = useState(false);
+  const [addShareOpen,  setAddShareOpen]  = useState(false);
 
   async function run(action: () => Promise<void>) {
     setBusy(true);
@@ -34,6 +37,18 @@ function SambaManagerDialogInner({ onClose }: Omit<Props, "open">) {
     try {
       await action();
       await Promise.all([loadShares(), checkSambaSetup()]);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleRemoveShare(share: (typeof shares)[number]) {
+    setBusy(true);
+    setSambaError("");
+    setRemoveShareTarget(share);
+    try {
+      await removeShare();
+      await loadShares();
     } finally {
       setBusy(false);
     }
@@ -47,6 +62,7 @@ function SambaManagerDialogInner({ onClose }: Omit<Props, "open">) {
       open
       title="Samba Manager"
       size="lg"
+      minHeight="600px"
       onClose={onClose}
       notification={sambaError ? <p className="text-xs text-red-400">{sambaError}</p> : undefined}
       footer={
@@ -124,61 +140,85 @@ function SambaManagerDialogInner({ onClose }: Omit<Props, "open">) {
           </div>
         </section>
 
+        {/* ── Add share ──────────────────────────────────────────────────── */}
+        <section className="flex items-center justify-between">
+          <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wide">Shares ({shares.length})</h3>
+          <button
+            disabled={busy}
+            onClick={() => setAddShareOpen(true)}
+            className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded bg-green-700 hover:bg-green-600 text-white transition-colors disabled:opacity-40"
+          >
+            <Plus size={12} /> Add Share
+          </button>
+        </section>
+
+        <AddShareDialog
+          open={addShareOpen}
+          onClose={() => { setAddShareOpen(false); void loadShares(); }}
+        />
+
         {/* ── Shares ─────────────────────────────────────────────────────── */}
         <section>
-          <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">
-            All Shares ({shares.length})
-          </h3>
           <div className="rounded-lg bg-gray-800/60 border border-gray-700 overflow-hidden">
             {shares.length === 0 && (
               <p className="px-4 py-3 text-xs text-gray-600">No shares configured.</p>
             )}
 
-            {anpanShares.length > 0 && (
-              <>
-                <div className="px-4 py-1.5 bg-gray-800/80 border-b border-gray-700">
-                  <span className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide">Managed by anpan-os</span>
-                </div>
-                {anpanShares.map((share) => (
-                  <div key={share.name} className="px-4 py-2.5 flex items-start gap-3 border-b border-gray-700/50 last:border-0">
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-1.5">
-                        <span className="text-sm font-medium text-gray-200">{share.name}</span>
-                        {share.readOnly && (
-                          <span className="text-[9px] text-gray-500 border border-gray-600/30 rounded-full px-1.5">ro</span>
+            <div className="max-h-96 overflow-y-auto">
+              {anpanShares.length > 0 && (
+                <>
+                  <div className="px-4 py-1.5 bg-gray-800/80 border-b border-gray-700 sticky top-0">
+                    <span className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide">Managed by anpan-os</span>
+                  </div>
+                  {anpanShares.map((share) => (
+                    <div key={share.name} className="px-4 py-2.5 flex items-center gap-3 border-b border-gray-700/50 last:border-0">
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-sm font-medium text-gray-200">{share.name}</span>
+                          {share.readOnly && (
+                            <span className="text-[9px] text-gray-500 border border-gray-600/30 rounded-full px-1.5">ro</span>
+                          )}
+                        </div>
+                        <span className="text-xs text-gray-500 truncate block">{share.path}</span>
+                        {share.comment && (
+                          <span className="text-[11px] text-gray-600 italic">{share.comment}</span>
                         )}
                       </div>
-                      <span className="text-xs text-gray-500 truncate block">{share.path}</span>
-                      {share.comment && (
-                        <span className="text-[11px] text-gray-600 italic">{share.comment}</span>
-                      )}
+                      <button
+                        disabled={busy}
+                        onClick={() => void handleRemoveShare(share)}
+                        title="Remove share"
+                        className="p-1.5 rounded text-gray-600 hover:text-red-400 hover:bg-red-400/10 transition-colors disabled:opacity-40 shrink-0"
+                      >
+                        <Trash2 size={13} />
+                      </button>
                     </div>
-                  </div>
-                ))}
-              </>
-            )}
+                  ))}
+                </>
+              )}
 
-            {externalShares.length > 0 && (
-              <>
-                <div className="px-4 py-1.5 bg-gray-800/80 border-t border-gray-700">
-                  <span className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide">External (CasaOS / other)</span>
-                </div>
-                {externalShares.map((share) => (
-                  <div key={share.name} className="px-4 py-2.5 flex items-start gap-3 border-b border-gray-700/50 last:border-0">
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-1.5">
-                        <span className="text-sm font-medium text-gray-200">{share.name}</span>
-                        <span className="text-[9px] text-sky-500 border border-sky-500/30 rounded-full px-1.5">external</span>
-                        {share.readOnly && (
-                          <span className="text-[9px] text-gray-500 border border-gray-600/30 rounded-full px-1.5">ro</span>
-                        )}
-                      </div>
-                      <span className="text-xs text-gray-500 truncate block">{share.path}</span>
-                    </div>
+              {externalShares.length > 0 && (
+                <>
+                  <div className="px-4 py-1.5 bg-gray-800/80 border-t border-gray-700 sticky top-0">
+                    <span className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide">External (CasaOS / other)</span>
                   </div>
-                ))}
-              </>
-            )}
+                  {externalShares.map((share) => (
+                    <div key={share.name} className="px-4 py-2.5 flex items-start gap-3 border-b border-gray-700/50 last:border-0">
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-sm font-medium text-gray-200">{share.name}</span>
+                          <span className="text-[9px] text-sky-500 border border-sky-500/30 rounded-full px-1.5">external</span>
+                          {share.readOnly && (
+                            <span className="text-[9px] text-gray-500 border border-gray-600/30 rounded-full px-1.5">ro</span>
+                          )}
+                        </div>
+                        <span className="text-xs text-gray-500 truncate block">{share.path}</span>
+                      </div>
+                    </div>
+                  ))}
+                </>
+              )}
+            </div>
           </div>
         </section>
 

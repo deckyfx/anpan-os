@@ -11,6 +11,7 @@ export interface RowProps {
   renamingPath:      string | null;
   renameValue:       string;
   selectedPaths:     Set<string>;
+  sharedPaths?:      Set<string>;
   onRowClick:        (e: React.MouseEvent, entry: FileEntry) => void;
   onRowCtx:          (e: React.MouseEvent, entry: FileEntry) => void;
   onRenameChange:    (v: string) => void;
@@ -26,7 +27,7 @@ export interface RowProps {
 // ─── List view ────────────────────────────────────────────────────────────────
 
 export function ListingTable(props: RowProps) {
-  const { entries, creatingFolder, newFolderName, renamingPath, renameValue, selectedPaths,
+  const { entries, creatingFolder, newFolderName, renamingPath, renameValue, selectedPaths, sharedPaths,
           onRowClick, onRowCtx, onRenameChange, onRenameCommit, onRenameCancel,
           onFolderNameChange, onFolderCommit, onFolderCancel,
           onToggleSelect, onToggleSelectAll } = props;
@@ -90,7 +91,7 @@ export function ListingTable(props: RowProps) {
                     className="bg-gray-800 border border-gray-600 rounded px-2 py-0.5 text-sm text-white outline-none" />
                 ) : (
                   <span className="flex items-center gap-2">
-                    <FileIcon entry={entry} />
+                    <FileIcon entry={entry} shared={sharedPaths?.has(entry.path)} />
                     <span className="text-gray-200">{entry.name}</span>
                   </span>
                 )}

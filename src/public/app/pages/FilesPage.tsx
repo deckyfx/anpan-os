@@ -6,7 +6,7 @@ import { useSystemStore } from "../stores/systemStore";
 import { TopBar }        from "./home/TopBar";
 import { ChevronLeft, ChevronRight, FolderUp, House, LayoutGrid, List,
          FolderOpen, Pencil, Download, Archive, PackageOpen, ShieldCheck, Info,
-         Trash2, FolderPlus, Upload, Network } from "lucide-react";
+         Trash2, FolderPlus, Upload, Network, Share2, FolderMinus } from "lucide-react";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { Dialog }        from "../components/Dialog";
 import type { FileEntry } from "./files/types";
@@ -19,6 +19,7 @@ import { ListingTable }  from "./files/ListingTable";
 import { GridView }      from "./files/GridView";
 import { SambaSection }  from "./files/SambaSection";
 import { SambaManagerDialog } from "./files/SambaManagerDialog";
+import { AddShareDialog }     from "./files/AddShareDialog";
 import { UploadProgressDialog } from "./files/UploadProgressDialog";
 
 // ─── Component ───────────────────────────────────────────────────────────────
@@ -50,6 +51,8 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
     // Archive
     archiveDialog, archiveName, archivePaths,
     setArchiveDialog, setArchiveName, setArchivePaths, handleArchive, handleExtract,
+    // Samba
+    shares, sambaSetupPresent, setRemoveShareTarget, removeShare,
   } = useFileStore();
 
   const { username, logout, hasPasskey, registerPasskey } = useAuthStore();
@@ -58,6 +61,8 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
   const sambaEnabled = isRoot && hasBin("smbd");
 
   const [sambaManagerOpen, setSambaManagerOpen] = useState(false);
+  const [pendingRemoveShare, setPendingRemoveShare] = useState<(typeof shares)[number] | null>(null);
+  const [addShareInitial, setAddShareInitial] = useState<{ name: string; path: string } | null>(null);
 
   useEffect(() => { useFileStore.getState().initialize(); }, []);
 
@@ -93,8 +98,12 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
     setArchiveDialog(true);
   }
 
+  const sharedPaths = new Set(
+    shares.filter(s => s.source === "anpan").map(s => s.path)
+  );
+
   const sharedRowProps = {
-    entries, creatingFolder, newFolderName, renamingPath, renameValue, selectedPaths,
+    entries, creatingFolder, newFolderName, renamingPath, renameValue, selectedPaths, sharedPaths,
     onRowClick: handleRowClick, onRowCtx: handleRowCtx,
     onRenameChange: setRenameValue, onRenameCommit: commitRename,
     onRenameCancel: () => setRenamingPath(null),
@@ -200,6 +209,13 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
 
       <SambaManagerDialog open={sambaManagerOpen} onClose={() => setSambaManagerOpen(false)} />
 
+      <AddShareDialog
+        open={!!addShareInitial}
+        initialName={addShareInitial?.name}
+        initialPath={addShareInitial?.path}
+        onClose={() => setAddShareInitial(null)}
+      />
+
       {/* File preview */}
       <Dialog open={!!drawerEntry} title={drawerEntry?.name ?? ""} onClose={() => setDrawerEntry(null)} size="xl">
         {drawerEntry && (
@@ -220,6 +236,16 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
       <ConfirmDialog open={!!deleteTarget} title="Delete"
         message={`Delete "${deleteTarget?.name}"? This cannot be undone.`}
         confirmLabel="Delete" danger onConfirm={confirmDelete} onCancel={() => setDeleteTarget(null)} />
+
+      {/* Remove share confirm */}
+      <ConfirmDialog open={!!pendingRemoveShare} title="Remove Share"
+        message={`Remove the "${pendingRemoveShare?.name}" share? The folder will not be deleted.`}
+        confirmLabel="Remove" danger
+        onConfirm={() => {
+          if (pendingRemoveShare) { setRemoveShareTarget(pendingRemoveShare); void removeShare(); }
+          setPendingRemoveShare(null);
+        }}
+        onCancel={() => setPendingRemoveShare(null)} />
 
       {/* ChMod */}
       <ChmodDialog
@@ -303,6 +329,22 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
                 <CtxSep />
                 <CtxItem label="Permissions…" icon={<ShieldCheck  size={14} />} onClick={() => { setChmodTarget(ctxMenu.entry!); setCtxMenu(null); }} />
                 <CtxItem label="Info"          icon={<Info         size={14} />} onClick={() => { setInfoTarget(ctxMenu.entry!); setCtxMenu(null); }} />
+                {sambaEnabled && sambaSetupPresent && ctxMenu.entry.isDir && (
+                  sharedPaths.has(ctxMenu.entry.path) ? (
+                    <CtxItem label="Remove Share" icon={<FolderMinus size={14} />} onClick={() => {
+                      const e = ctxMenu.entry!;
+                      const share = shares.find(s => s.path === e.path && s.source === "anpan");
+                      if (share) setPendingRemoveShare(share);
+                      setCtxMenu(null);
+                    }} />
+                  ) : (
+                    <CtxItem label="Share…" icon={<Share2 size={14} />} onClick={() => {
+                      const e = ctxMenu.entry!;
+                      setAddShareInitial({ name: e.name.toLowerCase().replace(/[^a-z0-9]/g, "-"), path: e.path });
+                      setCtxMenu(null);
+                    }} />
+                  )
+                )}
                 <CtxSep />
                 <CtxItem label="Delete" danger icon={<Trash2       size={14} />} onClick={() => { setDeleteTarget(ctxMenu.entry!); setCtxMenu(null); }} />
               </>
