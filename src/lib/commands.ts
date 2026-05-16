@@ -120,7 +120,7 @@ class CommandRegistry {
   bin(id: ToolId): string | undefined {
     const platform = process.platform as Platform;
     const binaries = this.tools[id].binary as Partial<Record<Platform, string>>;
-    return binaries[platform] ?? binaries.linux;
+    return binaries[platform];
   }
 
   /** Returns true if the binary is present on $PATH. */
@@ -163,7 +163,7 @@ function resolveBins(): Record<ToolId, string> {
   return Object.fromEntries(
     (Object.keys(TOOLS) as ToolId[]).map((id) => {
       const binaries = TOOLS[id].binary as Partial<Record<Platform, string>>;
-      const binary   = binaries[platform] ?? binaries.linux ?? id;
+      const binary   = binaries[platform] ?? id;
       return [id, binary];
     }),
   ) as Record<ToolId, string>;
