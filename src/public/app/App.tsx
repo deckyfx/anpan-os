@@ -14,7 +14,10 @@ export function App() {
   const { path, navigate } = useRouter();
   const prevViewRef = useRef<string>("");
 
-  // Lazy-init: run once on first render, no useEffect needed.
+  // Intentional: useState initializer runs exactly once per mount, synchronously,
+  // with no cleanup phase. useEffect([]) fires twice in React StrictMode (mount →
+  // unmount → remount), which would send duplicate auth/load requests on startup.
+  // This pattern is a deliberate trade-off to avoid that double-fire.
   useState(() => {
     void checkAuth();
     void useSystemStore.getState().load();

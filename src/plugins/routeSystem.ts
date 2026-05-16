@@ -39,11 +39,7 @@ export function systemPlugin(jwtSecret: string) {
       const uid    = parseInt(uidRes.stdout.toString().trim(), 10);
       const isRoot = uid === 0;
 
-      // sudo sanitises PATH; fall back to common system locations
-      const sambaInstalled = sambaWhichRes.exitCode === 0
-        || await Bun.file("/usr/sbin/smbd").exists()
-        || await Bun.file("/usr/local/sbin/smbd").exists()
-        || await Bun.file("/sbin/smbd").exists();
+      const sambaInstalled = sambaWhichRes.exitCode === 0;
 
       let sambaActive  = false;
       let sambaEnabled = false;
