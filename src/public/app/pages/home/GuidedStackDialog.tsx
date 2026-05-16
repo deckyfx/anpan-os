@@ -331,7 +331,10 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone }: {
 
     try {
       if (envTouched) {
-        const { error: envErr } = await api.api.compose.stacks({ name: stack!.name }).envfile.put({ content: envContent });
+        const { error: envErr } = await api.api.compose.stacks({ name: stack!.name }).envfile.put(
+          { content: envContent },
+          { fetch: { signal: controller.signal } },
+        );
         if (envErr) {
           setError((envErr.value as { error?: string })?.error ?? "Failed to save .env file");
           setBusy(false);
@@ -339,16 +342,19 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone }: {
         }
       }
 
-      await api.api.docker.stacks({ name: stack!.name }).patch({
-        title:     appConfig.title     || undefined,
-        icon:      appConfig.icon      || undefined,
-        scheme:    appConfig.scheme    || undefined,
-        portMap:   appConfig.portMap   || undefined,
-        indexPath: appConfig.indexPath || undefined,
-        address:   appConfig.address   || undefined,
-        note:      appConfig.note      || undefined,
-        openMode:  appConfig.openMode  || undefined,
-      });
+      await api.api.docker.stacks({ name: stack!.name }).patch(
+        {
+          title:     appConfig.title     || undefined,
+          icon:      appConfig.icon      || undefined,
+          scheme:    appConfig.scheme    || undefined,
+          portMap:   appConfig.portMap   || undefined,
+          indexPath: appConfig.indexPath || undefined,
+          address:   appConfig.address   || undefined,
+          note:      appConfig.note      || undefined,
+          openMode:  appConfig.openMode  || undefined,
+        },
+        { fetch: { signal: controller.signal } },
+      );
 
       const { data: sseData, error: sseErr } =
         await api.api.compose.stacks({ name: stack!.name }).file.put(
