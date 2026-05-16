@@ -98,12 +98,14 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
     setArchiveDialog(true);
   }
 
-  const sharedPaths = new Set(
-    shares.filter(s => s.source === "anpan").map(s => s.path)
-  );
+  // All shared paths (including external) — used for visual badge on FileIcon
+  const allSharedPaths = new Set(shares.map(s => s.path));
+  // Only anpan-managed paths — used to gate "Remove Share" vs "Share…" actions
+  const managedSharedPaths = new Set(shares.filter(s => s.source === "anpan").map(s => s.path));
 
   const sharedRowProps = {
-    entries, creatingFolder, newFolderName, renamingPath, renameValue, selectedPaths, sharedPaths,
+    entries, creatingFolder, newFolderName, renamingPath, renameValue, selectedPaths,
+    sharedPaths: allSharedPaths,
     onRowClick: handleRowClick, onRowCtx: handleRowCtx,
     onRenameChange: setRenameValue, onRenameCommit: commitRename,
     onRenameCancel: () => setRenamingPath(null),
@@ -330,7 +332,7 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
                 <CtxItem label="Permissions…" icon={<ShieldCheck  size={14} />} onClick={() => { setChmodTarget(ctxMenu.entry!); setCtxMenu(null); }} />
                 <CtxItem label="Info"          icon={<Info         size={14} />} onClick={() => { setInfoTarget(ctxMenu.entry!); setCtxMenu(null); }} />
                 {sambaEnabled && sambaSetupPresent && ctxMenu.entry.isDir && (
-                  sharedPaths.has(ctxMenu.entry.path) ? (
+                  managedSharedPaths.has(ctxMenu.entry.path) ? (
                     <CtxItem label="Remove Share" icon={<FolderMinus size={14} />} onClick={() => {
                       const e = ctxMenu.entry!;
                       const share = shares.find(s => s.path === e.path && s.source === "anpan");

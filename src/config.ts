@@ -159,7 +159,9 @@ class Config {
    * anpan-os adds a single `include = <sambaSharesPath>` line here (requires root).
    */
   get smbConfPath(): string {
-    return this.data.samba.smb_conf ?? "/etc/samba/smb.conf";
+    const raw = this.data.samba.smb_conf;
+    if (!raw) return "/etc/samba/smb.conf";
+    return resolve(raw);
   }
 
   /** Server port — defaults to 3000. */

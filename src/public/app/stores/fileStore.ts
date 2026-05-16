@@ -467,10 +467,19 @@ export const useFileStore = create<FileState>((set, get) => ({
     if (!removeShareTarget) return;
     set({ sambaError: "" });
     try {
-      const { error } = await api.api.samba.shares({ name: removeShareTarget.name }).delete();
-      if (!error) await loadShares();
-    } catch { /* ignore */ }
-    set({ removeShareTarget: null });
+      const { data, error } = await api.api.samba.shares({ name: removeShareTarget.name }).delete();
+      const errMsg = (error?.value as { error?: string })?.error
+        ?? (data as { error?: string } | null)?.error;
+      if (errMsg) {
+        set({ sambaError: errMsg });
+      } else {
+        await loadShares();
+      }
+    } catch (e) {
+      set({ sambaError: e instanceof Error ? e.message : "Failed to remove share" });
+    } finally {
+      set({ removeShareTarget: null });
+    }
   },
 
   reloadSmbd: async () => {

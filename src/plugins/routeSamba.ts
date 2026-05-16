@@ -77,13 +77,11 @@ function sharesToConf(shares: SambaShare[]): string {
     `[${s.name}]`,
     `   comment = ${s.comment}`,
     `   path = ${s.path}`,
-    `   public = Yes`,
     `   browseable = ${s.browseable ? "Yes" : "No"}`,
     `   read only = ${s.readOnly ? "Yes" : "No"}`,
-    `   guest ok = Yes`,
-    `   create mask = 0777`,
-    `   directory mask = 0777`,
-    `   force user = root`,
+    `   guest ok = No`,
+    `   create mask = 0644`,
+    `   directory mask = 0755`,
   ].join("\n")).join("\n\n");
 }
 
@@ -296,10 +294,15 @@ export function sambaPlugin(jwtSecret: string) {
 
     // PATCH /api/samba/shares/:name — update an existing share
     .patch("/shares/:name", async ({ params, body, set }) => {
+      if (Object.keys(body).length === 0) {
+        set.status = 422;
+        return { error: "At least one of comment, readOnly, or browseable must be provided" };
+      }
       try {
         const updated = await SambaShareStore.updateByName(params.name, body);
         if (!updated) { set.status = 404; return { error: "Share not found" }; }
         await rebuildConfFromDb();
+        await reloadSmbd().catch(() => { /* smbd may not be running yet */ });
         return { ok: true };
       } catch (e) {
         set.status = 500;

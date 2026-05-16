@@ -29,8 +29,11 @@ function AddShareDialogInner({
     setNewShare({ name, path, comment: "", readOnly });
     try {
       await addShare();
-      await loadShares();
-      onClose();
+      // addShare() catches its own errors and sets sambaError; close only on success
+      if (!useFileStore.getState().sambaError) {
+        await loadShares();
+        onClose();
+      }
     } finally {
       setBusy(false);
     }
