@@ -78,6 +78,8 @@ export const useAppStoreStore = create<AppStoreState>((set, get) => ({
     try {
       const { data } = await api.api["app-store"].repos.get();
       if (Array.isArray(data)) set({ repos: data as unknown as AppRepo[] });
+    } catch (e) {
+      set({ fetchErrors: [e instanceof Error ? e.message : String(e)] });
     } finally {
       set({ loadingRepos: false });
     }
@@ -91,6 +93,8 @@ export const useAppStoreStore = create<AppStoreState>((set, get) => ({
         const d = data as { apps: StoreApp[]; errors: string[] };
         set({ apps: d.apps, fetchErrors: d.errors });
       }
+    } catch (e) {
+      set({ fetchErrors: [e instanceof Error ? e.message : String(e)] });
     } finally {
       set({ loadingApps: false });
     }
@@ -109,6 +113,7 @@ export const useAppStoreStore = create<AppStoreState>((set, get) => ({
   async updateRepo(id: number, data: Partial<Pick<AppRepo, "name" | "enabled">>) {
     await repoById(id).patch(data);
     await get().loadRepos();
+    if (data.enabled !== undefined) await get().loadApps();
   },
 
   async deleteRepo(id: number) {
@@ -129,8 +134,9 @@ export const useAppStoreStore = create<AppStoreState>((set, get) => ({
       const { data } = await appByIds(app.repoId, app.appName).get();
       const content = (data as { content?: string } | null)?.content ?? "";
       set({ installContent: content });
-    } catch {
+    } catch (e) {
       set({ installApp: null, installContent: null });
+      throw e;
     }
   },
 

@@ -55,6 +55,15 @@ function localised(v: unknown): string {
 
 // ─── Remote App Store ─────────────────────────────────────────────────────────
 
+const FETCH_TIMEOUT_MS = 10_000;
+
+/** Wrap fetch with an AbortController-based timeout. */
+function fetchWithTimeout(url: string, init: RequestInit = {}): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  return fetch(url, { ...init, signal: controller.signal }).finally(() => clearTimeout(timer));
+}
+
 /** An app fetched from a remote CasaOS-compatible GitHub repository. */
 export interface RemoteCasaOSApp {
   /** Composite key: "{repoId}::{appName}" */
@@ -79,7 +88,7 @@ export interface RemoteCasaOSApp {
 }
 
 /** Parse a github.com repo URL into owner and repo name. */
-function parseGithubUrl(url: string): { owner: string; repo: string } {
+export function parseGithubUrl(url: string): { owner: string; repo: string } {
   const u = new URL(url.trim());
   const parts = u.pathname.replace(/^\//, "").replace(/\.git$/, "").split("/");
   const owner = parts[0];
@@ -88,9 +97,24 @@ function parseGithubUrl(url: string): { owner: string; repo: string } {
   return { owner, repo };
 }
 
+/** Resolve the default branch for a GitHub repo (falls back to "main" on any error). */
+async function fetchDefaultBranch(owner: string, repo: string): Promise<string> {
+  try {
+    const resp = await fetchWithTimeout(
+      `https://api.github.com/repos/${owner}/${repo}`,
+      { headers: { Accept: "application/vnd.github+json", "User-Agent": "anpan-os" } },
+    );
+    if (!resp.ok) return "main";
+    const data = (await resp.json()) as { default_branch?: string };
+    return data.default_branch ?? "main";
+  } catch {
+    return "main";
+  }
+}
+
 /** Fetch the list of app folder names from a GitHub repo's Apps/ directory. */
 async function fetchAppList(owner: string, repo: string): Promise<string[]> {
-  const resp = await fetch(
+  const resp = await fetchWithTimeout(
     `https://api.github.com/repos/${owner}/${repo}/contents/Apps`,
     { headers: { Accept: "application/vnd.github+json", "User-Agent": "anpan-os" } },
   );
@@ -109,7 +133,7 @@ async function fetchAndParseApp(
 
   let raw: string;
   try {
-    const resp = await fetch(composeUrl, { headers: { "User-Agent": "anpan-os" } });
+    const resp = await fetchWithTimeout(composeUrl, { headers: { "User-Agent": "anpan-os" } });
     if (!resp.ok) return null;
     raw = await resp.text();
   } catch {
@@ -170,7 +194,9 @@ export async function fetchRemoteCasaOSApps(
 ): Promise<RemoteCasaOSApp[]> {
   const { owner, repo } = parseGithubUrl(repoUrl);
 
-  // Try master first; some repos use main
+  // Resolve actual default branch before listing apps.
+  const branch = await fetchDefaultBranch(owner, repo);
+
   let appNames: string[];
   try {
     appNames = await fetchAppList(owner, repo);
@@ -184,7 +210,7 @@ export async function fetchRemoteCasaOSApps(
   for (let i = 0; i < appNames.length; i += CHUNK) {
     const chunk = appNames.slice(i, i + CHUNK);
     const apps  = await Promise.all(
-      chunk.map(name => fetchAndParseApp(owner, repo, name, repoId)),
+      chunk.map(name => fetchAndParseApp(owner, repo, name, repoId, branch)),
     );
     for (const app of apps) {
       if (app) results.push(app);
@@ -196,7 +222,7 @@ export async function fetchRemoteCasaOSApps(
 
 /** Fetch raw compose YAML for a specific app using its stored composeUrl. */
 export async function fetchRemoteComposeContent(composeUrl: string): Promise<string> {
-  const resp = await fetch(composeUrl, { headers: { "User-Agent": "anpan-os" } });
+  const resp = await fetchWithTimeout(composeUrl, { headers: { "User-Agent": "anpan-os" } });
   if (!resp.ok) throw new Error(`Failed to fetch compose: ${resp.status} ${resp.statusText}`);
   return resp.text();
 }

@@ -4,6 +4,7 @@ import { AppRepoStore } from "../stores/app-repo-store";
 import {
   fetchRemoteCasaOSApps,
   fetchRemoteComposeContent,
+  parseGithubUrl,
   type RemoteCasaOSApp,
 } from "../lib/casaos";
 
@@ -60,9 +61,18 @@ export function appStorePlugin(jwtSecret: string) {
           set.status = 400;
           return { error: "URL must be a valid github.com repository URL" };
         }
-        const repo = await AppRepoStore.create({ name: body.name, url: body.url });
-        set.status = 201;
-        return repo;
+        try {
+          const repo = await AppRepoStore.create({ name: body.name, url: body.url });
+          set.status = 201;
+          return repo;
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          if (msg.includes("UNIQUE")) {
+            set.status = 409;
+            return { error: "A repository with that URL already exists" };
+          }
+          throw e;
+        }
       },
       {
         body: t.Object({
@@ -77,6 +87,10 @@ export function appStorePlugin(jwtSecret: string) {
       async ({ params, body, set }) => {
         const id = parseId(params.id);
         if (id === null) { set.status = 400; return { error: "Invalid id" }; }
+        if (body.name === undefined && body.enabled === undefined) {
+          set.status = 400;
+          return { error: "Provide at least one of: name, enabled" };
+        }
         const updated = await AppRepoStore.update(id, body);
         if (!updated) { set.status = 404; return { error: "Repo not found" }; }
         return updated;
@@ -163,28 +177,38 @@ export function appStorePlugin(jwtSecret: string) {
         const cached = appCache.get(repoId);
         const app = cached?.apps.find(a => a.appName === params.appName);
 
-        let composeUrl: string;
         if (app) {
-          composeUrl = app.composeUrl;
-        } else {
-          // Not cached — need to look up the repo URL and derive composeUrl
-          const repo = await AppRepoStore.findById(repoId);
-          if (!repo) { set.status = 404; return { error: "Repo not found" }; }
-          const { owner, repo: repoName } = (() => {
-            const u = new URL(repo.url);
-            const parts = u.pathname.replace(/^\//, "").split("/");
-            return { owner: parts[0]!, repo: parts[1]! };
-          })();
-          composeUrl = `https://raw.githubusercontent.com/${owner}/${repoName}/master/Apps/${encodeURIComponent(params.appName)}/docker-compose.yml`;
+          try {
+            const content = await fetchRemoteComposeContent(app.composeUrl);
+            return { content };
+          } catch (e) {
+            set.status = 502;
+            return { error: e instanceof Error ? e.message : String(e) };
+          }
         }
 
+        // Not cached — look up repo URL and try both common default branches.
+        const repo = await AppRepoStore.findById(repoId);
+        if (!repo) { set.status = 404; return { error: "Repo not found" }; }
+
+        let parsed: { owner: string; repo: string };
         try {
-          const content = await fetchRemoteComposeContent(composeUrl);
-          return { content };
-        } catch (e) {
-          set.status = 502;
-          return { error: e instanceof Error ? e.message : String(e) };
+          parsed = parseGithubUrl(repo.url);
+        } catch {
+          set.status = 400;
+          return { error: "Invalid repository URL" };
         }
+
+        const { owner, repo: repoName } = parsed;
+        for (const branch of ["master", "main"]) {
+          const url = `https://raw.githubusercontent.com/${owner}/${repoName}/${branch}/Apps/${encodeURIComponent(params.appName)}/docker-compose.yml`;
+          try {
+            const content = await fetchRemoteComposeContent(url);
+            return { content };
+          } catch { /* try next branch */ }
+        }
+        set.status = 404;
+        return { error: "Compose file not found" };
       },
       { params: t.Object({ repoId: t.String(), appName: t.String() }) },
     );

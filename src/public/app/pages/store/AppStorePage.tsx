@@ -121,6 +121,7 @@ export function AppStorePage({ onNavigate }: { onNavigate: (path: string) => voi
               <p className="text-xs text-red-300 flex-1">{err}</p>
               <button
                 onClick={() => setDismissedErrors(p => new Set([...p, err]))}
+                aria-label="Dismiss error"
                 className="text-red-400 hover:text-white"
               >
                 <X size={13} />

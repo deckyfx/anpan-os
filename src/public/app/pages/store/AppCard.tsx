@@ -5,9 +5,10 @@ export function AppCard({ app }: { app: StoreApp }) {
   const setDetailApp = useAppStoreStore(s => s.setDetailApp);
 
   return (
-    <div
+    <button
+      type="button"
       onClick={() => setDetailApp(app)}
-      className="bg-gray-900 border border-gray-800 rounded-xl p-4 hover:border-gray-600 cursor-pointer transition-colors flex flex-col gap-3"
+      className="bg-gray-900 border border-gray-800 rounded-xl p-4 hover:border-gray-600 cursor-pointer transition-colors flex flex-col gap-3 text-left w-full"
     >
       {/* Icon */}
       <div className="flex items-start gap-3">
@@ -35,6 +36,6 @@ export function AppCard({ app }: { app: StoreApp }) {
           {app.category}
         </span>
       )}
-    </div>
+    </button>
   );
 }

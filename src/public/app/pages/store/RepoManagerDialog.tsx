@@ -128,10 +128,12 @@ function RepoRow({ repo, refreshing, deleting, onToggle, onRefresh, onDelete }: 
       {/* Toggle */}
       <button
         onClick={() => onToggle(!repo.enabled)}
+        role="switch"
+        aria-checked={repo.enabled}
+        aria-label={repo.enabled ? "Disable repository" : "Enable repository"}
         className={`w-9 h-5 rounded-full transition-colors shrink-0 relative ${
           repo.enabled ? "bg-blue-600" : "bg-gray-700"
         }`}
-        title={repo.enabled ? "Disable" : "Enable"}
       >
         <span
           className={`absolute top-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${
@@ -150,7 +152,8 @@ function RepoRow({ repo, refreshing, deleting, onToggle, onRefresh, onDelete }: 
       <button
         onClick={onRefresh}
         disabled={refreshing || deleting}
-        title="Refresh"
+        aria-label="Refresh repository"
+        aria-disabled={refreshing || deleting}
         className="p-1.5 text-gray-500 hover:text-white hover:bg-gray-700 rounded-lg transition-colors disabled:opacity-40"
       >
         <RefreshCw size={13} className={refreshing ? "animate-spin" : ""} />
@@ -158,7 +161,8 @@ function RepoRow({ repo, refreshing, deleting, onToggle, onRefresh, onDelete }: 
       <button
         onClick={onDelete}
         disabled={refreshing || deleting}
-        title="Delete"
+        aria-label="Delete repository"
+        aria-disabled={refreshing || deleting}
         className="p-1.5 text-gray-500 hover:text-red-400 hover:bg-red-500/10 rounded-lg transition-colors disabled:opacity-40"
       >
         {deleting
