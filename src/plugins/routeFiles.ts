@@ -1,10 +1,12 @@
-import { Elysia, t } from "elysia";
+import { Elysia, t, sse } from "elysia";
 import { resolve, join, basename, extname } from "node:path";
 import { readdir, stat, mkdir, rename, rm, chmod, chown } from "node:fs/promises";
 import { homedir } from "node:os";
 import { authGuard } from "./authGuard";
 import { config } from "../config";
-import { bins } from "../lib/commands";
+import { bins, commands } from "../lib/commands";
+import { StreamAggregator, drainStream } from "../lib/sse";
+import type { SSEMsg } from "../lib/sse";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -313,6 +315,188 @@ export function filesPlugin(jwtSecret: string) {
       }
     }, { body: t.Object({ path: t.String(), dest: t.String() }) })
 
-    // GET /api/files/home
-    .get("/home", () => ({ path: homedir() }));
+    // GET /api/files/home — return homedir if within filesRoot, else filesRoot
+    .get("/home", () => {
+      try {
+        const guarded = guardPath(homedir());
+        return { path: guarded };
+      } catch {
+        return { path: config.filesRoot };
+      }
+    })
+
+    // POST /api/files/copy — SSE streaming copy (rsync or cp fallback)
+    .post(
+      "/copy",
+      async function*({ body }) {
+        let sources: string[];
+        let destination: string;
+        try {
+          sources     = body.sources.map(guardPath);
+          destination = guardPath(body.destination);
+        } catch {
+          yield sse({ data: { error: "Access denied" } satisfies SSEMsg });
+          return;
+        }
+
+        const agg = new StreamAggregator();
+        const hasRsync = await commands.isAvailable("rsync");
+
+        void (async () => {
+          try {
+            for (const src of sources) {
+              const args = hasRsync && bins.rsync
+                ? [bins.rsync, "-av", src, destination]
+                : [bins.cp ?? "cp", "-rv", src, destination];
+              const proc = Bun.spawn(args, { stdout: "pipe", stderr: "pipe" });
+              await Promise.all([
+                drainStream(proc.stdout, data => agg.push(data)),
+                drainStream(proc.stderr, data => agg.push(data)),
+              ]);
+              const code = await proc.exited;
+              if (code !== 0) {
+                await agg.push({ error: `Copy failed with exit code ${code}` });
+                agg.end();
+                return;
+              }
+            }
+            await agg.push({ ok: true });
+          } catch (err) {
+            await agg.push({ error: err instanceof Error ? err.message : String(err) });
+          } finally {
+            agg.end();
+          }
+        })();
+
+        for await (const msg of agg) yield sse({ data: msg });
+      },
+      { body: t.Object({ sources: t.Array(t.String()), destination: t.String() }) },
+    )
+
+    // POST /api/files/move — SSE streaming move (same-device: mv; cross-device: rsync/cp+rm)
+    .post(
+      "/move",
+      async function*({ body }) {
+        let sources: string[];
+        let destination: string;
+        try {
+          sources     = body.sources.map(guardPath);
+          destination = guardPath(body.destination);
+        } catch {
+          yield sse({ data: { error: "Access denied" } satisfies SSEMsg });
+          return;
+        }
+
+        const agg = new StreamAggregator();
+
+        void (async () => {
+          try {
+            for (const src of sources) {
+              const [srcStat, destStat] = await Promise.all([
+                stat(src).catch(() => null),
+                stat(destination).catch(() => null),
+              ]);
+
+              const sameDev = srcStat && destStat && srcStat.dev === destStat.dev;
+
+              if (sameDev && bins.mv) {
+                // Same device — instant atomic move
+                const proc = Bun.spawn([bins.mv, "-v", src, destination], { stdout: "pipe", stderr: "pipe" });
+                await Promise.all([
+                  drainStream(proc.stdout, data => agg.push(data)),
+                  drainStream(proc.stderr, data => agg.push(data)),
+                ]);
+                const code = await proc.exited;
+                if (code !== 0) {
+                  await agg.push({ error: `Move failed with exit code ${code}` });
+                  agg.end();
+                  return;
+                }
+              } else {
+                // Cross-device — rsync --remove-source-files, or cp + rm fallback
+                const hasRsync = await commands.isAvailable("rsync");
+                if (hasRsync && bins.rsync) {
+                  const proc = Bun.spawn([bins.rsync, "-av", "--remove-source-files", src, destination], { stdout: "pipe", stderr: "pipe" });
+                  await Promise.all([
+                    drainStream(proc.stdout, data => agg.push(data)),
+                    drainStream(proc.stderr, data => agg.push(data)),
+                  ]);
+                  const code = await proc.exited;
+                  if (code !== 0) {
+                    await agg.push({ error: `Move failed with exit code ${code}` });
+                    agg.end();
+                    return;
+                  }
+                  // rsync --remove-source-files leaves empty directories behind; clean them up.
+                  try {
+                    await rm(src, { recursive: true });
+                    await agg.push({ log: `Removed source: ${src}` });
+                  } catch (cleanErr) {
+                    await agg.push({ error: `Move succeeded but source cleanup failed: ${cleanErr instanceof Error ? cleanErr.message : String(cleanErr)}` });
+                    agg.end();
+                    return;
+                  }
+                } else {
+                  // cp then rm fallback
+                  const cpArgs = [bins.cp ?? "cp", "-rv", src, destination];
+                  const cpProc = Bun.spawn(cpArgs, { stdout: "pipe", stderr: "pipe" });
+                  await Promise.all([
+                    drainStream(cpProc.stdout, data => agg.push(data)),
+                    drainStream(cpProc.stderr, data => agg.push(data)),
+                  ]);
+                  const cpCode = await cpProc.exited;
+                  if (cpCode !== 0) {
+                    await agg.push({ error: `Copy phase failed with exit code ${cpCode}` });
+                    agg.end();
+                    return;
+                  }
+                  await rm(src, { recursive: true });
+                  await agg.push({ log: `Removed source: ${src}` });
+                }
+              }
+            }
+            await agg.push({ ok: true });
+          } catch (err) {
+            await agg.push({ error: err instanceof Error ? err.message : String(err) });
+          } finally {
+            agg.end();
+          }
+        })();
+
+        for await (const msg of agg) yield sse({ data: msg });
+      },
+      { body: t.Object({ sources: t.Array(t.String()), destination: t.String() }) },
+    )
+
+    // GET /api/files/size?path= — folder/file size via du
+    .get(
+      "/size",
+      async ({ query, set }) => {
+        let resolved: string;
+        try { resolved = guardPath(query.path); } catch { return forbidden(); }
+        if (!bins.du) {
+          set.status = 501;
+          return { error: "du not available on this system" };
+        }
+        try {
+          const proc = Bun.spawn([bins.du, "-sh", resolved], { stdout: "pipe", stderr: "pipe" });
+          const [out, errText, exitCode] = await Promise.all([
+            new Response(proc.stdout).text(),
+            new Response(proc.stderr).text(),
+            proc.exited,
+          ]);
+          if (exitCode !== 0) {
+            set.status = 500;
+            return { error: errText.trim() || `du exited with code ${exitCode}` };
+          }
+          // du -sh output: "1.5G\t/path"
+          const size = out.split("\t")[0]?.trim() ?? "unknown";
+          return { size };
+        } catch (e) {
+          set.status = 500;
+          return { error: e instanceof Error ? e.message : "Failed to calculate size" };
+        }
+      },
+      { query: t.Object({ path: t.String() }) },
+    );
 }

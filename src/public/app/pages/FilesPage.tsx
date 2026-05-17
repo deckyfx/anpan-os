@@ -6,7 +6,8 @@ import { useSystemStore } from "../stores/systemStore";
 import { TopBar }        from "./home/TopBar";
 import { ChevronLeft, ChevronRight, FolderUp, House, LayoutGrid, List,
          FolderOpen, Pencil, Download, Archive, PackageOpen, ShieldCheck, Info,
-         Trash2, FolderPlus, Upload, Network, Share2, FolderMinus } from "lucide-react";
+         Trash2, FolderPlus, Upload, Network, Share2, FolderMinus,
+         Copy, Scissors, ClipboardPaste, PanelRight, FolderSearch } from "lucide-react";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { Dialog }        from "../components/Dialog";
 import type { FileEntry } from "./files/types";
@@ -21,6 +22,8 @@ import { SambaSection }  from "./files/SambaSection";
 import { SambaManagerDialog } from "./files/SambaManagerDialog";
 import { AddShareDialog }     from "./files/AddShareDialog";
 import { UploadProgressDialog } from "./files/UploadProgressDialog";
+import { CopyMoveProgressDialog } from "./files/CopyMoveProgressDialog";
+import { FileInfoPanel }  from "./files/FileInfoPanel";
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
@@ -51,6 +54,8 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
     // Archive
     archiveDialog, archiveName, archivePaths,
     setArchiveDialog, setArchiveName, setArchivePaths, handleArchive, handleExtract,
+    // Clipboard
+    clipboard, setClipboard, clearClipboard, pasteClipboard, calculateFolderSize,
     // Samba
     shares, sambaSetupPresent, setRemoveShareTarget, removeShare,
   } = useFileStore();
@@ -63,6 +68,18 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
   const [sambaManagerOpen, setSambaManagerOpen] = useState(false);
   const [pendingRemoveShare, setPendingRemoveShare] = useState<(typeof shares)[number] | null>(null);
   const [addShareInitial, setAddShareInitial] = useState<{ name: string; path: string } | null>(null);
+
+  const [panelOpen, setPanelOpen] = useState<boolean>(() => {
+    try { return localStorage.getItem("files-panel-open") !== "false"; } catch { return true; }
+  });
+
+  const togglePanel = () => {
+    setPanelOpen((v) => {
+      const next = !v;
+      try { localStorage.setItem("files-panel-open", String(next)); } catch { /* ignore */ }
+      return next;
+    });
+  };
 
   useEffect(() => { useFileStore.getState().initialize(); }, []);
 
@@ -105,7 +122,7 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
 
   const sharedRowProps = {
     entries, creatingFolder, newFolderName, renamingPath, renameValue, selectedPaths,
-    sharedPaths: allSharedPaths,
+    sharedPaths: allSharedPaths, clipboard,
     onRowClick: handleRowClick, onRowCtx: handleRowCtx,
     onRenameChange: setRenameValue, onRenameCommit: commitRename,
     onRenameCancel: () => setRenamingPath(null),
@@ -189,19 +206,36 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
           className="p-1.5 rounded-lg text-gray-400 hover:text-white hover:bg-gray-800 transition-colors shrink-0">
           {viewMode === "list" ? <LayoutGrid size={16} /> : <List size={16} />}
         </button>
+
+        <button onClick={togglePanel} title={panelOpen ? "Hide info panel" : "Show info panel"}
+          className={`p-1.5 rounded-lg transition-colors shrink-0 ${panelOpen ? "text-white bg-gray-700" : "text-gray-400 hover:text-white hover:bg-gray-800"}`}>
+          <PanelRight size={16} />
+        </button>
       </div>
 
-      {/* File listing */}
-      <div
-        className="flex-1 px-5 py-4 overflow-auto"
-        onContextMenu={(e) => { e.preventDefault(); setCtxMenu({ x: e.clientX, y: e.clientY, entry: null }); }}
-      >
-        {loadingDir ? (
-          <p className="text-gray-500 text-sm">Loading…</p>
-        ) : viewMode === "list" ? (
-          <ListingTable {...sharedRowProps} />
-        ) : (
-          <GridView {...sharedRowProps} />
+      {/* File listing + right panel */}
+      <div className="flex flex-1 overflow-hidden">
+        <div
+          className="flex-1 px-5 py-4 overflow-auto"
+          onContextMenu={(e) => { e.preventDefault(); setCtxMenu({ x: e.clientX, y: e.clientY, entry: null }); }}
+        >
+          {loadingDir ? (
+            <p className="text-gray-500 text-sm">Loading…</p>
+          ) : viewMode === "list" ? (
+            <ListingTable {...sharedRowProps} />
+          ) : (
+            <GridView {...sharedRowProps} />
+          )}
+        </div>
+
+        {panelOpen && (
+          <aside className="w-72 shrink-0 border-l border-gray-800 overflow-y-auto">
+            <FileInfoPanel
+              currentPath={currentPath}
+              entries={entries}
+              selectedPaths={selectedPaths}
+            />
+          </aside>
         )}
       </div>
 
@@ -300,6 +334,7 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
       </Dialog>
 
       <UploadProgressDialog />
+      <CopyMoveProgressDialog />
 
       {/* Context menu */}
       {ctxMenu && (
@@ -321,6 +356,17 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
                 <CtxItem label="Open"   icon={<FolderOpen   size={14} />} onClick={() => { const e = ctxMenu.entry!; setCtxMenu(null); e.isDir ? void navigateTo(e.path) : void openFile(e); }} />
                 <CtxItem label="Rename" icon={<Pencil        size={14} />} onClick={() => { const e = ctxMenu.entry!; setRenamingPath(e.path); setRenameValue(e.name); setCtxMenu(null); }} />
                 <CtxSep />
+                <CtxItem label="Copy" icon={<Copy size={14} />} onClick={() => {
+                  const paths = selectedPaths.size > 1 && selectedPaths.has(ctxMenu.entry!.path)
+                    ? Array.from(selectedPaths) : [ctxMenu.entry!.path];
+                  setClipboard("copy", paths); setCtxMenu(null);
+                }} />
+                <CtxItem label="Cut"  icon={<Scissors size={14} />} onClick={() => {
+                  const paths = selectedPaths.size > 1 && selectedPaths.has(ctxMenu.entry!.path)
+                    ? Array.from(selectedPaths) : [ctxMenu.entry!.path];
+                  setClipboard("cut", paths); setCtxMenu(null);
+                }} />
+                <CtxSep />
                 {!ctxMenu.entry.isDir && (
                   <CtxItem label="Download"    icon={<Download    size={14} />} onClick={() => { window.open(`/api/files/download?path=${encodeURIComponent(ctxMenu.entry!.path)}`); setCtxMenu(null); }} />
                 )}
@@ -331,6 +377,13 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
                 <CtxSep />
                 <CtxItem label="Permissions…" icon={<ShieldCheck  size={14} />} onClick={() => { setChmodTarget(ctxMenu.entry!); setCtxMenu(null); }} />
                 <CtxItem label="Info"          icon={<Info         size={14} />} onClick={() => { setInfoTarget(ctxMenu.entry!); setCtxMenu(null); }} />
+                {ctxMenu.entry.isDir && (
+                  <CtxItem label="Calculate size" icon={<FolderSearch size={14} />} onClick={() => {
+                    void calculateFolderSize(ctxMenu.entry!.path);
+                    if (!panelOpen) togglePanel();
+                    setCtxMenu(null);
+                  }} />
+                )}
                 {sambaEnabled && sambaSetupPresent && ctxMenu.entry.isDir && (
                   managedSharedPaths.has(ctxMenu.entry.path) ? (
                     <CtxItem label="Remove Share" icon={<FolderMinus size={14} />} onClick={() => {
@@ -354,6 +407,10 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
               <>
                 <CtxItem label="New Folder"    icon={<FolderPlus size={14} />} onClick={() => { setCreatingFolder(true); setNewFolderName(""); setCtxMenu(null); }} />
                 <CtxItem label="Upload files…" icon={<Upload      size={14} />} onClick={() => { fileInputRef.current?.click(); setCtxMenu(null); }} />
+                {clipboard && (
+                  <CtxItem label={`Paste ${clipboard.paths.length} item(s)`} icon={<ClipboardPaste size={14} />}
+                    onClick={() => { void pasteClipboard(currentPath); setCtxMenu(null); }} />
+                )}
               </>
             )}
           </div>
