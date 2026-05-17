@@ -315,8 +315,15 @@ export function filesPlugin(jwtSecret: string) {
       }
     }, { body: t.Object({ path: t.String(), dest: t.String() }) })
 
-    // GET /api/files/home
-    .get("/home", () => ({ path: homedir() }))
+    // GET /api/files/home — return homedir if within filesRoot, else filesRoot
+    .get("/home", () => {
+      try {
+        const guarded = guardPath(homedir());
+        return { path: guarded };
+      } catch {
+        return { path: config.filesRoot };
+      }
+    })
 
     // POST /api/files/copy — SSE streaming copy (rsync or cp fallback)
     .post(
@@ -417,6 +424,15 @@ export function filesPlugin(jwtSecret: string) {
                   const code = await proc.exited;
                   if (code !== 0) {
                     await agg.push({ error: `Move failed with exit code ${code}` });
+                    agg.end();
+                    return;
+                  }
+                  // rsync --remove-source-files leaves empty directories behind; clean them up.
+                  try {
+                    await rm(src, { recursive: true });
+                    await agg.push({ log: `Removed source: ${src}` });
+                  } catch (cleanErr) {
+                    await agg.push({ error: `Move succeeded but source cleanup failed: ${cleanErr instanceof Error ? cleanErr.message : String(cleanErr)}` });
                     agg.end();
                     return;
                   }
