@@ -90,3 +90,28 @@ export const sambaShares = sqliteTable("samba_shares", {
 
 export type SambaShareRow    = typeof sambaShares.$inferSelect;
 export type NewSambaShareRow = typeof sambaShares.$inferInsert;
+
+/**
+ * External app bookmarks — user-curated links to external websites/services.
+ * Supports a freeform note per bookmark (e.g. credentials, usage hints).
+ */
+export const bookmarks = sqliteTable("bookmarks", {
+  id:        integer("id").primaryKey({ autoIncrement: true }),
+  title:     text("title").notNull(),
+  url:       text("url").notNull(),
+  /** Optional icon URL. Falls back to favicon.ico at the bookmark's origin. */
+  icon:      text("icon"),
+  /** Freeform markdown/text note (e.g. credentials, hints). */
+  note:      text("note"),
+  /** User-defined display order (null = unset, sorted last). */
+  orderNo:   integer("order_no"),
+  createdAt: integer("created_at", { mode: "timestamp" })
+    .notNull()
+    .default(sql`(unixepoch())`),
+  updatedAt: integer("updated_at", { mode: "timestamp" })
+    .notNull()
+    .default(sql`(unixepoch())`),
+});
+
+export type BookmarkRow    = typeof bookmarks.$inferSelect;
+export type NewBookmarkRow = typeof bookmarks.$inferInsert;
