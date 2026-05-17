@@ -64,6 +64,14 @@ function fetchWithTimeout(url: string, init: RequestInit = {}): Promise<Response
   return fetch(url, { ...init, signal: controller.signal }).finally(() => clearTimeout(timer));
 }
 
+/** Thrown when an HTTP response is not ok; carries the numeric status code. */
+export class FetchResponseError extends Error {
+  constructor(readonly status: number, message: string) {
+    super(message);
+    this.name = "FetchResponseError";
+  }
+}
+
 /** An app fetched from a remote CasaOS-compatible GitHub repository. */
 export interface RemoteCasaOSApp {
   /** Composite key: "{repoId}::{appName}" */
@@ -97,19 +105,20 @@ export function parseGithubUrl(url: string): { owner: string; repo: string } {
   return { owner, repo };
 }
 
-/** Resolve the default branch for a GitHub repo (falls back to "main" on any error). */
-async function fetchDefaultBranch(owner: string, repo: string): Promise<string> {
-  try {
-    const resp = await fetchWithTimeout(
-      `https://api.github.com/repos/${owner}/${repo}`,
-      { headers: { Accept: "application/vnd.github+json", "User-Agent": "anpan-os" } },
-    );
-    if (!resp.ok) return "main";
-    const data = (await resp.json()) as { default_branch?: string };
-    return data.default_branch ?? "main";
-  } catch {
-    return "main";
-  }
+/**
+ * Resolve the default branch for a GitHub repo.
+ * Returns undefined when the repo is not found (404).
+ * Throws FetchResponseError for other non-ok responses; AbortError propagates on timeout.
+ */
+async function fetchDefaultBranch(owner: string, repo: string): Promise<string | undefined> {
+  const resp = await fetchWithTimeout(
+    `https://api.github.com/repos/${owner}/${repo}`,
+    { headers: { Accept: "application/vnd.github+json", "User-Agent": "anpan-os" } },
+  );
+  if (resp.status === 404) return undefined;
+  if (!resp.ok) throw new FetchResponseError(resp.status, `GitHub API ${resp.status}: ${resp.statusText}`);
+  const data = (await resp.json()) as { default_branch?: string };
+  return data.default_branch ?? "main";
 }
 
 /** Fetch the list of app folder names from a GitHub repo's Apps/ directory. */
@@ -123,22 +132,35 @@ async function fetchAppList(owner: string, repo: string): Promise<string[]> {
   return entries.filter(e => e.type === "dir").map(e => e.name);
 }
 
-/** Fetch and parse one app's compose file from raw.githubusercontent.com. Returns null if no x-casaos block. */
+/**
+ * Fetch and parse one app's compose file.
+ * Tries resolvedBranch first (when provided), then falls back to "main" and "master".
+ * Returns null only on true 404 (all branches) or missing x-casaos block.
+ * Throws FetchResponseError on non-404 HTTP errors; AbortError propagates on timeout.
+ */
 async function fetchAndParseApp(
   owner: string, repo: string, appName: string,
-  repoId: number, branch = "master",
+  repoId: number, resolvedBranch: string | undefined,
 ): Promise<RemoteCasaOSApp | null> {
-  const composeUrl =
-    `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/Apps/${encodeURIComponent(appName)}/docker-compose.yml`;
+  // Build branch queue: resolved branch first, then common fallbacks (deduped).
+  const branchQueue: string[] = resolvedBranch
+    ? [resolvedBranch, ...["main", "master"].filter(b => b !== resolvedBranch)]
+    : ["main", "master"];
 
-  let raw: string;
-  try {
-    const resp = await fetchWithTimeout(composeUrl, { headers: { "User-Agent": "anpan-os" } });
-    if (!resp.ok) return null;
+  let raw: string | undefined;
+  let usedComposeUrl = "";
+
+  for (const branch of branchQueue) {
+    const url = `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/Apps/${encodeURIComponent(appName)}/docker-compose.yml`;
+    const resp = await fetchWithTimeout(url, { headers: { "User-Agent": "anpan-os" } });
+    if (resp.status === 404) continue;
+    if (!resp.ok) throw new FetchResponseError(resp.status, `Fetch failed ${resp.status}: ${url}`);
     raw = await resp.text();
-  } catch {
-    return null;
+    usedComposeUrl = url;
+    break;
   }
+
+  if (raw === undefined) return null; // not found on any branch
 
   try {
     const doc    = parse(raw) as Record<string, unknown>;
@@ -178,7 +200,7 @@ async function fetchAndParseApp(
       portMap:         str(meta["port_map"]),
       mainService:     mainSvc,
       architectures:   archs,
-      composeUrl,
+      composeUrl:      usedComposeUrl,
     };
   } catch {
     return null;
@@ -194,8 +216,14 @@ export async function fetchRemoteCasaOSApps(
 ): Promise<RemoteCasaOSApp[]> {
   const { owner, repo } = parseGithubUrl(repoUrl);
 
-  // Resolve actual default branch before listing apps.
-  const branch = await fetchDefaultBranch(owner, repo);
+  // Resolve the default branch; treat branch-resolution failures as unknown so
+  // fetchAndParseApp can still try all common branches as fallback.
+  let resolvedBranch: string | undefined;
+  try {
+    resolvedBranch = await fetchDefaultBranch(owner, repo);
+  } catch {
+    resolvedBranch = undefined;
+  }
 
   let appNames: string[];
   try {
@@ -210,7 +238,7 @@ export async function fetchRemoteCasaOSApps(
   for (let i = 0; i < appNames.length; i += CHUNK) {
     const chunk = appNames.slice(i, i + CHUNK);
     const apps  = await Promise.all(
-      chunk.map(name => fetchAndParseApp(owner, repo, name, repoId, branch)),
+      chunk.map(name => fetchAndParseApp(owner, repo, name, repoId, resolvedBranch)),
     );
     for (const app of apps) {
       if (app) results.push(app);
@@ -223,7 +251,7 @@ export async function fetchRemoteCasaOSApps(
 /** Fetch raw compose YAML for a specific app using its stored composeUrl. */
 export async function fetchRemoteComposeContent(composeUrl: string): Promise<string> {
   const resp = await fetchWithTimeout(composeUrl, { headers: { "User-Agent": "anpan-os" } });
-  if (!resp.ok) throw new Error(`Failed to fetch compose: ${resp.status} ${resp.statusText}`);
+  if (!resp.ok) throw new FetchResponseError(resp.status, `Failed to fetch compose: ${resp.status} ${resp.statusText}`);
   return resp.text();
 }
 

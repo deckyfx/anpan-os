@@ -5,6 +5,7 @@ import {
   fetchRemoteCasaOSApps,
   fetchRemoteComposeContent,
   parseGithubUrl,
+  FetchResponseError,
   type RemoteCasaOSApp,
 } from "../lib/casaos";
 
@@ -61,8 +62,17 @@ export function appStorePlugin(jwtSecret: string) {
           set.status = 400;
           return { error: "URL must be a valid github.com repository URL" };
         }
+        // Normalise to a single canonical form so equivalent URLs hit the UNIQUE constraint.
+        let canonicalUrl: string;
         try {
-          const repo = await AppRepoStore.create({ name: body.name, url: body.url });
+          const { owner, repo } = parseGithubUrl(body.url);
+          canonicalUrl = `https://github.com/${owner.toLowerCase()}/${repo.toLowerCase()}`;
+        } catch {
+          set.status = 400;
+          return { error: "URL must be a valid github.com repository URL" };
+        }
+        try {
+          const repo = await AppRepoStore.create({ name: body.name, url: canonicalUrl });
           set.status = 201;
           return repo;
         } catch (e) {
@@ -205,7 +215,12 @@ export function appStorePlugin(jwtSecret: string) {
           try {
             const content = await fetchRemoteComposeContent(url);
             return { content };
-          } catch { /* try next branch */ }
+          } catch (e) {
+            // Only continue to the next branch on a true 404; anything else (timeout, 5xx) is upstream failure.
+            if (e instanceof FetchResponseError && e.status === 404) continue;
+            set.status = 502;
+            return { error: e instanceof Error ? e.message : String(e) };
+          }
         }
         set.status = 404;
         return { error: "Compose file not found" };
