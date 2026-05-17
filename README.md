@@ -2,7 +2,7 @@
 
 A lightweight self-hosted home server dashboard built with **Bun**, **ElysiaJS**, and **React**.
 
-Manage your Docker Compose stacks, browse files, and monitor system resources — all from a single web UI with no external dependencies beyond Docker and Bun.
+Manage Docker Compose stacks, browse files, monitor system resources, and install apps from community stores — all from a single web UI with no external dependencies beyond Docker and Bun.
 
 ---
 
@@ -20,13 +20,36 @@ Manage your Docker Compose stacks, browse files, and monitor system resources �
 
 ## Features
 
-- **Docker Compose dashboard** — install, start, stop, restart, and delete stacks; stream live install logs
-- **File manager** — browse, upload, download, rename, and delete files on the host
+### Docker & Stacks
+- **Compose dashboard** — install, start, stop, restart, and delete stacks
+- **Guided Compose Editor** — Monaco-based YAML editor with syntax highlighting, starter templates, and in-place editing
+- **Live install logs** — real-time streaming of `docker compose up` output
+- **Live container logs** — per-tab streaming log viewer for running containers
+- **Pull & update** — one-click image pull and stack redeploy
+
+### App Store
+- **Browse remote apps** — search and install apps from any CasaOS-compatible GitHub repository
+- **Repo manager** — add, enable/disable, and refresh multiple app sources
+- **External bookmarks** — pin arbitrary web app links on the dashboard alongside managed stacks
+
+### File Manager
+- Browse, upload, download, rename, and delete files on the host
+- Copy / cut / paste across directories
+- File info panel with metadata and recursive folder size
+- Guided `chmod` / `chown` UI with human-readable permission display
+
+### System & Security
 - **System monitor** — CPU, memory, disk, and network stats in the sidebar
-- **CasaOS compatible** — reads metadata (`x-casaos` blocks) from existing CasaOS app definitions
-- **Auth** — JWT session-based login; bcrypt password storage
+- **Port scanner** — scan host ports to identify listening services
+- **Samba management** — add, edit, and remove Samba shares; SQLite-backed source of truth
+- **WebAuthn passkeys** — register and authenticate with platform authenticators
+- **Auth** — JWT session login; bcrypt password storage; in-app password change
 - **HTTPS** — optional TLS via cert/key paths in config
+- **Doctor dialog** — dependency checker for required system binaries
+
+### Developer
 - **Type-safe API** — Eden Treaty client with full end-to-end type inference
+- **CasaOS compatible** — reads `x-casaos` metadata from existing app definitions
 
 ---
 
@@ -100,7 +123,7 @@ src/
 ├── config.ts               # TOML config loader
 ├── db/                     # Drizzle ORM schema + migrations
 ├── lib/                    # Docker client, CasaOS parser, commands
-├── plugins/                # Route plugins (auth, docker, compose, files…)
+├── plugins/                # Route plugins (auth, docker, compose, files, app-store…)
 ├── stores/                 # DB repository classes
 └── public/
     └── app/
@@ -109,6 +132,12 @@ src/
         ├── pages/          # React page components
         └── stores/         # Zustand client stores
 ```
+
+---
+
+## Changelog
+
+See [ROADMAP.md](ROADMAP.md) for a full list of changes per release.
 
 ---
 
