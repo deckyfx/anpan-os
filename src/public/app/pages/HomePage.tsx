@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useStacksStore }   from "../stores/stacksStore";
 import { useAuthStore }     from "../stores/authStore";
 import { useBookmarkStore } from "../stores/bookmarkStore";
@@ -59,10 +59,10 @@ export function HomePage({ username, onLogout, onNavigate }: {
   } = useBookmarkStore();
 
   // Lazy-init: starts polling, loads stacks + stats + bookmarks. Runs once per mount.
-  useState(() => {
+  useEffect(() => {
     initialize();
     void loadBookmarks();
-  });
+  }, []);
 
   const [filter, setFilter] = useState("");
   const [pendingAction, setPendingAction] = useState<
@@ -246,7 +246,9 @@ export function HomePage({ username, onLogout, onNavigate }: {
           <div className="grid grid-cols-[repeat(auto-fill,minmax(160px,1fr))] gap-4">
 
             {/* Add bookmark tile */}
-            <div
+            <button
+              type="button"
+              aria-label="Add app"
               onClick={() => setAddOpen(true)}
               className="bg-gray-900 border border-dashed border-gray-700 rounded-2xl p-5 flex flex-col items-center gap-3 cursor-pointer hover:border-sky-500/50 hover:bg-gray-800/50 hover:scale-[1.02] transition-all select-none"
             >
@@ -257,7 +259,7 @@ export function HomePage({ username, onLogout, onNavigate }: {
                 <p className="text-sm text-gray-200 font-medium">Add App</p>
                 <p className="text-xs text-gray-600 mt-0.5">External link</p>
               </div>
-            </div>
+            </button>
 
             {displayedBookmarks.map(b => (
               <BookmarkTile

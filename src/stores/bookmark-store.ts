@@ -1,6 +1,6 @@
 import { db } from "../db";
 import { bookmarks } from "../db/schema";
-import { eq, asc } from "drizzle-orm";
+import { sql, eq, asc } from "drizzle-orm";
 import type { BookmarkRow, NewBookmarkRow } from "../db/schema";
 
 type CreateInput = Pick<NewBookmarkRow, "title" | "url" | "icon" | "note" | "orderNo">;
@@ -12,7 +12,7 @@ export class BookmarkStore {
     return db
       .select()
       .from(bookmarks)
-      .orderBy(asc(bookmarks.orderNo), asc(bookmarks.createdAt));
+      .orderBy(sql`${bookmarks.orderNo} IS NULL`, asc(bookmarks.orderNo), asc(bookmarks.createdAt));
   }
 
   static async findById(id: number): Promise<BookmarkRow | null> {

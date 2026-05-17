@@ -47,22 +47,30 @@ export const useBookmarkStore = create<BookmarkState>((set, get) => ({
   },
 
   saveNote: async (id, note) => {
-    const { error } = await api.api.bookmarks({ id: String(id) }).patch({ note: note || null });
-    if (error) {
+    try {
+      const { error } = await api.api.bookmarks({ id: String(id) }).patch({ note: note || null });
+      if (error) {
+        useToastStore.getState().push("Failed to save note", "error");
+        return;
+      }
+      await get().load();
+      useToastStore.getState().push("Note saved", "success");
+    } catch {
       useToastStore.getState().push("Failed to save note", "error");
-      return;
     }
-    await get().load();
-    useToastStore.getState().push("Note saved", "success");
   },
 
   remove: async (id) => {
-    const { error } = await api.api.bookmarks({ id: String(id) }).delete();
-    if (error) {
+    try {
+      const { error } = await api.api.bookmarks({ id: String(id) }).delete();
+      if (error) {
+        useToastStore.getState().push("Failed to delete bookmark", "error");
+        return;
+      }
+      await get().load();
+      useToastStore.getState().push("Bookmark deleted", "success");
+    } catch {
       useToastStore.getState().push("Failed to delete bookmark", "error");
-      return;
     }
-    await get().load();
-    useToastStore.getState().push("Bookmark deleted", "success");
   },
 }));

@@ -2,6 +2,22 @@ import { Elysia, t } from "elysia";
 import { authGuard } from "./authGuard";
 import { BookmarkStore } from "../stores/bookmark-store";
 
+const UNSIGNED_INT = /^\d+$/;
+
+function parseId(raw: string): number | null {
+  if (!UNSIGNED_INT.test(raw)) return null;
+  return parseInt(raw, 10);
+}
+
+function isHttpUrl(url: string): boolean {
+  try {
+    const { protocol } = new URL(url);
+    return protocol === "http:" || protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 /** CRUD plugin for external-app bookmarks. All routes require an active session. */
 export function bookmarksPlugin(jwtSecret: string) {
   return new Elysia({ prefix: "/api/bookmarks" })
@@ -12,6 +28,10 @@ export function bookmarksPlugin(jwtSecret: string) {
     .post(
       "/",
       async ({ body, set }) => {
+        if (!isHttpUrl(body.url)) {
+          set.status = 400;
+          return { error: "URL must use http or https scheme" };
+        }
         const bookmark = await BookmarkStore.create({
           title:   body.title,
           url:     body.url,
@@ -36,8 +56,12 @@ export function bookmarksPlugin(jwtSecret: string) {
     .patch(
       "/:id",
       async ({ params, body, set }) => {
-        const id = parseInt(params.id, 10);
-        if (isNaN(id)) { set.status = 400; return { error: "Invalid id" }; }
+        const id = parseId(params.id);
+        if (id === null) { set.status = 400; return { error: "Invalid id" }; }
+        if (body.url !== undefined && !isHttpUrl(body.url)) {
+          set.status = 400;
+          return { error: "URL must use http or https scheme" };
+        }
         const updated = await BookmarkStore.update(id, body);
         if (!updated) { set.status = 404; return { error: "Bookmark not found" }; }
         return updated;
@@ -57,8 +81,8 @@ export function bookmarksPlugin(jwtSecret: string) {
     .delete(
       "/:id",
       async ({ params, set }) => {
-        const id = parseInt(params.id, 10);
-        if (isNaN(id)) { set.status = 400; return { error: "Invalid id" }; }
+        const id = parseId(params.id);
+        if (id === null) { set.status = 400; return { error: "Invalid id" }; }
         const deleted = await BookmarkStore.delete(id);
         if (!deleted) { set.status = 404; return { error: "Bookmark not found" }; }
         return { ok: true };
