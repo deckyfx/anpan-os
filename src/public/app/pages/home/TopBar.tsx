@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import { Menu, X, LayoutGrid, FolderOpen, Activity, Network, LogOut, KeyRound, RotateCcw, PowerOff, Lock, Container } from "lucide-react";
+import { Menu, X, LayoutGrid, FolderOpen, Activity, Network, LogOut, KeyRound, RotateCcw, PowerOff, Lock, Container, ShoppingBag } from "lucide-react";
 import { api } from "../../lib/api";
 import { DoctorDialog } from "../../components/DoctorDialog";
 import { PortsDialog }  from "./PortsDialog";
@@ -17,10 +17,11 @@ interface NavItem {
 }
 
 const MENU_ITEMS: NavItem[] = [
-  { icon: <LayoutGrid size={14} />, label: "Home",       path: "/",       section: "Navigation" },
-  { icon: <FolderOpen  size={14} />, label: "Files",     path: "/files",  section: "Navigation" },
-  { icon: <Activity    size={14} />, label: "Doctor",    path: "/doctor", section: "Tools"      },
-  { icon: <Network     size={14} />, label: "Port Scan", path: "/ports",  section: "Tools"      },
+  { icon: <LayoutGrid   size={14} />, label: "Home",       path: "/",       section: "Navigation" },
+  { icon: <FolderOpen   size={14} />, label: "Files",      path: "/files",  section: "Navigation" },
+  { icon: <ShoppingBag  size={14} />, label: "App Store",  path: "/store",  section: "Navigation" },
+  { icon: <Activity     size={14} />, label: "Doctor",     path: "/doctor", section: "Tools"      },
+  { icon: <Network      size={14} />, label: "Port Scan",  path: "/ports",  section: "Tools"      },
 ];
 
 export function TopBar({ username, version, hasPasskey, onLogout, onNavigate, onAddPasskey, currentPath = "/" }: {

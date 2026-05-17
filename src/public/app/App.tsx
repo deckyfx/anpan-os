@@ -8,6 +8,7 @@ import { FilesPage }        from "./pages/FilesPage";
 import { useAuthStore }     from "./stores/authStore";
 import { useSystemStore }   from "./stores/systemStore";
 import { ToastContainer }   from "./components/Toast";
+import { AppStorePage }     from "./pages/store/AppStorePage";
 
 export function App() {
   const { view, username, checkAuth, login, afterSetup, logout } = useAuthStore();
@@ -46,6 +47,7 @@ export function App() {
   if (view === "login")        return <LoginPage onSuccess={(u) => login(u)} />; // login is async, returns Promise
 
   if (path.startsWith("/files"))  return <><FilesPage onNavigate={navigate} /><ToastContainer /></>;
+  if (path.startsWith("/store"))  return <><AppStorePage onNavigate={navigate} /><ToastContainer /></>;
 
   return <><HomePage username={username} onLogout={logout} onNavigate={navigate} /><ToastContainer /></>;
 }
