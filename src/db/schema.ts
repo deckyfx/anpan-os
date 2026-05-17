@@ -115,3 +115,20 @@ export const bookmarks = sqliteTable("bookmarks", {
 
 export type BookmarkRow    = typeof bookmarks.$inferSelect;
 export type NewBookmarkRow = typeof bookmarks.$inferInsert;
+
+/**
+ * App Store repositories — user-managed list of CasaOS-compatible GitHub repos.
+ * The three default repos are seeded on first run via AppRepoStore.seedDefaults().
+ */
+export const appRepos = sqliteTable("app_repos", {
+  id:        integer("id").primaryKey({ autoIncrement: true }),
+  name:      text("name").notNull(),
+  url:       text("url").notNull().unique(),
+  enabled:   integer("enabled", { mode: "boolean" }).notNull().default(true),
+  createdAt: integer("created_at", { mode: "timestamp" })
+    .notNull()
+    .default(sql`(unixepoch())`),
+});
+
+export type AppRepoRow    = typeof appRepos.$inferSelect;
+export type NewAppRepoRow = typeof appRepos.$inferInsert;

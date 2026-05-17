@@ -2,6 +2,7 @@ import { envConfig } from "./env-config";
 import { config } from "./config";
 import { MigrationManager } from "./db/migration-manager";
 import { SettingsStore } from "./stores/settings-store";
+import { AppRepoStore }  from "./stores/app-repo-store";
 import { createApp } from "./app";
 import { appPlugin } from "./plugins/routeApp";
 import { appPluginBinary } from "./plugins/routeAppBinary";
@@ -23,6 +24,7 @@ if (Bun.argv.includes("--reset-user")) {
 // --- Server startup ---
 await config.load();
 await MigrationManager.init({ autoMigrate: true });
+await AppRepoStore.seedDefaults();
 
 const jwtSecret =
   (config.auth.jwt_secret?.trim().length ?? 0) > 0

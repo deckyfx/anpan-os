@@ -86,39 +86,46 @@ type TabId = "app-config" | "stack-config" | "env-file" | "yaml" | "action-log" 
 
 // ─── Outer wrapper ────────────────────────────────────────────────────────────
 
-export function GuidedStackDialog({ mode, stack, open, onClose, onDone }: {
-  mode:    "create" | "edit";
-  stack?:  Stack | null;
-  open:    boolean;
-  onClose: () => void;
-  onDone:  () => void;
+export function GuidedStackDialog({ mode, stack, open, onClose, onDone, initialContent, initialAppId }: {
+  mode:             "create" | "edit";
+  stack?:           Stack | null;
+  open:             boolean;
+  onClose:          () => void;
+  onDone:           () => void;
+  /** Pre-fill the YAML editor with this content when creating a new stack (e.g. from App Store). */
+  initialContent?:  string;
+  /** Unique key for the app being installed; forces remount between different App Store installs. */
+  initialAppId?:    string;
 }) {
   if (!open) return null;
   if (mode === "edit" && !stack) return null;
   return (
     <GuidedStackDialogInner
-      key={mode === "edit" ? stack!.name : "new"}
+      key={mode === "edit" ? stack!.name : (initialAppId ?? "new")}
       mode={mode}
       stack={stack ?? null}
       onClose={onClose}
       onDone={onDone}
+      initialContent={initialContent}
     />
   );
 }
 
 // ─── Inner component ──────────────────────────────────────────────────────────
 
-function GuidedStackDialogInner({ mode, stack, onClose, onDone }: {
-  mode:    "create" | "edit";
-  stack:   Stack | null;
-  onClose: () => void;
-  onDone:  () => void;
+function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent }: {
+  mode:             "create" | "edit";
+  stack:            Stack | null;
+  onClose:          () => void;
+  onDone:           () => void;
+  initialContent?:  string;
 }) {
-  const isEdit = mode === "edit";
-  const init   = isEdit ? initForms("", stack?.name ?? "") : initForms(DEFAULT_YAML);
+  const isEdit     = mode === "edit";
+  const startYaml  = isEdit ? "" : (initialContent ?? DEFAULT_YAML);
+  const init       = isEdit ? initForms("", stack?.name ?? "") : initForms(startYaml);
 
   const [loading,          setLoading]          = useState(isEdit);
-  const [yamlContent,      setYamlContent]      = useState(isEdit ? "" : DEFAULT_YAML);
+  const [yamlContent,      setYamlContent]      = useState(startYaml);
   const [envContent,       setEnvContent]       = useState("");
   const [envTouched,       setEnvTouched]       = useState(false);
   const [serviceNames,     setServiceNames]     = useState<string[]>(init.serviceNames);
