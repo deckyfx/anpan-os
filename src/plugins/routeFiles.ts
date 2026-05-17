@@ -464,10 +464,15 @@ export function filesPlugin(jwtSecret: string) {
         }
         try {
           const proc = Bun.spawn([bins.du, "-sh", resolved], { stdout: "pipe", stderr: "pipe" });
-          const [out] = await Promise.all([
+          const [out, errText, exitCode] = await Promise.all([
             new Response(proc.stdout).text(),
+            new Response(proc.stderr).text(),
             proc.exited,
           ]);
+          if (exitCode !== 0) {
+            set.status = 500;
+            return { error: errText.trim() || `du exited with code ${exitCode}` };
+          }
           // du -sh output: "1.5G\t/path"
           const size = out.split("\t")[0]?.trim() ?? "unknown";
           return { size };

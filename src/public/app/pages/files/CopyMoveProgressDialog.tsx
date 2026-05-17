@@ -1,7 +1,11 @@
 import { useEffect, useRef } from "react";
 import { useFileStore } from "../../stores/fileStore";
 
-/** SSE streaming progress dialog for copy / move operations. */
+/**
+ * SSE streaming progress dialog for copy / move operations.
+ * Reads `copyMoveProgress` from the file store and renders a fixed overlay
+ * with a scrollable log pane that auto-scrolls on each new line.
+ */
 export function CopyMoveProgressDialog() {
   const { copyMoveProgress, setCopyMoveProgress } = useFileStore();
   const logRef = useRef<HTMLPreElement>(null);
@@ -25,7 +29,7 @@ export function CopyMoveProgressDialog() {
 
         <pre
           ref={logRef}
-          className="flex-1 overflow-y-auto px-5 py-4 text-xs text-gray-300 font-mono whitespace-pre-wrap break-all min-h-[8rem]"
+          className="flex-1 overflow-y-auto px-5 py-4 text-xs text-gray-300 font-mono whitespace-pre-wrap break-all min-h-32"
         >
           {logs.join("\n")}
           {!done && <span className="animate-pulse text-blue-400">▋</span>}

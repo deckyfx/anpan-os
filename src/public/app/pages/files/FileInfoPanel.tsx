@@ -35,6 +35,7 @@ const valClass = "text-gray-300 break-all text-right";
 
 // ─── Disk Usage Widget ────────────────────────────────────────────────────────
 
+/** Shows disk usage for the mount point that best matches the current directory. */
 function DiskUsageWidget({ currentPath }: { currentPath: string }) {
   const [disks, setDisks] = useState<DiskMount[] | null>(null);
 
@@ -87,6 +88,7 @@ function DiskUsageWidget({ currentPath }: { currentPath: string }) {
 
 // ─── Clipboard Widget ─────────────────────────────────────────────────────────
 
+/** Displays the current clipboard operation (copy/cut) and lists the affected file names. */
 function ClipboardWidget() {
   const { clipboard, clearClipboard } = useFileStore();
   if (!clipboard) return null;
@@ -123,10 +125,10 @@ function ClipboardWidget() {
 
 // ─── Selection Widget ─────────────────────────────────────────────────────────
 
-function SelectionWidget({ entries, selectedPaths, folderSizes }: {
+/** Summarises the current selection: item count and total file size (directories excluded). */
+function SelectionWidget({ entries, selectedPaths }: {
   entries: FileEntry[];
   selectedPaths: Set<string>;
-  folderSizes: Record<string, string>;
 }) {
   const { toggleSelectAll } = useFileStore();
   if (selectedPaths.size === 0) return null;
@@ -160,6 +162,7 @@ function SelectionWidget({ entries, selectedPaths, folderSizes }: {
 
 // ─── Properties Widget ────────────────────────────────────────────────────────
 
+/** Shows metadata for a single file or folder; includes an on-demand size calculator for directories. */
 function PropertiesWidget({ entry, folderSizes, onCalculateSize }: {
   entry: FileEntry;
   folderSizes: Record<string, string>;
@@ -169,8 +172,11 @@ function PropertiesWidget({ entry, folderSizes, onCalculateSize }: {
 
   const handleCalc = async () => {
     setCalculating(true);
-    await onCalculateSize(entry.path);
-    setCalculating(false);
+    try {
+      await onCalculateSize(entry.path);
+    } finally {
+      setCalculating(false);
+    }
   };
 
   return (
@@ -210,6 +216,10 @@ interface FileInfoPanelProps {
   selectedPaths: Set<string>;
 }
 
+/**
+ * Collapsible right sidebar panel showing disk usage, clipboard state,
+ * selection summary, and single-item properties.
+ */
 export function FileInfoPanel({ currentPath, entries, selectedPaths }: FileInfoPanelProps) {
   const { clipboard, folderSizes, calculateFolderSize } = useFileStore();
 
@@ -225,7 +235,6 @@ export function FileInfoPanel({ currentPath, entries, selectedPaths }: FileInfoP
         <SelectionWidget
           entries={entries}
           selectedPaths={selectedPaths}
-          folderSizes={folderSizes}
         />
       )}
       {singleSelected && (

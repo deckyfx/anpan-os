@@ -13,8 +13,11 @@ export class StreamAggregator {
   private readonly producerQueue: Array<() => void> = [];
   private done = false;
 
+  /** Enqueue a message; suspends the caller when the buffer is full. */
   async push(data: SSEMsg): Promise<void> {
-    if (this.buffer.length >= MAX_BUFFER) {
+    // Loop so each resumed producer re-checks capacity before pushing,
+    // preventing concurrent producers from bypassing MAX_BUFFER.
+    while (this.buffer.length >= MAX_BUFFER) {
       await new Promise<void>(r => { this.producerQueue.push(r); });
     }
     this.buffer.push(data);
@@ -22,6 +25,7 @@ export class StreamAggregator {
     this.consumerResolver = null;
   }
 
+  /** Signal that no more messages will be pushed; unblocks all suspended producers. */
   end() {
     this.done = true;
     this.consumerResolver?.();
@@ -42,6 +46,7 @@ export class StreamAggregator {
   }
 }
 
+/** Reads lines from a ReadableStream and forwards each non-empty line as a `{ log }` SSE message. */
 export async function drainStream(
   readable: ReadableStream<Uint8Array>,
   push: (data: SSEMsg) => void | Promise<void>,

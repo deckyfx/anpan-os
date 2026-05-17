@@ -464,12 +464,18 @@ export const useFileStore = create<FileState>((set, get) => ({
 
   // ── Clipboard / copy-move ────────────────────────────────────────────────
 
+  /** Store a set of paths in the clipboard for a subsequent copy or cut operation. */
   setClipboard: (op, paths) => set({ clipboard: { op, paths } }),
 
+  /** Clear the clipboard state. */
   clearClipboard: () => set({ clipboard: null }),
 
+  /**
+   * Execute the pending clipboard operation (copy or move) into `destination`,
+   * streaming progress via SSE and refreshing the destination directory on completion.
+   */
   pasteClipboard: async (destination) => {
-    const { clipboard, loadDirContent, currentPath } = get();
+    const { clipboard, loadDirContent } = get();
     if (!clipboard) return;
 
     const title = clipboard.op === "copy"
@@ -502,7 +508,7 @@ export const useFileStore = create<FileState>((set, get) => ({
           set((s) => ({ copyMoveProgress: s.copyMoveProgress ? { ...s.copyMoveProgress, logs: [...s.copyMoveProgress.logs, m.log!] } : null }));
         } else if (m.ok) {
           if (clipboard.op === "cut") set({ clipboard: null });
-          await loadDirContent(currentPath);
+          await loadDirContent(destination);
           set((s) => ({ copyMoveProgress: s.copyMoveProgress ? { ...s.copyMoveProgress, done: true } : null }));
         } else if (m.error) {
           set((s) => ({ copyMoveProgress: s.copyMoveProgress ? { ...s.copyMoveProgress, done: true, error: m.error! } : null }));
@@ -513,6 +519,7 @@ export const useFileStore = create<FileState>((set, get) => ({
     }
   },
 
+  /** Fetch folder size via `du -sh` and cache the result in `folderSizes`. */
   calculateFolderSize: async (path) => {
     try {
       const { data } = await (api.api.files as unknown as { size: { get: (q: { query: { path: string } }) => Promise<{ data: unknown }> } }).size.get({ query: { path } });
@@ -521,6 +528,7 @@ export const useFileStore = create<FileState>((set, get) => ({
     } catch { /* ignore */ }
   },
 
+  /** Directly set (or clear) the copy/move progress dialog state. */
   setCopyMoveProgress: (v) => set({ copyMoveProgress: v }),
 
   // ── Samba ─────────────────────────────────────────────────────────────────
