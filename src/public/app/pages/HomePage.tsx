@@ -1,22 +1,27 @@
 import { useMemo, useState } from "react";
-import { useStacksStore }    from "../stores/stacksStore";
-import { useAuthStore }      from "../stores/authStore";
-import { useToastStore }     from "../stores/toastStore";
+import { useStacksStore }   from "../stores/stacksStore";
+import { useAuthStore }     from "../stores/authStore";
+import { useBookmarkStore } from "../stores/bookmarkStore";
+import { useToastStore }    from "../stores/toastStore";
 
 import { TopBar }            from "./home/TopBar";
 import { BottomBar }         from "./home/BottomBar";
 import { ClockWidget, CalendarWidget, SystemWidget, DiskWidget, NetworkWidget } from "./home/SideWidgets";
 import { StackTile }         from "./home/StackTile";
+import { BookmarkTile }      from "./home/BookmarkTile";
 import { StackDetailDialog } from "./home/StackDetailDialog";
-import { NoteDialog }        from "./home/NoteDialog";
+import { NoteDialog, GenericNoteDialog } from "./home/NoteDialog";
+import type { NoteTarget }   from "./home/NoteDialog";
 import { LogsDialog }        from "./home/LogsDialog";
-import { GuidedStackDialog }    from "./home/GuidedStackDialog";
-import { DeleteStackDialog }    from "./home/DeleteStackDialog";
-import { PullUpdateDialog }     from "./home/PullUpdateDialog";
+import { GuidedStackDialog } from "./home/GuidedStackDialog";
+import { DeleteStackDialog } from "./home/DeleteStackDialog";
+import { PullUpdateDialog }  from "./home/PullUpdateDialog";
+import { BookmarkDialog }    from "./home/BookmarkDialog";
 import { ContainerLogsDialog }  from "./home/ContainerLogsDialog";
 import { ConfirmDialog }        from "../components/ConfirmDialog";
+import { api }               from "../lib/api";
 
-import type { Stack, StackAction } from "./home/types";
+import type { Stack, StackAction, Bookmark } from "./home/types";
 
 export function HomePage({ username, onLogout, onNavigate }: {
   username: string;
@@ -41,13 +46,29 @@ export function HomePage({ username, onLogout, onNavigate }: {
     initialize, loadStacks, stackAction, handleDrop,
   } = useStacksStore();
 
-  // Lazy-init: starts polling, loads stacks + stats. Runs once per mount.
-  useState(() => { initialize(); });
+  const {
+    bookmarks,
+    addOpen, setAddOpen,
+    editTarget, setEdit,
+    noteTarget, setNote,
+    deleteTarget, setDelete,
+    handleAction: bookmarkAction,
+    saveNote: saveBookmarkNote,
+    remove: deleteBookmark,
+    load: loadBookmarks,
+  } = useBookmarkStore();
+
+  // Lazy-init: starts polling, loads stacks + stats + bookmarks. Runs once per mount.
+  useState(() => {
+    initialize();
+    void loadBookmarks();
+  });
 
   const [filter, setFilter] = useState("");
   const [pendingAction, setPendingAction] = useState<
     { action: "stop" | "restart"; stack: Stack } | null
   >(null);
+  const [pendingDeleteBookmark, setPendingDeleteBookmark] = useState<Bookmark | null>(null);
 
   // ── Sorted + filtered stacks ──────────────────────────────────────────────
 
@@ -67,6 +88,29 @@ export function HomePage({ username, onLogout, onNavigate }: {
       (s.meta?.title ?? s.name).toLowerCase().includes(q) || s.name.toLowerCase().includes(q)
     );
   }, [stacks, sortMode, filter]);
+
+  // ── Filtered bookmarks ────────────────────────────────────────────────────
+
+  const displayedBookmarks = useMemo<Bookmark[]>(() => {
+    const q = filter.trim().toLowerCase();
+    if (!q) return bookmarks;
+    return bookmarks.filter(b =>
+      b.title.toLowerCase().includes(q) || b.url.toLowerCase().includes(q)
+    );
+  }, [bookmarks, filter]);
+
+  // ── Bookmark note target ──────────────────────────────────────────────────
+
+  const bookmarkNoteTarget: NoteTarget | null = noteTarget
+    ? {
+        label:       noteTarget.title,
+        initialNote: noteTarget.note ?? "",
+        onSave: async (note) => {
+          const { error } = await api.api.bookmarks({ id: String(noteTarget.id) }).patch({ note: note || null });
+          return { error };
+        },
+      }
+    : null;
 
   // ── Render ────────────────────────────────────────────────────────────────
 
@@ -136,7 +180,12 @@ export function HomePage({ username, onLogout, onNavigate }: {
             </div>
           </div>
 
-          <div className="grid grid-cols-[repeat(auto-fill,minmax(160px,1fr))] gap-4">
+          {/* ── Docker Stacks section ─────────────────────────────────────── */}
+          <p className="text-[10px] text-gray-600 font-semibold uppercase tracking-widest mb-3">
+            Docker Stacks
+          </p>
+
+          <div className="grid grid-cols-[repeat(auto-fill,minmax(160px,1fr))] gap-4 mb-8">
 
             {/* Files tile */}
             <div
@@ -188,12 +237,49 @@ export function HomePage({ username, onLogout, onNavigate }: {
               />
             ))}
           </div>
+
+          {/* ── External Apps section ─────────────────────────────────────── */}
+          <p className="text-[10px] text-gray-600 font-semibold uppercase tracking-widest mb-3">
+            External Apps
+          </p>
+
+          <div className="grid grid-cols-[repeat(auto-fill,minmax(160px,1fr))] gap-4">
+
+            {/* Add bookmark tile */}
+            <div
+              onClick={() => setAddOpen(true)}
+              className="bg-gray-900 border border-dashed border-gray-700 rounded-2xl p-5 flex flex-col items-center gap-3 cursor-pointer hover:border-sky-500/50 hover:bg-gray-800/50 hover:scale-[1.02] transition-all select-none"
+            >
+              <div className="w-16 h-16 rounded-2xl bg-gray-800 border border-gray-700 flex items-center justify-center text-4xl font-light text-sky-400">
+                +
+              </div>
+              <div className="text-center">
+                <p className="text-sm text-gray-200 font-medium">Add App</p>
+                <p className="text-xs text-gray-600 mt-0.5">External link</p>
+              </div>
+            </div>
+
+            {displayedBookmarks.map(b => (
+              <BookmarkTile
+                key={b.id}
+                bookmark={b}
+                onAction={action => {
+                  if (action === "delete") {
+                    setPendingDeleteBookmark(b);
+                  } else {
+                    bookmarkAction(b, action);
+                  }
+                }}
+              />
+            ))}
+          </div>
+
         </main>
       </div>
 
       <BottomBar stacks={stacks} />
 
-      {/* ── Dialogs ── */}
+      {/* ── Stack Dialogs ── */}
       <GuidedStackDialog
         mode="create"
         open={newStackOpen}
@@ -266,6 +352,45 @@ export function HomePage({ username, onLogout, onNavigate }: {
         }}
         onCancel={() => setPendingAction(null)}
       />
+
+      {/* ── Bookmark Dialogs ── */}
+      <BookmarkDialog
+        bookmark={null}
+        open={addOpen}
+        onClose={() => setAddOpen(false)}
+        onSaved={() => { void loadBookmarks(); }}
+      />
+
+      <BookmarkDialog
+        bookmark={editTarget}
+        open={editTarget !== null}
+        onClose={() => setEdit(null)}
+        onSaved={() => { void loadBookmarks(); }}
+      />
+
+      <GenericNoteDialog
+        target={bookmarkNoteTarget}
+        open={noteTarget !== null}
+        onClose={() => setNote(null)}
+        onSaved={() => {
+          void loadBookmarks();
+          setNote(null);
+        }}
+      />
+
+      <ConfirmDialog
+        open={pendingDeleteBookmark !== null}
+        title="Delete bookmark?"
+        message={`Remove "${pendingDeleteBookmark?.title ?? ""}" from your External Apps?`}
+        confirmLabel="Delete"
+        danger
+        onConfirm={() => {
+          if (pendingDeleteBookmark) void deleteBookmark(pendingDeleteBookmark.id);
+          setPendingDeleteBookmark(null);
+        }}
+        onCancel={() => setPendingDeleteBookmark(null)}
+      />
+
     </div>
   );
 }

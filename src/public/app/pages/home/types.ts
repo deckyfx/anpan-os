@@ -103,3 +103,16 @@ export type StackAction =
   | "view-install-log";
 
 export type SortMode = "custom" | "name";
+
+export interface Bookmark {
+  id:        number;
+  title:     string;
+  url:       string;
+  icon:      string | null;
+  note:      string | null;
+  orderNo:   number | null;
+  createdAt: string | Date;
+  updatedAt: string | Date;
+}
+
+export type BookmarkAction = "edit" | "note" | "delete";
