@@ -107,6 +107,46 @@ const TOOLS = {
       darwin: "brew install samba",
     },
   },
+  rsync: {
+    name:        "rsync",
+    description: "Fast file copy/move with progress",
+    feature:     "file manager — copy and move operations",
+    binary:      { linux: "rsync", darwin: "rsync" },
+    installHint: {
+      linux:  "apt install rsync  /  yum install rsync",
+      darwin: "brew install rsync",
+    },
+  },
+  cp: {
+    name:        "cp",
+    description: "Copy files and directories",
+    feature:     "file manager — copy operations (rsync fallback)",
+    binary:      { linux: "cp", darwin: "cp" },
+    installHint: {
+      linux:  "Built-in (coreutils)",
+      darwin: "Built-in",
+    },
+  },
+  mv: {
+    name:        "mv",
+    description: "Move / rename files and directories",
+    feature:     "file manager — move operations",
+    binary:      { linux: "mv", darwin: "mv" },
+    installHint: {
+      linux:  "Built-in (coreutils)",
+      darwin: "Built-in",
+    },
+  },
+  du: {
+    name:        "du",
+    description: "Disk usage — folder size calculation",
+    feature:     "file manager — calculate folder size",
+    binary:      { linux: "du", darwin: "du" },
+    installHint: {
+      linux:  "Built-in (coreutils)",
+      darwin: "Built-in",
+    },
+  },
 } as const satisfies Record<string, ToolDef>;
 
 export type ToolId = keyof typeof TOOLS;

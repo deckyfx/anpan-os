@@ -65,6 +65,13 @@ interface FileState {
   archiveName:   string;
   archivePaths:  string[];
 
+  // ── Clipboard / copy-move ────────────────────────────────────────────────
+  clipboard:        { op: "copy" | "cut"; paths: string[] } | null;
+  copyMoveProgress: { title: string; logs: string[]; done: boolean; error: string } | null;
+
+  // ── Folder sizes ─────────────────────────────────────────────────────────
+  folderSizes: Record<string, string>;
+
   // ── Samba ─────────────────────────────────────────────────────────────────
   shares:             SambaShare[];
   sambaOpen:          boolean;
@@ -96,6 +103,13 @@ interface FileState {
   handleChmod:      () => Promise<void>;
   handleArchive:    () => Promise<void>;
   handleExtract:    (entry: FileEntry) => Promise<void>;
+
+  // Clipboard / copy-move
+  setClipboard:          (op: "copy" | "cut", paths: string[]) => void;
+  clearClipboard:        () => void;
+  pasteClipboard:        (destination: string) => Promise<void>;
+  calculateFolderSize:   (path: string) => Promise<void>;
+  setCopyMoveProgress:   (v: FileState["copyMoveProgress"]) => void;
 
   // Samba
   loadShares:       () => Promise<void>;
@@ -176,6 +190,10 @@ export const useFileStore = create<FileState>((set, get) => ({
   archiveDialog: false,
   archiveName:   "",
   archivePaths:  [],
+
+  clipboard:        null,
+  copyMoveProgress: null,
+  folderSizes:      {},
 
   shares:             [],
   sambaOpen:          false,
@@ -444,6 +462,67 @@ export const useFileStore = create<FileState>((set, get) => ({
     } catch { /* ignore */ }
   },
 
+  // ── Clipboard / copy-move ────────────────────────────────────────────────
+
+  setClipboard: (op, paths) => set({ clipboard: { op, paths } }),
+
+  clearClipboard: () => set({ clipboard: null }),
+
+  pasteClipboard: async (destination) => {
+    const { clipboard, loadDirContent, currentPath } = get();
+    if (!clipboard) return;
+
+    const title = clipboard.op === "copy"
+      ? `Copying ${clipboard.paths.length} item(s)…`
+      : `Moving ${clipboard.paths.length} item(s)…`;
+
+    set({ copyMoveProgress: { title, logs: [], done: false, error: "" } });
+
+    type SSEEvent = { data: { log?: string; ok?: boolean; error?: string } };
+
+    try {
+      const endpoint = clipboard.op === "copy"
+        ? (api.api.files as unknown as { copy: { post: (b: { sources: string[]; destination: string }) => Promise<{ data: unknown; error: unknown }> } }).copy
+        : (api.api.files as unknown as { move: { post: (b: { sources: string[]; destination: string }) => Promise<{ data: unknown; error: unknown }> } }).move;
+
+      const { data, error } = await endpoint.post({ sources: clipboard.paths, destination });
+      if (error) {
+        set((s) => ({ copyMoveProgress: s.copyMoveProgress ? { ...s.copyMoveProgress, done: true, error: (error as { value?: { error?: string } }).value?.error ?? "Request failed" } : null }));
+        return;
+      }
+      if (!data) {
+        set((s) => ({ copyMoveProgress: s.copyMoveProgress ? { ...s.copyMoveProgress, done: true, error: "No stream received" } : null }));
+        return;
+      }
+
+      for await (const event of data as AsyncIterable<SSEEvent>) {
+        const m = event.data;
+        if (!m) continue;
+        if (m.log !== undefined) {
+          set((s) => ({ copyMoveProgress: s.copyMoveProgress ? { ...s.copyMoveProgress, logs: [...s.copyMoveProgress.logs, m.log!] } : null }));
+        } else if (m.ok) {
+          if (clipboard.op === "cut") set({ clipboard: null });
+          await loadDirContent(currentPath);
+          set((s) => ({ copyMoveProgress: s.copyMoveProgress ? { ...s.copyMoveProgress, done: true } : null }));
+        } else if (m.error) {
+          set((s) => ({ copyMoveProgress: s.copyMoveProgress ? { ...s.copyMoveProgress, done: true, error: m.error! } : null }));
+        }
+      }
+    } catch (err) {
+      set((s) => ({ copyMoveProgress: s.copyMoveProgress ? { ...s.copyMoveProgress, done: true, error: err instanceof Error ? err.message : String(err) } : null }));
+    }
+  },
+
+  calculateFolderSize: async (path) => {
+    try {
+      const { data } = await (api.api.files as unknown as { size: { get: (q: { query: { path: string } }) => Promise<{ data: unknown }> } }).size.get({ query: { path } });
+      const size = (data as { size?: string } | null)?.size;
+      if (size) set((s) => ({ folderSizes: { ...s.folderSizes, [path]: size } }));
+    } catch { /* ignore */ }
+  },
+
+  setCopyMoveProgress: (v) => set({ copyMoveProgress: v }),
+
   // ── Samba ─────────────────────────────────────────────────────────────────
 
   addShare: async () => {
@@ -536,3 +615,5 @@ export const useFileStore = create<FileState>((set, get) => ({
   setNewShare:          (newShare)     => set({ newShare }),
   setSambaError:        (sambaError)   => set({ sambaError }),
 }));
+
+export type { FileState };

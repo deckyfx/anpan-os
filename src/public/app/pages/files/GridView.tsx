@@ -5,7 +5,7 @@ import type { RowProps } from "./ListingTable";
 
 export function GridView(props: RowProps) {
   const { entries, creatingFolder, newFolderName, renamingPath, renameValue, selectedPaths, sharedPaths,
-          onRowClick, onRowCtx, onRenameChange, onRenameCommit, onRenameCancel,
+          clipboard, onRowClick, onRowCtx, onRenameChange, onRenameCommit, onRenameCancel,
           onFolderNameChange, onFolderCommit, onFolderCancel,
           onToggleSelect } = props;
 
@@ -25,13 +25,14 @@ export function GridView(props: RowProps) {
       <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(96px, 1fr))" }}>
         {entries.map((entry) => {
           const isSelected = selectedPaths.has(entry.path);
+          const isCut = clipboard?.op === "cut" && clipboard.paths.includes(entry.path);
           return (
             <div key={entry.path}
               onClick={(e) => onRowClick(e, entry)}
               onContextMenu={(e) => onRowCtx(e, entry)}
               className={`relative group flex flex-col items-center gap-2 p-3 rounded-xl cursor-pointer transition-colors select-none ${
                 isSelected ? "bg-blue-950 hover:bg-blue-900" : "hover:bg-gray-800"
-              }`}
+              } ${isCut ? "opacity-40" : ""}`}
             >
               <input type="checkbox" checked={isSelected}
                 onChange={() => onToggleSelect(entry.path)}

@@ -12,6 +12,7 @@ export interface RowProps {
   renameValue:       string;
   selectedPaths:     Set<string>;
   sharedPaths?:      Set<string>;
+  clipboard?:        { op: "copy" | "cut"; paths: string[] } | null;
   onRowClick:        (e: React.MouseEvent, entry: FileEntry) => void;
   onRowCtx:          (e: React.MouseEvent, entry: FileEntry) => void;
   onRenameChange:    (v: string) => void;
@@ -28,7 +29,7 @@ export interface RowProps {
 
 export function ListingTable(props: RowProps) {
   const { entries, creatingFolder, newFolderName, renamingPath, renameValue, selectedPaths, sharedPaths,
-          onRowClick, onRowCtx, onRenameChange, onRenameCommit, onRenameCancel,
+          clipboard, onRowClick, onRowCtx, onRenameChange, onRenameCommit, onRenameCancel,
           onFolderNameChange, onFolderCommit, onFolderCancel,
           onToggleSelect, onToggleSelectAll } = props;
 
@@ -67,13 +68,14 @@ export function ListingTable(props: RowProps) {
         )}
         {entries.map((entry) => {
           const isSelected = selectedPaths.has(entry.path);
+          const isCut = clipboard?.op === "cut" && clipboard.paths.includes(entry.path);
           return (
             <tr key={entry.path}
               onClick={(e) => onRowClick(e, entry)}
               onContextMenu={(e) => onRowCtx(e, entry)}
               className={`group border-t border-gray-900 transition-colors cursor-pointer select-none ${
                 isSelected ? "bg-blue-950 hover:bg-blue-900" : "hover:bg-gray-900"
-              }`}
+              } ${isCut ? "opacity-40" : ""}`}
             >
               <td className="py-2 pr-3 w-8" onClick={(e) => e.stopPropagation()}>
                 <input type="checkbox" checked={isSelected}
