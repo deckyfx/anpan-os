@@ -63,6 +63,7 @@ function MigrateCasaosDialogInner({ stack, onClose, onDone }: {
   const runMigration = async (path?: string) => {
     setLog([]);
     setErrorMsg("");
+    setPhase("reading"); // disable the button immediately, before the first SSE event arrives
 
     try {
       const { data, error: err } = await api.api.casaos.migrate({ name: stack.name }).post(

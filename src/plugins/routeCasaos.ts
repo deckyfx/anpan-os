@@ -44,8 +44,15 @@ export function casaosPlugin(jwtSecret: string) {
       "/migrate/:name",
       async function*({ params, body }) {
         const { name } = params;
+
+        // Reject names containing path traversal sequences or separators.
+        if (!/^[A-Za-z0-9._-]+$/.test(name)) {
+          yield sse({ data: { error: "Invalid stack name" } satisfies SSEMsg });
+          return;
+        }
+
         const composePath: string = (body as { composePath?: string }).composePath
-          || `${CASAOS_APPS_DIR}/${name}/docker-compose.yml`;
+          || join(CASAOS_APPS_DIR, name, "docker-compose.yml");
 
         // Root check — CasaOS app dir requires root access
         if (process.getuid?.() !== 0) {

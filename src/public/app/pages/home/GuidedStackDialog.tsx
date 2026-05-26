@@ -300,19 +300,17 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent }
         if (m.log !== undefined) {
           setActionLog(prev => [...prev, m.log!]);
         } else if (m.ok) {
-          if (appConfig.title || appConfig.tagline || appConfig.icon || appConfig.portMap || appConfig.note) {
-            await api.api.docker.stacks({ name }).patch({
-              title:     appConfig.title     || undefined,
-              tagline:   appConfig.tagline   || undefined,
-              icon:      appConfig.icon      || undefined,
-              scheme:    appConfig.scheme    || undefined,
-              portMap:   appConfig.portMap   || undefined,
-              indexPath: appConfig.indexPath || undefined,
-              address:   appConfig.address   || undefined,
-              note:      appConfig.note      || undefined,
-              openMode:  appConfig.openMode  || undefined,
-            });
-          }
+          await api.api.docker.stacks({ name }).patch({
+            title:     appConfig.title     || undefined,
+            tagline:   appConfig.tagline   || undefined,
+            icon:      appConfig.icon      || undefined,
+            scheme:    appConfig.scheme    || undefined,
+            portMap:   appConfig.portMap   || undefined,
+            indexPath: appConfig.indexPath || undefined,
+            address:   appConfig.address   || undefined,
+            note:      appConfig.note      || undefined,
+            openMode:  appConfig.openMode  || undefined,
+          });
           if (envTouched && envContent.trim()) {
             await api.api.compose.stacks({ name }).envfile.put({ content: envContent });
           }
