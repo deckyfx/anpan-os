@@ -716,9 +716,11 @@ export function ServiceTab({ value: form, onChange }: Props) {
         mode="dir"
         initialPath={pickerIdx !== null ? (form.volumes[pickerIdx]?.host || "/") : "/"}
         onSelect={path => {
-          if (pickerIdx === null) return;
+          if (pickerIdx === null || pickerIdx < 0 || pickerIdx >= form.volumes.length) return;
+          const existing = form.volumes[pickerIdx];
+          if (!existing) return;
           const volumes = [...form.volumes];
-          volumes[pickerIdx] = { ...volumes[pickerIdx]!, host: path };
+          volumes[pickerIdx] = { ...existing, host: path };
           set({ volumes });
         }}
         onClose={() => setPickerIdx(null)}

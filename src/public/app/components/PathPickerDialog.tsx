@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { Dialog } from "./Dialog";
 import { api } from "../lib/api";
 
@@ -32,11 +32,16 @@ export function PathPickerDialog({
   const [error,    setError]    = useState("");
   const [inputVal, setInputVal] = useState(initialPath);
 
+  // Request-sequencing guard: only the most recent browse call updates state.
+  const requestIdRef = useRef(0);
+
   const browse = useCallback(async (path: string) => {
+    const id = ++requestIdRef.current;
     setLoading(true);
     setError("");
     try {
       const { data, error: err } = await api.api.files.list.get({ query: { path } });
+      if (id !== requestIdRef.current) return; // stale response — discard
       if (err || !data) {
         setError("Cannot read directory");
         return;
@@ -51,9 +56,10 @@ export function PathPickerDialog({
       setCwd(path);
       setInputVal(path);
     } catch {
+      if (id !== requestIdRef.current) return;
       setError("Cannot read directory");
     } finally {
-      setLoading(false);
+      if (id === requestIdRef.current) setLoading(false);
     }
   }, [mode]);
 
@@ -64,9 +70,11 @@ export function PathPickerDialog({
     browse(startPath);
   }, [open, initialPath, browse]);
 
-  /** Navigate up one level. */
+  /** Navigate up one level. Normalizes trailing slashes first. */
   function goUp() {
-    const parent = cwd === "/" ? "/" : cwd.replace(/\/[^/]+$/, "") || "/";
+    const normalized = cwd.replace(/\/+$/, "") || "/";
+    if (normalized === "/") return;
+    const parent = normalized.replace(/\/[^/]+$/, "") || "/";
     browse(parent);
   }
 
@@ -103,7 +111,7 @@ export function PathPickerDialog({
       <div className="flex items-center gap-2 mb-3">
         <button
           onClick={goUp}
-          disabled={cwd === "/"}
+          disabled={cwd.replace(/\/+$/, "") === "" || cwd === "/"}
           title="Go up"
           className="p-1.5 rounded-lg text-gray-400 hover:text-white hover:bg-gray-700 disabled:opacity-30 disabled:cursor-not-allowed transition-colors shrink-0"
         >
@@ -150,17 +158,22 @@ export function PathPickerDialog({
           <ul className="divide-y divide-gray-800 max-h-[300px] overflow-y-auto">
             {entries.map(e => (
               <li key={e.path}>
-                <button
-                  type="button"
+                {/* div row — avoids nesting <button> inside <button> when Pick is rendered */}
+                <div
+                  role="button"
+                  tabIndex={0}
                   onClick={() => {
-                    if (e.isDir) {
-                      browse(e.path);
-                    } else {
-                      // file selected directly (mode==="any")
-                      setInputVal(e.path);
+                    if (e.isDir) browse(e.path);
+                    else setInputVal(e.path);
+                  }}
+                  onKeyDown={ev => {
+                    if (ev.key === "Enter" || ev.key === " ") {
+                      ev.preventDefault();
+                      if (e.isDir) browse(e.path);
+                      else setInputVal(e.path);
                     }
                   }}
-                  className="w-full text-left flex items-center gap-2.5 px-3 py-2 hover:bg-gray-800 transition-colors group"
+                  className="w-full text-left flex items-center gap-2.5 px-3 py-2 hover:bg-gray-800 transition-colors group cursor-pointer"
                 >
                   <span className="text-base shrink-0 select-none">
                     {e.isDir ? "📁" : "📄"}
@@ -186,7 +199,7 @@ export function PathPickerDialog({
                       Pick
                     </button>
                   )}
-                </button>
+                </div>
               </li>
             ))}
           </ul>
