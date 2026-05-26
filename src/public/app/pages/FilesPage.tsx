@@ -25,7 +25,12 @@ import { UploadProgressDialog } from "./files/UploadProgressDialog";
 import { CopyMoveProgressDialog } from "./files/CopyMoveProgressDialog";
 import { FileInfoPanel }  from "./files/FileInfoPanel";
 
-// ─── Component ───────────────────────────────────────────────────────────────
+/**
+ * Render the main file manager UI including navigation controls, file listing (list/grid), right-side info panel, Samba controls, and all related dialogs and context menus.
+ *
+ * @param onNavigate - Callback invoked when a top-bar navigation action requests navigating to a different app route; receives the target path.
+ * @returns The Files page React element.
+ */
 
 export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }) {
   const {

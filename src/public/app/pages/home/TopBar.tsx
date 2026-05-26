@@ -24,6 +24,22 @@ const MENU_ITEMS: NavItem[] = [
   { icon: <Network      size={14} />, label: "Port Scan",  path: "/ports",  section: "Tools"      },
 ];
 
+/**
+ * Renders the application's top navigation bar with branding, a contextual menu, and session controls.
+ *
+ * The menu lists navigation items grouped by section, exposes system power actions when allowed,
+ * provides actions for Docker Hub, password change, adding a passkey (when supported), and signing out,
+ * and controls several modal dialogs (Doctor, Ports, Change Password, Docker Hub).
+ *
+ * @param username - Current user's display name
+ * @param version - Application version string shown next to the branding
+ * @param hasPasskey - `false` if the user has no passkey configured, `true` if configured, or `null` when unknown
+ * @param onLogout - Callback invoked after the logout attempt completes
+ * @param onNavigate - Callback invoked with a path when a navigation item or the branding button is activated
+ * @param onAddPasskey - Async callback to add a passkey; errors are surfaced via toast notifications
+ * @param currentPath - Current route path used to determine which menu item is active (defaults to "/")
+ * @returns The header element containing the top bar and its managed dialogs
+ */
 export function TopBar({ username, version, hasPasskey, onLogout, onNavigate, onAddPasskey, currentPath = "/" }: {
   username: string;
   version: string;
