@@ -21,9 +21,16 @@ type MigrateMsg =
 /**
  * CasaOS compatibility routes — all protected by auth guard.
  *
- * GET  /api/casaos/apps            — list all CasaOS apps parsed from compose YAMLs
- * POST /api/casaos/import/:id      — import x-casaos metadata into DB for a given stack
- * POST /api/casaos/migrate/:name   — migrate CasaOS stack to anpan-os management (SSE)
+ * `GET  /api/casaos/apps`           — list all local CasaOS apps parsed from compose YAMLs
+ * `POST /api/casaos/import/:id`     — import x-casaos metadata into DB for a given stack
+ * `POST /api/casaos/migrate/:name`  — migrate a CasaOS stack to anpan-os management (SSE stream)
+ *
+ * The migrate endpoint:
+ * 1. Requires anpan-os to run as root (rejects with an error otherwise).
+ * 2. Reads the compose file from `/var/lib/casaos/apps/<name>/` (or a custom path from the body).
+ * 3. Copies it into the anpan-os managed folder and redeploys via `docker compose up -d`.
+ *    The same Docker project name ensures existing volumes are reused transparently.
+ * 4. On success, marks the stack as `managed: true` and populates metadata from `x-casaos`.
  */
 export function casaosPlugin(jwtSecret: string) {
   const docker = bins.docker;

@@ -69,6 +69,7 @@ function initForms(yaml: string, projectName = "") {
   }
 }
 
+/** Build the initial AppConfigState from an existing stack's metadata, or return defaults for a new stack. */
 function initAppConfig(stack: Stack | null): AppConfigState {
   return {
     title:     stack?.meta?.title     ?? "",
@@ -87,6 +88,11 @@ type TabId = "app-config" | "stack-config" | "env-file" | "yaml" | "action-log" 
 
 // ─── Outer wrapper ────────────────────────────────────────────────────────────
 
+/**
+ * Outer guard — returns null when closed or in edit mode without a stack.
+ * Forces a full remount via `key` when the target changes so all draft
+ * state is reset cleanly between different stacks or App Store installs.
+ */
 export function GuidedStackDialog({ mode, stack, open, onClose, onDone, initialContent, initialAppId }: {
   mode:             "create" | "edit";
   stack?:           Stack | null;

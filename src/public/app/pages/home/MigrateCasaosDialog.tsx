@@ -15,16 +15,30 @@ interface MigrateMsg {
 
 type Phase = "idle" | "reading" | "writing" | "deploying" | "needPath" | "done" | "error";
 
+/**
+ * Outer guard — renders nothing when closed or no stack is selected.
+ * Forces a full remount via `key` when the target stack changes so all
+ * phase/log state is reset cleanly between migrations.
+ */
 export function MigrateCasaosDialog({ stack, open, onClose, onDone }: {
   stack: Stack | null;
   open: boolean;
   onClose: () => void;
+  /** Called after a successful migration so the parent can refresh the stack list. */
   onDone: () => void;
 }) {
   if (!open || !stack) return null;
   return <MigrateCasaosDialogInner key={stack.name} stack={stack} onClose={onClose} onDone={onDone} />;
 }
 
+/**
+ * Inner migration dialog.  Drives a step-progress SSE stream:
+ * idle → reading → writing → deploying → done (or needPath / error).
+ *
+ * When the server cannot read the default compose path it emits `needPath: true`,
+ * which puts the dialog into a form mode so the user can supply a custom path.
+ * No sudo password is required — anpan-os is assumed to run as root.
+ */
 function MigrateCasaosDialogInner({ stack, onClose, onDone }: {
   stack: Stack;
   onClose: () => void;
@@ -45,6 +59,7 @@ function MigrateCasaosDialogInner({ stack, onClose, onDone }: {
 
   const busy = phase === "reading" || phase === "writing" || phase === "deploying";
 
+  /** Start (or retry) the migration SSE stream, optionally overriding the compose file path. */
   const runMigration = async (path?: string) => {
     setLog([]);
     setErrorMsg("");

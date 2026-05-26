@@ -22,6 +22,7 @@ interface TileMenuProps {
   onClose: () => void;
 }
 
+/** Floating context menu rendered inside the tile's relative container. */
 function TileMenu({ stack, onAction, onClose }: TileMenuProps) {
   const allRunning = stack.state === "running";
   const allStopped = stack.state === "stopped";
@@ -120,6 +121,14 @@ export interface StackTileProps {
   onDragEnd: () => void;
 }
 
+/**
+ * Grid tile representing a single Docker Compose stack.
+ *
+ * Shows the app icon, name, service count, launch link, and origin badge.
+ * A colored status badge (green/yellow/red) is always visible at the top-right
+ * corner; the action menu button overlays it on hover.
+ * Supports drag-and-drop reordering when `dragEnabled` is true.
+ */
 export function StackTile({
   stack, actionLoading, onAction,
   dragging, dragOver, dragEnabled,

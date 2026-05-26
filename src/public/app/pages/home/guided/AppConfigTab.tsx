@@ -15,6 +15,13 @@ interface Props {
   onChange: (v: AppConfigState) => void;
 }
 
+/**
+ * App Config tab in the guided stack dialog.
+ * Collects display metadata (name, tagline, icon, access URL, open mode, note)
+ * that is stored in the DB and shown on the home-screen tile.
+ * None of these fields affect the Docker Compose file — saving them only
+ * requires a metadata PATCH, not a redeploy.
+ */
 export function AppConfigTab({ value, onChange }: Props) {
   const set = (partial: Partial<AppConfigState>) => onChange({ ...value, ...partial });
 
