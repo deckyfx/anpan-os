@@ -124,11 +124,15 @@ export function TopBar({ username, version, hasPasskey, onLogout, onNavigate, on
     <header className="h-12 border-b border-gray-800 px-5 flex items-center gap-0 shrink-0 bg-gray-950">
 
       {/* Branding */}
-      <div className="flex items-center gap-2.5 shrink-0">
+      <button
+        onClick={() => onNavigate("/")}
+        className="flex items-center gap-2.5 shrink-0 rounded-lg px-1 py-0.5 hover:bg-gray-800 transition-colors"
+        aria-label="Go to dashboard"
+      >
         <span className="text-lg">🍞</span>
         <span className="font-bold text-amber-400 tracking-wide">anpan-os</span>
         <span className="text-xs text-gray-600 font-mono">v{version}</span>
-      </div>
+      </button>
 
       {/* Separator */}
       <div className="mx-3 h-5 w-px bg-gray-800 shrink-0" />
