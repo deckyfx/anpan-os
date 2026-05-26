@@ -63,6 +63,21 @@ export function AppConfigTab({ value, onChange }: Props) {
         />
       </div>
 
+      {/* Tagline / Short Description */}
+      <div>
+        <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-widest mb-1.5">
+          Tagline
+          <span className="normal-case font-normal text-gray-600 ml-1">(short description, optional)</span>
+        </label>
+        <input
+          type="text"
+          value={value.tagline}
+          onChange={e => set({ tagline: e.target.value })}
+          placeholder="A brief description of this app"
+          className={`w-full ${inp}`}
+        />
+      </div>
+
       {/* Icon */}
       <div>
         <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-widest mb-1.5">Icon</label>
