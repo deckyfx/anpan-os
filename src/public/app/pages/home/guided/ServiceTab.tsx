@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
-import { Plus, Trash2, ChevronDown, ChevronRight, Tag, Loader2 } from "lucide-react";
+import { Plus, Trash2, ChevronDown, ChevronRight, Tag, Loader2, FolderOpen } from "lucide-react";
 import { api } from "../../../lib/api";
+import { PathPickerDialog } from "../../../components/PathPickerDialog";
 import type { ServiceForm } from "./types";
 
 // ─── Shared styles ────────────────────────────────────────────────────────────
@@ -128,6 +129,7 @@ export function ServiceTab({ value: form, onChange }: Props) {
   const set = (partial: Partial<ServiceForm>) => onChange({ ...form, ...partial });
   const [advOpen, setAdvOpen] = useState(false);
   const [extOpen, setExtOpen] = useState(false);
+  const [pickerIdx, setPickerIdx] = useState<number | null>(null);
 
   return (
     <div className="space-y-6 px-1">
@@ -258,27 +260,39 @@ export function ServiceTab({ value: form, onChange }: Props) {
       <Section title="Volumes">
         {form.volumes.map((v, i) => (
           <div key={i} className="flex items-center gap-2">
-            <input
-              className={inp}
-              value={v.host}
-              onChange={e => {
-                const volumes = [...form.volumes];
-                volumes[i] = { ...v, host: e.target.value };
-                set({ volumes });
-              }}
-              placeholder="host path"
-            />
+            <div className="flex items-center gap-1 flex-1 min-w-0">
+              <input
+                className={inp}
+                value={v.host}
+                onChange={e => {
+                  const volumes = [...form.volumes];
+                  volumes[i] = { ...v, host: e.target.value };
+                  set({ volumes });
+                }}
+                placeholder="host path"
+              />
+              <button
+                type="button"
+                title="Browse…"
+                onClick={() => setPickerIdx(i)}
+                className="p-1.5 rounded-lg text-gray-400 hover:text-amber-400 hover:bg-gray-700 transition-colors shrink-0"
+              >
+                <FolderOpen size={15} />
+              </button>
+            </div>
             <span className="text-gray-600 shrink-0">:</span>
-            <input
-              className={inp}
-              value={v.container}
-              onChange={e => {
-                const volumes = [...form.volumes];
-                volumes[i] = { ...v, container: e.target.value };
-                set({ volumes });
-              }}
-              placeholder="container path"
-            />
+            <div className="flex-1 min-w-0">
+              <input
+                className={inp}
+                value={v.container}
+                onChange={e => {
+                  const volumes = [...form.volumes];
+                  volumes[i] = { ...v, container: e.target.value };
+                  set({ volumes });
+                }}
+                placeholder="container path"
+              />
+            </div>
             <select
               className="bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-sm text-white focus:outline-none focus:border-blue-500 shrink-0"
               value={v.mode}
@@ -694,6 +708,23 @@ export function ServiceTab({ value: form, onChange }: Props) {
           </div>
         )}
       </div>
+
+      {/* Host path picker */}
+      <PathPickerDialog
+        open={pickerIdx !== null}
+        title="Select host path"
+        mode="dir"
+        initialPath={pickerIdx !== null ? (form.volumes[pickerIdx]?.host || "/") : "/"}
+        onSelect={path => {
+          if (pickerIdx === null || pickerIdx < 0 || pickerIdx >= form.volumes.length) return;
+          const existing = form.volumes[pickerIdx];
+          if (!existing) return;
+          const volumes = [...form.volumes];
+          volumes[pickerIdx] = { ...existing, host: path };
+          set({ volumes });
+        }}
+        onClose={() => setPickerIdx(null)}
+      />
     </div>
   );
 }
