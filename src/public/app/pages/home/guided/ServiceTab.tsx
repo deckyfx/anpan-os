@@ -281,16 +281,18 @@ export function ServiceTab({ value: form, onChange }: Props) {
               </button>
             </div>
             <span className="text-gray-600 shrink-0">:</span>
-            <input
-              className={inp}
-              value={v.container}
-              onChange={e => {
-                const volumes = [...form.volumes];
-                volumes[i] = { ...v, container: e.target.value };
-                set({ volumes });
-              }}
-              placeholder="container path"
-            />
+            <div className="flex-1 min-w-0">
+              <input
+                className={inp}
+                value={v.container}
+                onChange={e => {
+                  const volumes = [...form.volumes];
+                  volumes[i] = { ...v, container: e.target.value };
+                  set({ volumes });
+                }}
+                placeholder="container path"
+              />
+            </div>
             <select
               className="bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-sm text-white focus:outline-none focus:border-blue-500 shrink-0"
               value={v.mode}
