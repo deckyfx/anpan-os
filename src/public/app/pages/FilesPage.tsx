@@ -81,7 +81,10 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
     });
   };
 
-  useEffect(() => { useFileStore.getState().initialize(); }, []);
+  useEffect(() => {
+    useFileStore.getState().initialize();
+    useStacksStore.getState().initialize();
+  }, []);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
