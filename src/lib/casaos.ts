@@ -53,6 +53,30 @@ function localised(v: unknown): string {
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
+/** Parse `x-casaos` metadata from a raw compose YAML string. Returns null if the block is absent or malformed. */
+export function parseCasaOSMeta(raw: string): CasaOSApp | null {
+  try {
+    const doc  = parse(raw) as Record<string, unknown>;
+    const meta = doc["x-casaos"] as Record<string, unknown> | undefined;
+    if (!meta) return null;
+    return {
+      id:          "",
+      title:       localised(meta["title"]),
+      icon:        str(meta["icon"]),
+      tagline:     localised(meta["tagline"]),
+      description: localised(meta["description"]),
+      tips:        localised(meta["tips"]),
+      scheme:      str(meta["scheme"]) || "http",
+      portMap:     str(meta["port_map"]),
+      index:       str(meta["index"]) || "/",
+      mainService: str(meta["main"]),
+      storeAppId:  str(meta["store_app_id"]),
+    };
+  } catch {
+    return null;
+  }
+}
+
 // ─── Remote App Store ─────────────────────────────────────────────────────────
 
 const FETCH_TIMEOUT_MS = 10_000;

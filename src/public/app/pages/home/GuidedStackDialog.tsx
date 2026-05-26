@@ -69,9 +69,11 @@ function initForms(yaml: string, projectName = "") {
   }
 }
 
+/** Build the initial AppConfigState from an existing stack's metadata, or return defaults for a new stack. */
 function initAppConfig(stack: Stack | null): AppConfigState {
   return {
     title:     stack?.meta?.title     ?? "",
+    tagline:   stack?.meta?.tagline   ?? "",
     icon:      stack?.meta?.icon      ?? "",
     scheme:    stack?.meta?.scheme    ?? "http",
     portMap:   stack?.meta?.portMap   ?? "",
@@ -86,6 +88,11 @@ type TabId = "app-config" | "stack-config" | "env-file" | "yaml" | "action-log" 
 
 // ─── Outer wrapper ────────────────────────────────────────────────────────────
 
+/**
+ * Outer guard — returns null when closed or in edit mode without a stack.
+ * Forces a full remount via `key` when the target changes so all draft
+ * state is reset cleanly between different stacks or App Store installs.
+ */
 export function GuidedStackDialog({ mode, stack, open, onClose, onDone, initialContent, initialAppId }: {
   mode:             "create" | "edit";
   stack?:           Stack | null;
@@ -124,22 +131,24 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent }
   const startYaml  = isEdit ? "" : (initialContent ?? DEFAULT_YAML);
   const init       = isEdit ? initForms("", stack?.name ?? "") : initForms(startYaml);
 
-  const [loading,          setLoading]          = useState(isEdit);
-  const [yamlContent,      setYamlContent]      = useState(startYaml);
-  const [envContent,       setEnvContent]       = useState("");
-  const [envTouched,       setEnvTouched]       = useState(false);
-  const [serviceNames,     setServiceNames]     = useState<string[]>(init.serviceNames);
-  const [serviceForms,     setServiceForms]     = useState<Record<string, ServiceForm>>(init.serviceForms);
-  const [stackConfig,      setStackConfig]      = useState<StackConfig>(init.stackConfig);
-  const [stackNameDirty,   setStackNameDirty]   = useState(false);
-  const [appConfig,        setAppConfig]        = useState<AppConfigState>(() => initAppConfig(stack));
-  const [activeTab,        setActiveTab]        = useState<TabId>("app-config");
-  const [parseErrors,      setParseErrors]      = useState<string[]>([]);
-  const [busy,             setBusy]             = useState(false);
-  const [actionLog,        setActionLog]        = useState<string[]>([]);
-  const [installLog,       setInstallLog]       = useState<string | null>(null);
-  const [installLogBusy,   setInstallLogBusy]   = useState(false);
-  const [error,            setError]            = useState("");
+  const [loading,              setLoading]              = useState(isEdit);
+  const [yamlContent,          setYamlContent]          = useState(startYaml);
+  const [envContent,           setEnvContent]           = useState("");
+  const [envTouched,           setEnvTouched]           = useState(false);
+  const [serviceNames,         setServiceNames]         = useState<string[]>(init.serviceNames);
+  const [serviceForms,         setServiceForms]         = useState<Record<string, ServiceForm>>(init.serviceForms);
+  const [stackConfig,          setStackConfig]          = useState<StackConfig>(init.stackConfig);
+  const [stackNameDirty,       setStackNameDirty]       = useState(false);
+  const [appConfig,            setAppConfig]            = useState<AppConfigState>(() => initAppConfig(stack));
+  const [activeTab,            setActiveTab]            = useState<TabId>("app-config");
+  const [parseErrors,          setParseErrors]          = useState<string[]>([]);
+  const [busy,                 setBusy]                 = useState(false);
+  const [actionLog,            setActionLog]            = useState<string[]>([]);
+  const [installLog,           setInstallLog]           = useState<string | null>(null);
+  const [installLogBusy,       setInstallLogBusy]       = useState(false);
+  const [error,                setError]                = useState("");
+  // Track whether anything beyond App Config has been modified (yaml, services, env, stack config)
+  const [nonAppConfigTouched,  setNonAppConfigTouched]  = useState(false);
 
   const logRef   = useRef<HTMLPreElement | null>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -184,6 +193,9 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent }
         const envRes  = await api.api.compose.stacks({ name: stack.name }).envfile.get();
         const envData = envRes.data as { content?: string } | null;
         if (envData?.content !== undefined) setEnvContent(envData.content);
+
+        // Reset dirty flag — nothing has changed yet
+        setNonAppConfigTouched(false);
       } catch (e) {
         setError(e instanceof Error ? e.message : "Failed to load stack data");
       } finally {
@@ -202,6 +214,7 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent }
       setServiceForms(Object.fromEntries(names.map(n => [n, parseService(doc.services[n])])));
       setStackConfig(parseStackConfig(doc));
       setParseErrors([]);
+      if (isEdit) setNonAppConfigTouched(true);
       if (names[0]) setActiveTab(names[0]);
     } catch (e) {
       setParseErrors([e instanceof Error ? e.message : "Invalid YAML"]);
@@ -287,18 +300,17 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent }
         if (m.log !== undefined) {
           setActionLog(prev => [...prev, m.log!]);
         } else if (m.ok) {
-          if (appConfig.title || appConfig.icon || appConfig.portMap || appConfig.note) {
-            await api.api.docker.stacks({ name }).patch({
-              title:     appConfig.title     || undefined,
-              icon:      appConfig.icon      || undefined,
-              scheme:    appConfig.scheme    || undefined,
-              portMap:   appConfig.portMap   || undefined,
-              indexPath: appConfig.indexPath || undefined,
-              address:   appConfig.address   || undefined,
-              note:      appConfig.note      || undefined,
-              openMode:  appConfig.openMode  || undefined,
-            });
-          }
+          await api.api.docker.stacks({ name }).patch({
+            title:     appConfig.title     || undefined,
+            tagline:   appConfig.tagline   || undefined,
+            icon:      appConfig.icon      || undefined,
+            scheme:    appConfig.scheme    || undefined,
+            portMap:   appConfig.portMap   || undefined,
+            indexPath: appConfig.indexPath || undefined,
+            address:   appConfig.address   || undefined,
+            note:      appConfig.note      || undefined,
+            openMode:  appConfig.openMode  || undefined,
+          });
           if (envTouched && envContent.trim()) {
             await api.api.compose.stacks({ name }).envfile.put({ content: envContent });
           }
@@ -318,6 +330,33 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent }
       setBusy(false);
     } finally {
       abortRef.current = null;
+    }
+  };
+
+  // ── Save-only action (edit mode, only App Config changed) ────────────────
+
+  const handleSaveOnly = async () => {
+    setError("");
+    setBusy(true);
+    try {
+      await api.api.docker.stacks({ name: stack!.name }).patch({
+        title:     appConfig.title     || undefined,
+        tagline:   appConfig.tagline   || undefined,
+        icon:      appConfig.icon      || undefined,
+        scheme:    appConfig.scheme    || undefined,
+        portMap:   appConfig.portMap   || undefined,
+        indexPath: appConfig.indexPath || undefined,
+        address:   appConfig.address   || undefined,
+        note:      appConfig.note      || undefined,
+        openMode:  appConfig.openMode  || undefined,
+      });
+      useToastStore.getState().push("Settings saved", "success");
+      onDone();
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -352,6 +391,7 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent }
       await api.api.docker.stacks({ name: stack!.name }).patch(
         {
           title:     appConfig.title     || undefined,
+          tagline:   appConfig.tagline   || undefined,
           icon:      appConfig.icon      || undefined,
           scheme:    appConfig.scheme    || undefined,
           portMap:   appConfig.portMap   || undefined,
@@ -450,13 +490,16 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent }
       </button>
       <button
         type="button"
-        onClick={() => void (isEdit ? handleDeploy() : handleCreate())}
+        onClick={() => void (isEdit
+          ? (nonAppConfigTouched ? handleDeploy() : handleSaveOnly())
+          : handleCreate()
+        )}
         disabled={busy || loading || (!isEdit && !stackConfig.name)}
         className="px-4 py-2 text-sm bg-amber-500 hover:bg-amber-400 text-black font-semibold rounded-lg transition-colors disabled:opacity-50"
       >
         {busy
-          ? <><Loader2 size={13} className="inline animate-spin mr-1" />{isEdit ? "Deploying…" : "Installing…"}</>
-          : isEdit ? "Save & Deploy" : "Install"
+          ? <><Loader2 size={13} className="inline animate-spin mr-1" />{isEdit ? (nonAppConfigTouched ? "Deploying…" : "Saving…") : "Installing…"}</>
+          : isEdit ? (nonAppConfigTouched ? "Save & Deploy" : "Save") : "Install"
         }
       </button>
     </div>
@@ -569,11 +612,12 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent }
           {activeTab === "stack-config" && (
             <StackConfigTab
               value={stackConfig}
-              onChange={setStackConfig}
+              onChange={v => { setStackConfig(v); if (isEdit) setNonAppConfigTouched(true); }}
               isEdit={isEdit}
               onNameChange={name => {
                 setStackNameDirty(true);
                 setStackConfig(prev => ({ ...prev, name }));
+                if (isEdit) setNonAppConfigTouched(true);
               }}
             />
           )}
@@ -583,7 +627,7 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent }
             <div className="flex flex-col h-full">
               <EnvFileTab
                 value={envContent}
-                onChange={v => { setEnvContent(v); setEnvTouched(true); }}
+                onChange={v => { setEnvContent(v); setEnvTouched(true); if (isEdit) setNonAppConfigTouched(true); }}
               />
             </div>
           )}
@@ -596,7 +640,7 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent }
                 defaultLanguage="yaml"
                 theme="vs-dark"
                 value={yamlContent}
-                onChange={val => setYamlContent(val ?? "")}
+                onChange={val => { setYamlContent(val ?? ""); if (isEdit) setNonAppConfigTouched(true); }}
                 loading={
                   <div className="h-full bg-[#1e1e1e] flex items-center justify-center text-gray-600 text-sm">
                     Loading editor…
@@ -613,7 +657,7 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent }
               {serviceForms[svcName] && (
                 <ServiceTab
                   value={serviceForms[svcName]!}
-                  onChange={v => setServiceForms(prev => ({ ...prev, [svcName]: v }))}
+                  onChange={v => { setServiceForms(prev => ({ ...prev, [svcName]: v })); if (isEdit) setNonAppConfigTouched(true); }}
                 />
               )}
             </div>

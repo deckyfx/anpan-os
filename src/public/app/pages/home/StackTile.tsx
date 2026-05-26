@@ -3,10 +3,11 @@ import {
   Play, Square, RotateCw, ScrollText, StickyNote,
   Settings2, FileDown, PackagePlus, Trash2,
   MoreVertical, GripVertical, ExternalLink,
-  Pencil, RefreshCcw, FileText,
+  Pencil, RefreshCcw, FileText, ArrowRightLeft,
 } from "lucide-react";
 import type { ComposeOrigin, Stack, StackAction } from "./types";
 import { buildLaunchUrl, stackStateColor } from "./utils";
+import { useSystemStore } from "../../stores/systemStore";
 
 const ORIGIN_LABEL: Record<NonNullable<ComposeOrigin>, string> = {
   managed: "⚙ Managed",
@@ -21,10 +22,12 @@ interface TileMenuProps {
   onClose: () => void;
 }
 
+/** Floating context menu rendered inside the tile's relative container. */
 function TileMenu({ stack, onAction, onClose }: TileMenuProps) {
   const allRunning = stack.state === "running";
   const allStopped = stack.state === "stopped";
   const act = (a: StackAction) => { onAction(a); onClose(); };
+  const { isRoot } = useSystemStore();
 
   const item = "w-full flex items-center gap-2.5 px-3 py-1.5 rounded-lg hover:bg-gray-700 text-gray-200 transition-colors";
 
@@ -84,6 +87,11 @@ function TileMenu({ stack, onAction, onClose }: TileMenuProps) {
       <button className={`${item} text-gray-500 text-xs`} onClick={() => act("casaos-import")}>
         <PackagePlus size={13} className="text-gray-500 shrink-0" /> Import from CasaOS
       </button>
+      {stack.origin === "casaos" && isRoot && (
+        <button className={item} onClick={() => act("migrate-casaos")}>
+          <ArrowRightLeft size={13} className="text-sky-400 shrink-0" /> Migrate to anpan-os
+        </button>
+      )}
 
       <div className="border-t border-gray-700 my-1 mx-1" />
 
@@ -113,6 +121,14 @@ export interface StackTileProps {
   onDragEnd: () => void;
 }
 
+/**
+ * Grid tile representing a single Docker Compose stack.
+ *
+ * Shows the app icon, name, service count, launch link, and origin badge.
+ * A colored status badge (green/yellow/red) is always visible at the top-right
+ * corner; the action menu button overlays it on hover.
+ * Supports drag-and-drop reordering when `dragEnabled` is true.
+ */
 export function StackTile({
   stack, actionLoading, onAction,
   dragging, dragOver, dragEnabled,
@@ -122,7 +138,6 @@ export function StackTile({
   const launchUrl = buildLaunchUrl(stack);
   const title     = stack.meta?.title ?? stack.name;
   const icon      = stack.meta?.icon ?? stack.icon ?? null;
-  const tagline   = stack.meta?.tagline ?? null;
   const initial   = stack.name.charAt(0).toUpperCase();
 
   return (
@@ -159,14 +174,6 @@ export function StackTile({
 
         <div className="w-full text-center space-y-1">
           <p className="text-sm text-gray-100 font-medium truncate">{title}</p>
-          {tagline && <p className="text-[10px] text-gray-500 truncate">{tagline}</p>}
-          <div className="flex items-center justify-center gap-1.5">
-            <span
-              title={stack.state}
-              className={`w-2 h-2 rounded-full ${stackStateColor[stack.state]} ${stack.state === "partial" ? "animate-pulse" : ""}`}
-            />
-            <span className="text-xs text-gray-500">{stack.state}</span>
-          </div>
           <p className="text-[10px] text-gray-600">
             {stack.services.length === 1 ? "1 service" : `${stack.services.length} services`}
           </p>
@@ -182,13 +189,22 @@ export function StackTile({
             </a>
           )}
           {stack.origin && (
-            <span className="inline-block text-[9px] px-1.5 py-0.5 rounded-full bg-gray-800 text-gray-500 leading-none">
-              {ORIGIN_LABEL[stack.origin]}
-            </span>
+            <div className="flex justify-center">
+              <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-gray-800 text-gray-500 leading-none">
+                {ORIGIN_LABEL[stack.origin]}
+              </span>
+            </div>
           )}
         </div>
       </div>
 
+      {/* Status badge — top-right corner, always visible */}
+      <span
+        title={`Status: ${stack.state}`}
+        className={`absolute top-2 right-2 w-3.5 h-3.5 rounded-full border-2 border-gray-900 ${stackStateColor[stack.state]} ${stack.state === "partial" ? "animate-pulse" : ""}`}
+      />
+
+      {/* Menu button — overlays badge on hover */}
       <button
         className="absolute top-2 right-2 text-gray-600 hover:text-gray-200 opacity-0 group-hover:opacity-100 transition-opacity w-6 h-6 flex items-center justify-center rounded-lg hover:bg-gray-700"
         onClick={(e) => { e.stopPropagation(); setMenuOpen((v) => !v); }}

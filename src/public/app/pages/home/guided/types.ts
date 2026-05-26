@@ -37,6 +37,7 @@ export type OpenMode = "new-page" | "here" | "contained";
 
 export interface AppConfigState {
   title:     string;
+  tagline:   string;
   icon:      string;
   scheme:    string;
   portMap:   string;
