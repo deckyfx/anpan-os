@@ -19,6 +19,7 @@ interface StacksState {
   logsFor: Stack | null;
   guidedEditStack:   Stack | null;
   pullStack:         Stack | null;
+  migrateStack:      Stack | null;
   installLogStack:   Stack | null;
   installLogText:    string;
   installLogLoading: boolean;
@@ -39,6 +40,7 @@ interface StacksState {
   setDeleteStack:  (stack: Stack | null) => void;
   setGuidedEditStack: (stack: Stack | null) => void;
   setPullStack:       (stack: Stack | null) => void;
+  setMigrateStack:    (stack: Stack | null) => void;
   stackAction:     (stack: Stack, action: StackAction) => Promise<void>;
   handleDrop:      (dropIdx: number, displayedStacks: Stack[]) => Promise<void>;
 }
@@ -59,6 +61,7 @@ export const useStacksStore = create<StacksState>((set, get) => ({
   logsFor: null,
   guidedEditStack:   null,
   pullStack:         null,
+  migrateStack:      null,
   installLogStack:   null,
   installLogText:    "",
   installLogLoading: false,
@@ -108,6 +111,7 @@ export const useStacksStore = create<StacksState>((set, get) => ({
   setDeleteStack:  (deleteStack) => set({ deleteStack }),
   setGuidedEditStack: (guidedEditStack) => set({ guidedEditStack }),
   setPullStack:       (pullStack)       => set({ pullStack }),
+  setMigrateStack:    (migrateStack)    => set({ migrateStack }),
 
   stackAction: async (stack, action) => {
     if (action === "logs") {
@@ -119,6 +123,7 @@ export const useStacksStore = create<StacksState>((set, get) => ({
     if (action === "delete")           { set({ deleteStack: stack });     return; }
     if (action === "guided-edit")      { set({ guidedEditStack: stack }); return; }
     if (action === "pull-update")      { set({ pullStack: stack });       return; }
+    if (action === "migrate-casaos")   { set({ migrateStack: stack });    return; }
 
     if (action === "view-install-log") {
       set({ installLogStack: stack, installLogText: "", installLogLoading: true });

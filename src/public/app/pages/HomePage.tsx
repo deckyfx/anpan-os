@@ -15,7 +15,8 @@ import type { NoteTarget }   from "./home/NoteDialog";
 import { LogsDialog }        from "./home/LogsDialog";
 import { GuidedStackDialog } from "./home/GuidedStackDialog";
 import { DeleteStackDialog } from "./home/DeleteStackDialog";
-import { PullUpdateDialog }  from "./home/PullUpdateDialog";
+import { PullUpdateDialog }     from "./home/PullUpdateDialog";
+import { MigrateCasaosDialog }  from "./home/MigrateCasaosDialog";
 import { BookmarkDialog }    from "./home/BookmarkDialog";
 import { ContainerLogsDialog }  from "./home/ContainerLogsDialog";
 import { ConfirmDialog }        from "../components/ConfirmDialog";
@@ -41,6 +42,7 @@ export function HomePage({ username, onLogout, onNavigate }: {
     logsFor,
     guidedEditStack, setGuidedEditStack,
     pullStack, setPullStack,
+    migrateStack, setMigrateStack,
     installLogStack, installLogText, installLogLoading,
     actionBusy,
     initialize, loadStacks, stackAction, handleDrop,
@@ -330,6 +332,13 @@ export function HomePage({ username, onLogout, onNavigate }: {
         open={pullStack !== null}
         onClose={() => setPullStack(null)}
         onUpdated={() => { void loadStacks(); }}
+      />
+
+      <MigrateCasaosDialog
+        stack={migrateStack}
+        open={migrateStack !== null}
+        onClose={() => setMigrateStack(null)}
+        onDone={() => { setMigrateStack(null); void loadStacks(); }}
       />
 
       <LogsDialog

@@ -97,6 +97,7 @@ export type StackAction =
   | "detail"
   | "download-compose"
   | "casaos-import"
+  | "migrate-casaos"
   | "delete"
   | "guided-edit"
   | "pull-update"

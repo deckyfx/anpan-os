@@ -3,10 +3,11 @@ import {
   Play, Square, RotateCw, ScrollText, StickyNote,
   Settings2, FileDown, PackagePlus, Trash2,
   MoreVertical, GripVertical, ExternalLink,
-  Pencil, RefreshCcw, FileText,
+  Pencil, RefreshCcw, FileText, ArrowRightLeft,
 } from "lucide-react";
 import type { ComposeOrigin, Stack, StackAction } from "./types";
 import { buildLaunchUrl, stackStateColor } from "./utils";
+import { useSystemStore } from "../../stores/systemStore";
 
 const ORIGIN_LABEL: Record<NonNullable<ComposeOrigin>, string> = {
   managed: "⚙ Managed",
@@ -25,6 +26,7 @@ function TileMenu({ stack, onAction, onClose }: TileMenuProps) {
   const allRunning = stack.state === "running";
   const allStopped = stack.state === "stopped";
   const act = (a: StackAction) => { onAction(a); onClose(); };
+  const { isRoot } = useSystemStore();
 
   const item = "w-full flex items-center gap-2.5 px-3 py-1.5 rounded-lg hover:bg-gray-700 text-gray-200 transition-colors";
 
@@ -84,6 +86,11 @@ function TileMenu({ stack, onAction, onClose }: TileMenuProps) {
       <button className={`${item} text-gray-500 text-xs`} onClick={() => act("casaos-import")}>
         <PackagePlus size={13} className="text-gray-500 shrink-0" /> Import from CasaOS
       </button>
+      {stack.origin === "casaos" && isRoot && (
+        <button className={item} onClick={() => act("migrate-casaos")}>
+          <ArrowRightLeft size={13} className="text-sky-400 shrink-0" /> Migrate to anpan-os
+        </button>
+      )}
 
       <div className="border-t border-gray-700 my-1 mx-1" />
 
