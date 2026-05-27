@@ -1,7 +1,8 @@
-import { drizzle } from "drizzle-orm/libsql";
-import { createClient } from "@libsql/client";
+import { Database } from "bun:sqlite";
+import { drizzle } from "drizzle-orm/bun-sqlite";
 import { config } from "../config";
 
-const client = createClient({ url: config.databaseUrl });
+const sqlite = new Database(config.databasePath);
+sqlite.exec("PRAGMA journal_mode = WAL;");
 
-export const db = drizzle({ client });
+export const db = drizzle(sqlite);

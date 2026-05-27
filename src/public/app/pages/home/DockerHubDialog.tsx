@@ -98,7 +98,7 @@ function DockerHubDialogInner({ onClose }: { onClose: () => void }) {
   );
 
   return (
-    <Dialog open title="Docker Hub" onClose={onClose} size="md" notification={errorNotif} footer={footer}>
+    <Dialog open title="Docker Hub" disableBackdropClose onClose={onClose} size="md" notification={errorNotif} footer={footer}>
       <div className="space-y-5">
         <div className="flex items-center gap-3 p-3 bg-gray-800/50 rounded-lg border border-gray-700">
           <ContainerIcon size={20} className="text-blue-400 shrink-0" />

@@ -198,11 +198,10 @@ class Config {
   }
 
   /**
-   * SQLite database path — always RUNTIME_CONFIG_DIR/storage.db.
-   * Formatted as a libsql file URL for use with @libsql/client.
+   * SQLite database file path — always RUNTIME_CONFIG_DIR/storage.db.
    */
-  get databaseUrl(): string {
-    return `file:${join(envConfig.RUNTIME_CONFIG_DIR, "storage.db")}`;
+  get databasePath(): string {
+    return join(envConfig.RUNTIME_CONFIG_DIR, "storage.db");
   }
 
   private async createBlank(): Promise<void> {

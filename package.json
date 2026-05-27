@@ -1,6 +1,6 @@
 {
   "name": "anpan-os",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "module": "src/index.ts",
   "type": "module",
   "private": true,
@@ -16,10 +16,8 @@
   "dependencies": {
     "@elysiajs/eden": "^1.4.9",
     "@elysiajs/jwt": "^1.4.2",
-    "@elysiajs/static": "^1.4.10",
     "@fontsource/fira-code": "^5.2.7",
     "@fontsource/inter": "^5.2.8",
-    "@libsql/client": "^0.17.3",
     "@monaco-editor/react": "^4.7.0",
     "@simplewebauthn/browser": "^13.3.0",
     "@simplewebauthn/server": "^13.3.0",

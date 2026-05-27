@@ -32,7 +32,7 @@ export class SambaShareStore {
     return rows.length > 0;
   }
 
-  static async updateByName(name: string, data: Partial<Pick<SambaShareRow, "comment" | "readOnly" | "browseable">>): Promise<SambaShareRow | null> {
+  static async updateByName(name: string, data: Partial<Pick<SambaShareRow, "comment" | "readOnly" | "browseable" | "guestOk">>): Promise<SambaShareRow | null> {
     const rows = await db
       .update(sambaShares)
       .set(data)

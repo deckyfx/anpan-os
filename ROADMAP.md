@@ -1,5 +1,44 @@
 # Roadmap
 
+## v0.4.0 — 2026-05-27
+
+### New features
+- **Browse Mounted Volumes** — navigate directly to a stack's host bind-mount path in the file manager; shows a picker dialog when a stack has multiple mounts
+- **Batch delete** — select multiple files/folders in the file manager and delete them all at once
+- **One-click install script** — `install.sh` for curl-pipe installation on any Linux x64/arm64 machine
+- **System-level deployment** — anpan-os now runs as a systemd service under `/usr/local/bin/anpan-os` with config at `/var/lib/anpan-os`
+- **Samba: Migrate to AnpanOS** — one-click migration of external (CasaOS-managed) Samba shares into anpan-os management; automatically removes the share block from the source conf file to prevent duplicate `[SectionName]` entries
+- **Samba: Guest access toggle** — per-share `guestOk` boolean (default enabled) controls `guest ok = Yes/No` in smb.conf; fixes Windows credential prompt for anpan-os-managed shares
+- **Samba: Edit share dialog** — edit comment, read-only, and guest access settings on existing managed shares without recreating them
+- **Samba: Comment field in Add Share** — auto-fills as `"AnpanOS share {name}"` and updates as you type the share name; editable before saving
+
+### Improvements
+- Binary is now fully self-contained — no `dist/` folder needed alongside the executable; HTML/CSS/JS bundled directly into the binary via Bun's HTML import
+- Switched database driver from `@libsql/client` (native addon, incompatible with standalone binary) to `bun:sqlite` (built into Bun runtime)
+- Default config directory changed from `$HOME/.anpanos` to `/var/lib/anpan-os` for system-wide installs
+- Removed unused `routeAppBinary` static-file plugin
+- `disableBackdropClose` on all editing/detail dialogs — Add Share, Edit Share, Chmod, file text editor, Info, Archive, Doctor, Docker Hub, Samba Manager — prevents accidental data loss from mis-clicks
+
+### Fixes
+- `Promise.allSettled` in batch delete ensures all items are attempted even if some fail
+- File manager `initialize()` always called on mount; pending path cleared via store action instead of direct mutation
+- `setPendingPath` accepts `null` to allow clearing the pending navigation path
+- Samba share list deduplicated by name — anpan-os-managed shares no longer also appear in the External section
+- Symlink-safe include-path comparison via `realpath()` prevents anpan-os's own conf from being parsed as an external share
+
+---
+
+## v0.3.0 — 2026-05-17
+
+### New features
+- **Migrate from CasaOS** — one-click migration of CasaOS-managed stacks to anpan-os managed compose files
+
+### Improvements
+- Origin badge on stack tiles distinguishes managed vs CasaOS stacks
+- Migration dialog streams live progress via SSE
+
+---
+
 ## v0.2.0 — 2026-05-17
 
 ### New features

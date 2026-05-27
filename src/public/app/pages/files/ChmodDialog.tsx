@@ -205,7 +205,7 @@ function ChmodDialogInner({ entry, onClose, onApplied }: {
   );
 
   return (
-    <Dialog open title={`Permissions — ${entry.name}`} onClose={onClose} footer={footer}>
+    <Dialog open title={`Permissions — ${entry.name}`} disableBackdropClose onClose={onClose} footer={footer}>
       <div className="space-y-5">
 
         {/* Owner / Group */}

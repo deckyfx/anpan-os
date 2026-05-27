@@ -29,10 +29,11 @@ class EnvConfig {
 
   /**
    * Runtime config directory — only bootstrap env var.
-   * Defaults to $HOME/.anpanos if not set.
+   * Defaults to /var/lib/anpan-os (system install) if not set.
+   * Override with RUNTIME_CONFIG_DIR env var for custom locations.
    */
   get RUNTIME_CONFIG_DIR(): string {
-    return Bun.env.RUNTIME_CONFIG_DIR ?? `${Bun.env.HOME ?? "~"}/.anpanos`;
+    return Bun.env.RUNTIME_CONFIG_DIR ?? "/var/lib/anpan-os";
   }
 }
 

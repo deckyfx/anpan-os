@@ -83,6 +83,7 @@ export const sambaShares = sqliteTable("samba_shares", {
   comment:    text("comment").notNull().default(""),
   readOnly:   integer("read_only", { mode: "boolean" }).notNull().default(false),
   browseable: integer("browseable", { mode: "boolean" }).notNull().default(true),
+  guestOk:    integer("guest_ok",   { mode: "boolean" }).notNull().default(true),
   createdAt:  integer("created_at", { mode: "timestamp" })
     .notNull()
     .default(sql`(unixepoch())`),

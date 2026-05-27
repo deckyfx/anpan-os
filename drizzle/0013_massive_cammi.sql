@@ -1,0 +1,1 @@
+ALTER TABLE `samba_shares` ADD `guest_ok` integer DEFAULT true NOT NULL;

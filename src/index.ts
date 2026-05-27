@@ -5,7 +5,6 @@ import { SettingsStore } from "./stores/settings-store";
 import { AppRepoStore }  from "./stores/app-repo-store";
 import { createApp } from "./app";
 import { appPlugin } from "./plugins/routeApp";
-import { appPluginBinary } from "./plugins/routeAppBinary";
 
 // --- CLI: --doctor ---
 // Checks that all required external tools are installed on this system.
@@ -32,7 +31,7 @@ const jwtSecret =
     : await SettingsStore.getOrCreateJwtSecret();
 
 const app = createApp(jwtSecret)
-  .use(envConfig.IS_BINARY_MODE ? appPluginBinary : appPlugin)
+  .use(appPlugin)
   .listen({
     hostname: config.hostname,
     port: config.port,

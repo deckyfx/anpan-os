@@ -120,6 +120,7 @@ function BookmarkDialogInner({ bookmark, onClose, onSaved }: Omit<Props, "open">
       open
       title={isEdit ? "Edit Bookmark" : "Add External App"}
       onClose={onClose}
+      disableBackdropClose
       size="md"
       footer={footer}
       notification={error ? (
