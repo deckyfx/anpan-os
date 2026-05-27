@@ -65,7 +65,7 @@ const MAX_AGE = 7 * 24 * 60 * 60;
 function setSession(c: { value: string | undefined; httpOnly: boolean; sameSite: string; secure: boolean; maxAge: number; path: string }, token: string) {
   c.value    = token;
   c.httpOnly = true;
-  c.sameSite = "strict";
+  c.sameSite = config.sessionSameSite;
   c.secure   = config.tlsEnabled;
   c.maxAge   = MAX_AGE;
   c.path     = "/";

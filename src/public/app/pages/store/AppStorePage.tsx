@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { Search, Settings, X } from "lucide-react";
 import { useAppStoreStore } from "../../stores/appStoreStore";
+import { useAuthStore } from "../../stores/authStore";
+import { useStacksStore } from "../../stores/stacksStore";
+import { TopBar } from "../home/TopBar";
 import { AppCard } from "./AppCard";
 import { AppDetailDialog } from "./AppDetailDialog";
 import { RepoManagerDialog } from "./RepoManagerDialog";
@@ -12,6 +15,9 @@ export function AppStorePage({ onNavigate }: { onNavigate: (path: string) => voi
     setSearchQuery, setSelectedCategory, setSelectedRepoId,
     setRepoManagerOpen, loadRepos, loadApps,
   } = useAppStoreStore();
+
+  const { username, logout, hasPasskey, registerPasskey } = useAuthStore();
+  const version = useStacksStore(s => s.version);
 
   const [dismissedErrors, setDismissedErrors] = useState<Set<string>>(new Set());
 
@@ -60,10 +66,18 @@ export function AppStorePage({ onNavigate }: { onNavigate: (path: string) => voi
 
   return (
     <div className="flex flex-col h-screen bg-gray-950 text-white overflow-hidden">
+      <TopBar
+        username={username}
+        version={version}
+        hasPasskey={hasPasskey}
+        onLogout={logout}
+        onNavigate={onNavigate}
+        onAddPasskey={() => registerPasskey("This device")}
+        currentPath="/store"
+      />
+
       {/* Toolbar */}
       <div className="shrink-0 border-b border-gray-800 px-5 py-3 flex items-center gap-3 flex-wrap">
-        <h1 className="text-sm font-semibold text-white shrink-0">App Store</h1>
-
         {/* Search */}
         <div className="relative flex-1 min-w-40 max-w-72">
           <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 pointer-events-none" />

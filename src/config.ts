@@ -22,6 +22,7 @@ bind = "local"   # "local" = 127.0.0.1 only | "public" = 0.0.0.0 (all interfaces
 # Add every URL you use to access anpan-os (protocol + hostname + optional port).
 # Leave empty to accept any origin (suitable for local / private networks).
 passkey_allowed_origins = []
+# session_same_site = "strict"   # "lax" allows multi-hostname LAN access (default: strict)
 
 [compose]
 # folder = "/var/lib/anpan-os/composes"   # defaults to $HOME/.anpanos/composes
@@ -45,6 +46,8 @@ interface AuthConfig {
   password_hash?: string;
   jwt_secret?: string;
   passkey_allowed_origins?: string[];
+  /** SameSite policy for the session cookie. Default "strict". Use "lax" for LAN / multi-hostname access. */
+  session_same_site?: "strict" | "lax" | "none";
 }
 
 interface ComposeConfig {
@@ -133,6 +136,16 @@ class Config {
    */
   get passkeyAllowedOrigins(): string[] {
     return this.data.auth.passkey_allowed_origins ?? [];
+  }
+
+  /**
+   * SameSite policy for the session cookie.
+   * "strict" (default) — most secure; one hostname only.
+   * "lax"              — allows LAN access from multiple hostnames / IPs.
+   * "none"             — requires Secure (HTTPS); cross-site usage.
+   */
+  get sessionSameSite(): "strict" | "lax" | "none" {
+    return this.data.auth.session_same_site ?? "strict";
   }
 
   /** Compose stacks folder — defaults to RUNTIME_CONFIG_DIR/composes. */

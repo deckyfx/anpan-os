@@ -45,6 +45,17 @@ DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${LATEST}/${BINARY}"
 info "Downloading $BINARY..."
 TMP="$(mktemp)"
 curl -fsSL "$DOWNLOAD_URL" -o "$TMP" || die "Download failed: $DOWNLOAD_URL"
+
+info "Verifying SHA256 checksum..."
+SHA256_URL="${DOWNLOAD_URL}.sha256"
+TMP_SHA256="$(mktemp)"
+curl -fsSL "$SHA256_URL" -o "$TMP_SHA256" || die "Failed to download checksum: $SHA256_URL"
+EXPECTED_HASH=$(awk '{print $1}' "$TMP_SHA256")
+ACTUAL_HASH=$(sha256sum "$TMP" | awk '{print $1}')
+rm -f "$TMP_SHA256"
+[ "$EXPECTED_HASH" = "$ACTUAL_HASH" ] || die "SHA256 mismatch — download may be corrupted. Aborting."
+success "Checksum verified."
+
 chmod +x "$TMP"
 mv "$TMP" "${INSTALL_DIR}/anpan-os"
 success "Binary installed at ${INSTALL_DIR}/anpan-os"
@@ -67,6 +78,7 @@ bind = "public"   # "local" = 127.0.0.1 only | "public" = 0.0.0.0 (all interface
 
 [auth]
 passkey_allowed_origins = []
+# session_same_site = "strict"   # "lax" for multi-hostname LAN access (default: strict)
 
 [compose]
 

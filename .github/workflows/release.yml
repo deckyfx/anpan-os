@@ -30,6 +30,12 @@ jobs:
       - name: Build binaries
         run: bun run build.ts
 
+      - name: Generate SHA256 checksums
+        run: |
+          cd binaries
+          sha256sum anpan-os-linux-x64   > anpan-os-linux-x64.sha256
+          sha256sum anpan-os-linux-arm64 > anpan-os-linux-arm64.sha256
+
       - name: Upload binaries to release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -37,4 +43,6 @@ jobs:
           gh release upload "${{ github.event.release.tag_name }}" \
             ./binaries/anpan-os-linux-x64 \
             ./binaries/anpan-os-linux-arm64 \
+            ./binaries/anpan-os-linux-x64.sha256 \
+            ./binaries/anpan-os-linux-arm64.sha256 \
             --clobber

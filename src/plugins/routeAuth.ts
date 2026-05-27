@@ -75,7 +75,7 @@ const cookieSchema = t.Cookie({
 function setSession(c: Cookie<string | undefined>, token: string) {
   c.value = token;
   c.httpOnly = true;
-  c.sameSite = "strict";
+  c.sameSite = config.sessionSameSite;
   c.secure = config.tlsEnabled;
   c.maxAge = MAX_AGE;
   c.path = "/";
