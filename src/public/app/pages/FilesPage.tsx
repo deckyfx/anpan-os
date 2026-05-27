@@ -7,7 +7,7 @@ import { TopBar }        from "./home/TopBar";
 import { ChevronLeft, ChevronRight, FolderUp, House, LayoutGrid, List,
          FolderOpen, Pencil, Download, Archive, PackageOpen, ShieldCheck, Info,
          Trash2, FolderPlus, Upload, Network, Share2, FolderMinus,
-         Copy, Scissors, ClipboardPaste, PanelRight, FolderSearch } from "lucide-react";
+         Copy, Scissors, ClipboardPaste, PanelRight, FolderSearch, RefreshCw } from "lucide-react";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { Dialog }        from "../components/Dialog";
 import type { FileEntry } from "./files/types";
@@ -43,7 +43,7 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
     // Rename
     renamingPath, renameValue, setRenamingPath, setRenameValue, commitRename,
     // Delete
-    deleteTarget, setDeleteTarget, confirmDelete,
+    deleteTargets, setDeleteTargets, confirmDelete,
     // New folder
     creatingFolder, newFolderName, setCreatingFolder, setNewFolderName, commitNewFolder,
     // View / selection
@@ -87,7 +87,13 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
   };
 
   useEffect(() => {
-    useFileStore.getState().initialize();
+    const store = useFileStore.getState();
+    const pending = store.pendingNavigatePath;
+    store.initialize();
+    if (pending) {
+      store.setPendingPath(null);
+      void store.navigateTo(pending);
+    }
     useStacksStore.getState().initialize();
   }, []);
 
@@ -171,6 +177,10 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
         <button onClick={() => navigateTo(homePath)} disabled={loadingDir} title="Home"
           className="p-1.5 rounded-lg text-gray-400 hover:text-white hover:bg-gray-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed shrink-0">
           <House size={16} />
+        </button>
+        <button onClick={() => void loadDirContent(currentPath)} disabled={loadingDir} title="Refresh"
+          className="p-1.5 rounded-lg text-gray-400 hover:text-white hover:bg-gray-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed shrink-0">
+          <RefreshCw size={16} />
         </button>
 
         <input
@@ -277,9 +287,11 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
       </Dialog>
 
       {/* Delete confirm */}
-      <ConfirmDialog open={!!deleteTarget} title="Delete"
-        message={`Delete "${deleteTarget?.name}"? This cannot be undone.`}
-        confirmLabel="Delete" danger onConfirm={confirmDelete} onCancel={() => setDeleteTarget(null)} />
+      <ConfirmDialog open={deleteTargets.length > 0} title="Delete"
+        message={deleteTargets.length === 1
+          ? `Delete "${deleteTargets[0]?.name}"? This cannot be undone.`
+          : `Delete ${deleteTargets.length} items? This cannot be undone.`}
+        confirmLabel="Delete" danger onConfirm={confirmDelete} onCancel={() => setDeleteTargets([])} />
 
       {/* Remove share confirm */}
       <ConfirmDialog open={!!pendingRemoveShare} title="Remove Share"
@@ -409,7 +421,13 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
                   )
                 )}
                 <CtxSep />
-                <CtxItem label="Delete" danger icon={<Trash2       size={14} />} onClick={() => { setDeleteTarget(ctxMenu.entry!); setCtxMenu(null); }} />
+                <CtxItem label="Delete" danger icon={<Trash2       size={14} />} onClick={() => {
+                  const targets = selectedPaths.size > 1 && selectedPaths.has(ctxMenu.entry!.path)
+                    ? entries.filter(e => selectedPaths.has(e.path))
+                    : [ctxMenu.entry!];
+                  setDeleteTargets(targets);
+                  setCtxMenu(null);
+                }} />
               </>
             ) : (
               <>
