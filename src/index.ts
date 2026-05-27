@@ -38,10 +38,14 @@ const app = createApp(jwtSecret)
     tls: config.tlsEnabled
       ? { cert: Bun.file(config.tlsCert), key: Bun.file(config.tlsKey) }
       : undefined,
-    // Disable Bun's built-in dev-server client injection (/_bun/client).
-    // That script opens a WebSocket and calls location.reload() on any file-watcher
-    // event — including SQLite WAL writes in configs/ — causing dialogs to close.
-    development: false,
+    // In production keep development:false — Bun's dev-server client injects a
+    // WebSocket that triggers location.reload() on any file-watcher event,
+    // including SQLite WAL writes, which closes open dialogs unexpectedly.
+    // In dev mode (NODE_ENV=development) enable it so React uses the full
+    // non-minified build with proper error messages.
+    development: process.env.NODE_ENV === "development"
+      ? { hmr: false, console: true }
+      : false,
   });
 
 const protocol = config.tlsEnabled ? "https" : "http";

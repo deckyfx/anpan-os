@@ -1,5 +1,15 @@
 # Roadmap
 
+## v0.4.1 — 2026-05-27
+
+### Fixes
+- **Store page crash** — App Store no longer freezes with "Maximum update depth exceeded"; root cause was Zustand object-literal selectors in `AppDetailDialog` and `RepoManagerDialog` creating new references on every render; fixed with `useShallow`
+- **Repo Manager toggle thumb** — switch thumb was rendering outside the track due to missing `left` anchor on the `absolute` span; fixed with explicit `left-0.5`
+- **Repo Manager backdrop** — added `disableBackdropClose` to prevent accidental dismissal
+- **Dev mode error messages** — `NODE_ENV=development` now enables non-minified React with full error messages; production keeps `development: false` to avoid Bun's file-watcher WebSocket triggering dialog reloads on SQLite WAL writes
+
+---
+
 ## v0.4.0 — 2026-05-27
 
 ### New features
