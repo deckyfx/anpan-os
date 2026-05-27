@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useShallow } from "zustand/react/shallow";
 import { Dialog } from "../../components/Dialog";
 import { useAppStoreStore } from "../../stores/appStoreStore";
 import { GuidedStackDialog } from "../home/GuidedStackDialog";
@@ -6,14 +7,14 @@ import type { StoreApp } from "./types";
 
 export function AppDetailDialog() {
   const { detailApp, setDetailApp, installApp, installContent, startInstall, clearInstall } =
-    useAppStoreStore(s => ({
+    useAppStoreStore(useShallow(s => ({
       detailApp:      s.detailApp,
       setDetailApp:   s.setDetailApp,
       installApp:     s.installApp,
       installContent: s.installContent,
       startInstall:   s.startInstall,
       clearInstall:   s.clearInstall,
-    }));
+    })));
 
   const [installing, setInstalling] = useState(false);
 

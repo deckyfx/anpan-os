@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useShallow } from "zustand/react/shallow";
 import { RefreshCw, Trash2, Plus } from "lucide-react";
 import { Dialog } from "../../components/Dialog";
 import { useAppStoreStore } from "../../stores/appStoreStore";
@@ -6,7 +7,7 @@ import type { AppRepo } from "./types";
 
 export function RepoManagerDialog() {
   const { repos, repoManagerOpen, setRepoManagerOpen, createRepo, updateRepo, deleteRepo, refreshRepo } =
-    useAppStoreStore(s => ({
+    useAppStoreStore(useShallow(s => ({
       repos:             s.repos,
       repoManagerOpen:   s.repoManagerOpen,
       setRepoManagerOpen: s.setRepoManagerOpen,
@@ -14,7 +15,7 @@ export function RepoManagerDialog() {
       updateRepo:        s.updateRepo,
       deleteRepo:        s.deleteRepo,
       refreshRepo:       s.refreshRepo,
-    }));
+    })));
 
   const [newName, setNewName] = useState("");
   const [newUrl,  setNewUrl]  = useState("");
@@ -61,6 +62,7 @@ export function RepoManagerDialog() {
       open={repoManagerOpen}
       title="Manage Repositories"
       size="lg"
+      disableBackdropClose
       onClose={() => setRepoManagerOpen(false)}
     >
       <div className="space-y-3">
@@ -136,8 +138,8 @@ function RepoRow({ repo, refreshing, deleting, onToggle, onRefresh, onDelete }: 
         }`}
       >
         <span
-          className={`absolute top-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${
-            repo.enabled ? "translate-x-4" : "translate-x-0.5"
+          className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${
+            repo.enabled ? "translate-x-4" : "translate-x-0"
           }`}
         />
       </button>
