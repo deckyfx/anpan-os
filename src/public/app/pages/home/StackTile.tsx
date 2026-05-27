@@ -3,7 +3,7 @@ import {
   Play, Square, RotateCw, ScrollText, StickyNote,
   Settings2, FileDown, PackagePlus, Trash2,
   MoreVertical, GripVertical, ExternalLink,
-  Pencil, RefreshCcw, FileText, ArrowRightLeft,
+  Pencil, RefreshCcw, ArrowRightLeft, HardDrive,
 } from "lucide-react";
 import type { ComposeOrigin, Stack, StackAction } from "./types";
 import { buildLaunchUrl, stackStateColor } from "./utils";
@@ -76,11 +76,9 @@ function TileMenu({ stack, onAction, onClose }: TileMenuProps) {
           <RefreshCcw size={14} className="text-sky-400 shrink-0" /> Pull update
         </button>
       )}
-      {stack.origin !== null && (
-        <button className={item} onClick={() => act("view-install-log")}>
-          <FileText size={14} className="text-gray-400 shrink-0" /> Install log
-        </button>
-      )}
+      <button className={item} onClick={() => act("browse-mounts")}>
+        <HardDrive size={14} className="text-gray-400 shrink-0" /> Browse Mounted Volumes
+      </button>
       <button className={item} onClick={() => act("download-compose")}>
         <FileDown size={14} className="text-gray-400 shrink-0" /> Download Compose File
       </button>

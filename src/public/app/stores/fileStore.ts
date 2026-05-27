@@ -37,7 +37,7 @@ interface FileState {
   renameValue:  string;
 
   // ── Delete ────────────────────────────────────────────────────────────────
-  deleteTarget: FileEntry | null;
+  deleteTargets: FileEntry[];
 
   // ── New folder ────────────────────────────────────────────────────────────
   creatingFolder: boolean;
@@ -83,10 +83,14 @@ interface FileState {
   sambaSetupPresent:  boolean | null;
   sambaError:         string;
 
+  // ── Cross-page navigation ─────────────────────────────────────────────────
+  /** Set by stacksStore before navigating to /files; FilesPage reads + clears it on mount. */
+  pendingNavigatePath: string | null;
+
   // ── Init ──────────────────────────────────────────────────────────────────
   initialized: boolean;
 
-  // ── Actions ───────────────────────────────────────────────────────────────
+  // ── Actions (setters) ─────────────────────────────────────────────────────
   initialize:       () => void;
   loadDirContent:   (path: string) => Promise<boolean>;
   navigateTo:       (path: string) => Promise<void>;
@@ -98,6 +102,7 @@ interface FileState {
   saveFile:         () => Promise<void>;
   commitRename:     (entry: FileEntry) => Promise<void>;
   confirmDelete:    () => Promise<void>;
+  setDeleteTargets: (entries: FileEntry[]) => void;
   commitNewFolder:  () => Promise<void>;
   handleUpload:     (files: FileList | null) => void;
   handleChmod:      () => Promise<void>;
@@ -133,7 +138,7 @@ interface FileState {
   setSaveMsg:           (v: string) => void;
   setRenamingPath:      (v: string | null) => void;
   setRenameValue:       (v: string) => void;
-  setDeleteTarget:      (e: FileEntry | null) => void;
+  setDeleteTarget:      (e: FileEntry | null) => void; // kept for legacy single-item callers
   setCreatingFolder:    (v: boolean) => void;
   setNewFolderName:     (v: string) => void;
   setViewMode:          (v: ViewMode) => void;
@@ -150,6 +155,7 @@ interface FileState {
   setAddShareOpen:      (v: boolean) => void;
   setNewShare:          (s: NewShare) => void;
   setSambaError:        (v: string) => void;
+  setPendingPath:       (path: string) => void;
 }
 
 export const useFileStore = create<FileState>((set, get) => ({
@@ -170,7 +176,7 @@ export const useFileStore = create<FileState>((set, get) => ({
   renamingPath: null,
   renameValue:  "",
 
-  deleteTarget: null,
+  deleteTargets: [],
 
   creatingFolder: false,
   newFolderName:  "",
@@ -203,6 +209,8 @@ export const useFileStore = create<FileState>((set, get) => ({
   reloadingSmbd:      false,
   sambaSetupPresent:  null,
   sambaError:         "",
+
+  pendingNavigatePath: null,
 
   initialized: false,
 
@@ -378,13 +386,13 @@ export const useFileStore = create<FileState>((set, get) => ({
   },
 
   confirmDelete: async () => {
-    const { deleteTarget, currentPath, loadDirContent } = get();
-    if (!deleteTarget) return;
+    const { deleteTargets, currentPath, loadDirContent } = get();
+    if (!deleteTargets.length) return;
     try {
-      await api.api.files.delete.delete({ path: deleteTarget.path });
+      await Promise.all(deleteTargets.map(e => api.api.files.delete.delete({ path: e.path })));
       await loadDirContent(currentPath);
     } catch { /* ignore */ }
-    set({ deleteTarget: null });
+    set({ deleteTargets: [], selectedPaths: new Set() });
   },
 
   commitNewFolder: async () => {
@@ -605,7 +613,8 @@ export const useFileStore = create<FileState>((set, get) => ({
   setSaveMsg:           (saveMsg)      => set({ saveMsg }),
   setRenamingPath:      (renamingPath) => set({ renamingPath }),
   setRenameValue:       (renameValue)  => set({ renameValue }),
-  setDeleteTarget:      (deleteTarget) => set({ deleteTarget }),
+  setDeleteTarget:      (e) => set({ deleteTargets: e ? [e] : [] }),
+  setDeleteTargets:     (deleteTargets) => set({ deleteTargets }),
   setCreatingFolder:    (creatingFolder) => set({ creatingFolder }),
   setNewFolderName:     (newFolderName)  => set({ newFolderName }),
   setViewMode:          (viewMode)     => set({ viewMode }),
@@ -622,6 +631,7 @@ export const useFileStore = create<FileState>((set, get) => ({
   setAddShareOpen:      (addShareOpen) => set({ addShareOpen }),
   setNewShare:          (newShare)     => set({ newShare }),
   setSambaError:        (sambaError)   => set({ sambaError }),
+  setPendingPath:       (path)         => set({ pendingNavigatePath: path }),
 }));
 
 export type { FileState };

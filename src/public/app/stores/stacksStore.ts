@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { api } from "../lib/api";
 import type { Stack, SystemStats, SortMode, StackAction } from "../pages/home/types";
 import { useToastStore } from "./toastStore";
+import { useFileStore } from "./fileStore";
 
 interface StacksState {
   stacks:  Stack[];
@@ -26,6 +27,10 @@ interface StacksState {
 
   actionBusy: string | null;
 
+  /** Populated when browse-mounts returns >1 paths; null hides the picker. */
+  mountPickerStack: Stack | null;
+  mountPickerPaths: string[];
+
   initialized: boolean;
 
   initialize:      () => void;
@@ -41,7 +46,8 @@ interface StacksState {
   setGuidedEditStack: (stack: Stack | null) => void;
   setPullStack:       (stack: Stack | null) => void;
   setMigrateStack:    (stack: Stack | null) => void;
-  stackAction:     (stack: Stack, action: StackAction) => Promise<void>;
+  setMountPicker:     (stack: Stack | null, paths?: string[]) => void;
+  stackAction:     (stack: Stack, action: StackAction, navigate?: (path: string) => void) => Promise<void>;
   handleDrop:      (dropIdx: number, displayedStacks: Stack[]) => Promise<void>;
 }
 
@@ -65,8 +71,10 @@ export const useStacksStore = create<StacksState>((set, get) => ({
   installLogStack:   null,
   installLogText:    "",
   installLogLoading: false,
-  actionBusy:   null,
-  initialized:  false,
+  actionBusy:        null,
+  mountPickerStack:  null,
+  mountPickerPaths:  [],
+  initialized:       false,
 
   initialize: () => {
     if (get().initialized) return;
@@ -112,8 +120,9 @@ export const useStacksStore = create<StacksState>((set, get) => ({
   setGuidedEditStack: (guidedEditStack) => set({ guidedEditStack }),
   setPullStack:       (pullStack)       => set({ pullStack }),
   setMigrateStack:    (migrateStack)    => set({ migrateStack }),
+  setMountPicker:     (stack, paths = []) => set({ mountPickerStack: stack, mountPickerPaths: paths }),
 
-  stackAction: async (stack, action) => {
+  stackAction: async (stack, action, navigate) => {
     if (action === "logs") {
       set({ logsFor: stack });
       return;
@@ -133,6 +142,33 @@ export const useStacksStore = create<StacksState>((set, get) => ({
         set({ installLogText: d?.log ?? d?.error ?? "(empty)" });
       } finally {
         set({ installLogLoading: false });
+      }
+      return;
+    }
+
+    if (action === "browse-mounts") {
+      set({ actionBusy: stack.name });
+      try {
+        const { data, error } = await api.api.docker.stacks({ name: stack.name }).binds.get();
+        if (error || !data) {
+          useToastStore.getState().push("Failed to fetch mounted volumes", "error");
+          return;
+        }
+        const paths = (data as { paths: string[] }).paths ?? [];
+        if (paths.length === 0) {
+          useToastStore.getState().push("No mounted volumes found for this stack", "info");
+          return;
+        }
+        if (paths.length === 1 && navigate) {
+          const path = paths[0]!;
+          useFileStore.getState().setPendingPath(path);
+          navigate("/files");
+          return;
+        }
+        // Multiple paths — open picker
+        set({ mountPickerStack: stack, mountPickerPaths: paths });
+      } finally {
+        set({ actionBusy: null });
       }
       return;
     }

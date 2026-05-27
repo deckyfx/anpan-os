@@ -101,7 +101,8 @@ export type StackAction =
   | "delete"
   | "guided-edit"
   | "pull-update"
-  | "view-install-log";
+  | "view-install-log"
+  | "browse-mounts";
 
 export type SortMode = "custom" | "name";
 

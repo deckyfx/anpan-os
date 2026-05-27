@@ -19,8 +19,10 @@ import { PullUpdateDialog }     from "./home/PullUpdateDialog";
 import { MigrateCasaosDialog }  from "./home/MigrateCasaosDialog";
 import { BookmarkDialog }    from "./home/BookmarkDialog";
 import { ContainerLogsDialog }  from "./home/ContainerLogsDialog";
+import { MountPickerDialog }    from "./home/MountPickerDialog";
 import { ConfirmDialog }        from "../components/ConfirmDialog";
 import { api }               from "../lib/api";
+import { useFileStore }      from "../stores/fileStore";
 
 import type { Stack, StackAction, Bookmark } from "./home/types";
 
@@ -43,6 +45,7 @@ export function HomePage({ username, onLogout, onNavigate }: {
     guidedEditStack, setGuidedEditStack,
     pullStack, setPullStack,
     migrateStack, setMigrateStack,
+    mountPickerStack, mountPickerPaths, setMountPicker,
     installLogStack, installLogText, installLogLoading,
     actionBusy,
     initialize, loadStacks, stackAction, handleDrop,
@@ -226,7 +229,7 @@ export function HomePage({ username, onLogout, onNavigate }: {
                   if (action === "stop" || action === "restart") {
                     setPendingAction({ action, stack: s });
                   } else {
-                    void stackAction(s, action);
+                    void stackAction(s, action, onNavigate);
                   }
                 }}
                 dragEnabled={sortMode === "custom"}
@@ -348,6 +351,19 @@ export function HomePage({ username, onLogout, onNavigate }: {
         loading={installLogLoading}
         onClose={() => useStacksStore.setState({ installLogStack: null })}
       />
+
+      {mountPickerStack && (
+        <MountPickerDialog
+          stack={mountPickerStack}
+          paths={mountPickerPaths}
+          onPick={(path) => {
+            useFileStore.getState().setPendingPath(path);
+            setMountPicker(null);
+            onNavigate("/files");
+          }}
+          onClose={() => setMountPicker(null)}
+        />
+      )}
 
       <ConfirmDialog
         open={pendingAction !== null}
