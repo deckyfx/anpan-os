@@ -1,12 +1,13 @@
 import { defineConfig } from "drizzle-kit";
+import { join } from "node:path";
 
-// drizzle-kit runs under Node.js so it reads from .env via process.env.
-// TURSO_DATABASE_URL must match RUNTIME_CONFIG_DIR/storage.db for the dev environment.
+const configDir = process.env.RUNTIME_CONFIG_DIR ?? "/var/lib/anpan-os";
+
 export default defineConfig({
   schema: "./src/db/schema.ts",
   out: "./drizzle",
-  dialect: "turso",
+  dialect: "sqlite",
   dbCredentials: {
-    url: process.env.TURSO_DATABASE_URL!,
+    url: join(configDir, "storage.db"),
   },
 });

@@ -1,6 +1,6 @@
 import { Elysia, t } from "elysia";
 import { mkdirSync } from "node:fs";
-import { stat } from "node:fs/promises";
+import { stat, realpath } from "node:fs/promises";
 import { authGuard } from "./authGuard";
 import { config } from "../config";
 import { envConfig } from "../env-config";
@@ -15,8 +15,12 @@ export interface SambaShare {
   comment:    string;
   readOnly:   boolean;
   browseable: boolean;
+  /** Allow unauthenticated (guest) access from Windows. */
+  guestOk:    boolean;
   /** "anpan" = managed by anpan-os | "external" = from another config (casaos, etc.) */
   source:     "anpan" | "external";
+  /** Absolute path to the conf file this share was read from (external shares only). */
+  sourceFile?: string;
 }
 
 // ─── Share-section parser ─────────────────────────────────────────────────────
@@ -24,7 +28,7 @@ export interface SambaShare {
 /** Parse a conf file that contains only [ShareName] sections (no [global]). */
 function parseShares(raw: string, source: SambaShare["source"] = "anpan"): SambaShare[] {
   const shares: SambaShare[]         = [];
-  let current:  Partial<SambaShare> | null = null;
+  let current:  Partial<Omit<SambaShare, "source">> | null = null;
 
   function flush() {
     if (current?.name) {
@@ -34,6 +38,7 @@ function parseShares(raw: string, source: SambaShare["source"] = "anpan"): Samba
         comment:    current.comment    ?? "",
         readOnly:   current.readOnly   ?? false,
         browseable: current.browseable ?? true,
+        guestOk:    current.guestOk    ?? false,
         source,
       });
     }
@@ -63,6 +68,7 @@ function parseShares(raw: string, source: SambaShare["source"] = "anpan"): Samba
           case "comment":    current.comment    = val; break;
           case "read only":  current.readOnly   = val.toLowerCase() === "yes"; break;
           case "browseable": current.browseable = val.toLowerCase() !== "no";  break;
+          case "guest ok":   current.guestOk    = val.toLowerCase() === "yes"; break;
         }
       }
     }
@@ -79,7 +85,7 @@ function sharesToConf(shares: SambaShare[]): string {
     `   path = ${s.path}`,
     `   browseable = ${s.browseable ? "Yes" : "No"}`,
     `   read only = ${s.readOnly ? "Yes" : "No"}`,
-    `   guest ok = No`,
+    `   guest ok = ${s.guestOk ? "Yes" : "No"}`,
     `   create mask = 0644`,
     `   directory mask = 0755`,
   ].join("\n")).join("\n\n");
@@ -102,6 +108,7 @@ async function rebuildConfFromDb(): Promise<void> {
     comment:    r.comment,
     readOnly:   r.readOnly,
     browseable: r.browseable,
+    guestOk:    r.guestOk,
     source:     "anpan",
   }));
   await writeAnpanShares(shares);
@@ -218,8 +225,14 @@ async function readAllShares(): Promise<SambaShare[]> {
     comment:    r.comment,
     readOnly:   r.readOnly,
     browseable: r.browseable,
+    guestOk:    r.guestOk,
     source:     "anpan",
   }));
+
+  // Resolve our own conf path to its canonical (symlink-free) form so
+  // the string comparison below works even when smb.conf contains a
+  // different spelling (e.g. a symlink alias).
+  const ownConfReal = await realpath(config.sambaSharesPath).catch(() => config.sambaSharesPath);
 
   const rawConf = await readSystemConf();
   const external: SambaShare[] = [];
@@ -229,18 +242,44 @@ async function readAllShares(): Promise<SambaShare[]> {
     let match: RegExpExecArray | null;
     while ((match = includePattern.exec(rawConf)) !== null) {
       const includePath = match[1]!.trim();
-      if (includePath === config.sambaSharesPath) continue;
+      const includeReal = await realpath(includePath).catch(() => includePath);
+      if (includeReal === ownConfReal) continue;
       try {
         const file = Bun.file(includePath);
         if (await file.exists()) {
           const shares = parseShares(await file.text(), "external");
-          external.push(...shares);
+          external.push(...shares.map((s) => ({ ...s, sourceFile: includePath })));
         }
       } catch { /* unreadable — skip */ }
     }
   }
 
-  return [...anpan, ...external];
+  const anpanNames = new Set(anpan.map((s) => s.name));
+  return [...anpan, ...external.filter((s) => !anpanNames.has(s.name))];
+}
+
+// ─── Helpers for take-over ────────────────────────────────────────────────────
+
+/**
+ * Remove the [shareName] section from a samba conf file's text.
+ * A section spans from its [header] line up to (but not including) the next
+ * [header] line or end-of-file.  Blank lines between sections are preserved.
+ */
+function removeShareSection(raw: string, shareName: string): string {
+  const lines  = raw.split("\n");
+  const result: string[] = [];
+  let   skip   = false;
+
+  for (const line of lines) {
+    const trimmed      = line.trim();
+    const sectionMatch = trimmed.match(/^\[(.+)\]$/);
+    if (sectionMatch) {
+      skip = sectionMatch[1] === shareName;
+    }
+    if (!skip) result.push(line);
+  }
+
+  return result.join("\n");
 }
 
 // ─── Plugin ───────────────────────────────────────────────────────────────────
@@ -259,6 +298,7 @@ export function sambaPlugin(jwtSecret: string) {
           comment:    r.comment,
           readOnly:   r.readOnly,
           browseable: r.browseable,
+          guestOk:    r.guestOk,
           source:     "anpan" as const,
         }));
       } catch {
@@ -308,8 +348,9 @@ export function sambaPlugin(jwtSecret: string) {
           name:       body.name,
           path:       body.path,
           comment:    body.comment ?? "",
-          readOnly:   body.readOnly ?? false,
+          readOnly:   body.readOnly  ?? false,
           browseable: true,
+          guestOk:    body.guestOk   ?? true,
         });
 
         try {
@@ -331,6 +372,7 @@ export function sambaPlugin(jwtSecret: string) {
         path:     t.String({ minLength: 1 }),
         comment:  t.Optional(t.String()),
         readOnly: t.Optional(t.Boolean()),
+        guestOk:  t.Optional(t.Boolean()),
       }),
     })
 
@@ -360,6 +402,7 @@ export function sambaPlugin(jwtSecret: string) {
             comment:    before.comment,
             readOnly:   before.readOnly,
             browseable: before.browseable,
+            guestOk:    before.guestOk,
           }).catch(() => {});
           throw e;
         }
@@ -373,7 +416,56 @@ export function sambaPlugin(jwtSecret: string) {
         comment:    t.Optional(t.String()),
         readOnly:   t.Optional(t.Boolean()),
         browseable: t.Optional(t.Boolean()),
+        guestOk:    t.Optional(t.Boolean()),
       }),
+    })
+
+    // POST /api/samba/shares/take-over/:name — import an external share into anpan-os management
+    .post("/shares/take-over/:name", async ({ params, set }) => {
+      try {
+        const allShares = await readAllShares();
+        const target = allShares.find((s) => s.name === params.name && s.source === "external");
+        if (!target) {
+          set.status = 404;
+          return { error: "External share not found" };
+        }
+        const existing = await SambaShareStore.findByName(target.name);
+        if (existing) {
+          set.status = 409;
+          return { error: "Share name is already managed by anpan-os" };
+        }
+
+        await SambaShareStore.create({
+          name:       target.name,
+          path:       target.path,
+          comment:    `AnpanOS share ${target.name}`,
+          readOnly:   target.readOnly,
+          browseable: target.browseable,
+          guestOk:    target.guestOk,
+        });
+
+        try {
+          // Remove the share section from the external conf file so samba
+          // doesn't see duplicate [ShareName] definitions.
+          if (target.sourceFile) {
+            const srcFile = Bun.file(target.sourceFile);
+            if (await srcFile.exists()) {
+              const cleaned = removeShareSection(await srcFile.text(), target.name);
+              await Bun.write(target.sourceFile, cleaned);
+            }
+          }
+
+          await rebuildConfFromDb();
+          await reloadSmbd().catch(rethrowUnlessNotRunning);
+        } catch (e) {
+          await SambaShareStore.deleteByName(target.name).catch(() => {});
+          throw e;
+        }
+        return { ok: true };
+      } catch (e) {
+        set.status = 500;
+        return { error: e instanceof Error ? e.message : "Failed to take over share" };
+      }
     })
 
     // DELETE /api/samba/shares/:name

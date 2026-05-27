@@ -14,19 +14,27 @@ function AddShareDialogInner({
 }: Omit<Props, "open"> & { initialName: string; initialPath: string }) {
   const { addShare, setNewShare, setSambaError, sambaError, loadShares } = useFileStore();
 
-  const [name,     setName]     = useState(initialName);
-  const [path,     setPath]     = useState(initialPath);
-  const [readOnly, setReadOnly] = useState(false);
-  const [busy,     setBusy]     = useState(false);
+  const [name,            setName]           = useState(initialName);
+  const [path,            setPath]           = useState(initialPath);
+  const [comment,         setComment]        = useState(initialName ? `AnpanOS share ${initialName}` : "");
+  const [commentEdited,   setCommentEdited]  = useState(false);
+  const [readOnly,        setReadOnly]       = useState(false);
+  const [guestOk,         setGuestOk]        = useState(true);
+  const [busy,            setBusy]           = useState(false);
 
   const nameValid = !name || /^[a-zA-Z0-9_\-]+$/.test(name);
+
+  function handleNameChange(value: string) {
+    setName(value);
+    if (!commentEdited) setComment(value ? `AnpanOS share ${value}` : "");
+  }
   const canSubmit = !!name.trim() && !!path.trim() && nameValid && !busy;
 
   async function handleSubmit() {
     if (!canSubmit) return;
     setBusy(true);
     setSambaError("");
-    setNewShare({ name, path, comment: "", readOnly });
+    setNewShare({ name, path, comment, readOnly, guestOk });
     try {
       await addShare();
       // addShare() catches its own errors and sets sambaError; close only on success
@@ -44,6 +52,7 @@ function AddShareDialogInner({
       open
       title="Add Share"
       size="md"
+      disableBackdropClose
       onClose={onClose}
       notification={sambaError ? <p className="text-xs text-red-400">{sambaError}</p> : undefined}
       footer={
@@ -70,7 +79,7 @@ function AddShareDialogInner({
           <input
             autoFocus
             value={name}
-            onChange={(e) => setName(e.target.value)}
+            onChange={(e) => handleNameChange(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter") void handleSubmit(); }}
             placeholder="my-share"
             className={`w-full bg-gray-900 border rounded px-3 py-2 text-sm font-mono text-gray-200 outline-none transition-colors ${
@@ -93,6 +102,16 @@ function AddShareDialogInner({
           />
         </div>
 
+        <div>
+          <label className="block text-xs text-gray-400 mb-1">Comment <span className="text-gray-600">(optional)</span></label>
+          <input
+            value={comment}
+            onChange={(e) => { setComment(e.target.value); setCommentEdited(true); }}
+            placeholder="My share description"
+            className="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm text-gray-200 outline-none focus:border-blue-500 transition-colors"
+          />
+        </div>
+
         <label className="flex items-center gap-2 text-sm text-gray-400 cursor-pointer select-none">
           <input
             type="checkbox"
@@ -101,6 +120,15 @@ function AddShareDialogInner({
             className="w-3.5 h-3.5 rounded accent-blue-500"
           />
           Read-only
+        </label>
+        <label className="flex items-center gap-2 text-sm text-gray-400 cursor-pointer select-none">
+          <input
+            type="checkbox"
+            checked={guestOk}
+            onChange={(e) => setGuestOk(e.target.checked)}
+            className="w-3.5 h-3.5 rounded accent-blue-500"
+          />
+          Allow guest access (no password required from Windows)
         </label>
       </div>
     </Dialog>

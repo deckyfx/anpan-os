@@ -1,8 +1,10 @@
 import React, { useState } from "react";
-import { Trash2, Plus } from "lucide-react";
+import { Trash2, Plus, ArrowRightLeft, Pencil } from "lucide-react";
 import { Dialog } from "../../components/Dialog";
 import { useFileStore } from "../../stores/fileStore";
 import { AddShareDialog } from "./AddShareDialog";
+import { EditShareDialog } from "./EditShareDialog";
+import type { SambaShare } from "./types";
 
 // ─── Status badge ─────────────────────────────────────────────────────────────
 
@@ -25,11 +27,12 @@ function SambaManagerDialogInner({ onClose }: Omit<Props, "open">) {
     shares, sambaSetupPresent, sambaError,
     loadShares, checkSambaSetup, doSambaSetup, doSambaUnpatch, doSambaRebuild,
     reloadSmbd, reloadingSmbd,
-    setSambaError, setRemoveShareTarget, removeShare,
+    setSambaError, setRemoveShareTarget, removeShare, takeOverShare,
   } = useFileStore();
 
   const [busy,          setBusy]          = useState(false);
   const [addShareOpen,  setAddShareOpen]  = useState(false);
+  const [editTarget,    setEditTarget]    = useState<SambaShare | null>(null);
 
   async function run(action: () => Promise<void>) {
     setBusy(true);
@@ -54,6 +57,16 @@ function SambaManagerDialogInner({ onClose }: Omit<Props, "open">) {
     }
   }
 
+  async function handleTakeOver(name: string) {
+    setBusy(true);
+    setSambaError("");
+    try {
+      await takeOverShare(name);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const anpanShares = shares.filter((s) => s.source === "anpan");
   const externalShares = shares.filter((s) => s.source === "external");
 
@@ -63,6 +76,7 @@ function SambaManagerDialogInner({ onClose }: Omit<Props, "open">) {
       title="Samba Manager"
       size="lg"
       minHeight="600px"
+      disableBackdropClose
       onClose={onClose}
       notification={sambaError ? <p className="text-xs text-red-400">{sambaError}</p> : undefined}
       footer={
@@ -157,6 +171,12 @@ function SambaManagerDialogInner({ onClose }: Omit<Props, "open">) {
           onClose={() => { setAddShareOpen(false); void loadShares(); }}
         />
 
+        <EditShareDialog
+          open={!!editTarget}
+          share={editTarget!}
+          onClose={() => { setEditTarget(null); void loadShares(); }}
+        />
+
         {/* ── Shares ─────────────────────────────────────────────────────── */}
         <section>
           <div className="rounded-lg bg-gray-800/60 border border-gray-700 overflow-hidden">
@@ -186,6 +206,14 @@ function SambaManagerDialogInner({ onClose }: Omit<Props, "open">) {
                       </div>
                       <button
                         disabled={busy}
+                        onClick={() => setEditTarget(share)}
+                        title="Edit share"
+                        className="p-1.5 rounded text-gray-600 hover:text-blue-400 hover:bg-blue-400/10 transition-colors disabled:opacity-40 shrink-0"
+                      >
+                        <Pencil size={13} />
+                      </button>
+                      <button
+                        disabled={busy}
                         onClick={() => void handleRemoveShare(share)}
                         title="Remove share"
                         className="p-1.5 rounded text-gray-600 hover:text-red-400 hover:bg-red-400/10 transition-colors disabled:opacity-40 shrink-0"
@@ -203,7 +231,7 @@ function SambaManagerDialogInner({ onClose }: Omit<Props, "open">) {
                     <span className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide">External (CasaOS / other)</span>
                   </div>
                   {externalShares.map((share) => (
-                    <div key={share.name} className="px-4 py-2.5 flex items-start gap-3 border-b border-gray-700/50 last:border-0">
+                    <div key={share.name} className="px-4 py-2.5 flex items-center gap-3 border-b border-gray-700/50 last:border-0">
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-1.5">
                           <span className="text-sm font-medium text-gray-200">{share.name}</span>
@@ -214,6 +242,15 @@ function SambaManagerDialogInner({ onClose }: Omit<Props, "open">) {
                         </div>
                         <span className="text-xs text-gray-500 truncate block">{share.path}</span>
                       </div>
+                      <button
+                        disabled={busy}
+                        onClick={() => void handleTakeOver(share.name)}
+                        title="Import this share into anpan-os management"
+                        className="inline-flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded bg-sky-700 hover:bg-sky-600 text-white transition-colors disabled:opacity-40 shrink-0"
+                      >
+                        <ArrowRightLeft size={11} />
+                        Migrate to AnpanOS
+                      </button>
                     </div>
                   ))}
                 </>

@@ -1,6 +1,7 @@
-import { drizzle } from "drizzle-orm/libsql";
-import { migrate } from "drizzle-orm/libsql/migrator";
-import { createClient } from "@libsql/client";
+import { Database } from "bun:sqlite";
+import { drizzle } from "drizzle-orm/bun-sqlite";
+import { migrate } from "drizzle-orm/bun-sqlite/migrator";
+import { sql } from "drizzle-orm";
 import { config } from "../config";
 
 export interface MigrationConfig {
@@ -10,13 +11,13 @@ export interface MigrationConfig {
   autoMigrate?: boolean;
 }
 
-/** Migration manager — workflow layer on top of Drizzle's LibSQL migrator. */
+/** Migration manager — workflow layer on top of Drizzle's bun-sqlite migrator. */
 export class MigrationManager {
   private static readonly migrationsDir = "drizzle";
 
   /** Initialize migration system on app startup. */
-  static async init(config: MigrationConfig = {}): Promise<void> {
-    const { strict = false, autoMigrate = false } = config;
+  static async init(migrationConfig: MigrationConfig = {}): Promise<void> {
+    const { strict = false, autoMigrate = false } = migrationConfig;
 
     const hasMigrations = await this.hasMigrationFiles();
     if (!hasMigrations) {
@@ -52,8 +53,8 @@ export class MigrationManager {
   static async runMigrations(): Promise<void> {
     console.log("🚀 Running migrations...\n");
 
-    const client = createClient({ url: config.databaseUrl });
-    const db = drizzle({ client });
+    const sqlite = new Database(config.databasePath);
+    const db = drizzle(sqlite);
 
     try {
       await migrate(db, { migrationsFolder: this.migrationsDir });
@@ -62,7 +63,7 @@ export class MigrationManager {
       console.error("\n❌ Migration failed:", error);
       throw error;
     } finally {
-      client.close();
+      sqlite.close();
     }
   }
 
@@ -88,19 +89,19 @@ export class MigrationManager {
 
       if (migrationFiles.length === 0) return 0;
 
-      const client = createClient({ url: config.databaseUrl });
+      const sqlite = new Database(config.databasePath);
+      const db = drizzle(sqlite);
 
       try {
-        const result = await client.execute(
-          "SELECT COUNT(*) as count FROM __drizzle_migrations"
+        const result = await db.all<{ count: number }>(
+          sql`SELECT COUNT(*) as count FROM __drizzle_migrations`
         );
-        const applied = Number(result.rows[0]?.[0] ?? 0);
+        const applied = result[0]?.count ?? 0;
         return migrationFiles.length - applied;
       } catch {
-        // Table doesn't exist yet — all migrations are pending
         return migrationFiles.length;
       } finally {
-        client.close();
+        sqlite.close();
       }
     } catch {
       return 0;

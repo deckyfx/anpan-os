@@ -13,6 +13,7 @@ interface NewShare {
   path:     string;
   comment:  string;
   readOnly: boolean;
+  guestOk:  boolean;
 }
 
 interface FileState {
@@ -124,6 +125,8 @@ interface FileState {
   doSambaRebuild:   () => Promise<void>;
   addShare:         () => Promise<void>;
   removeShare:      () => Promise<void>;
+  takeOverShare:    (name: string) => Promise<void>;
+  editShare:        (name: string, patch: { comment?: string; readOnly?: boolean; guestOk?: boolean; browseable?: boolean }) => Promise<void>;
   reloadSmbd:       () => Promise<void>;
 
   // Selection
@@ -205,7 +208,7 @@ export const useFileStore = create<FileState>((set, get) => ({
   sambaOpen:          false,
   removeShareTarget:  null,
   addShareOpen:       false,
-  newShare:           { name: "", path: "/", comment: "", readOnly: false },
+  newShare:           { name: "", path: "/", comment: "", readOnly: false, guestOk: true },
   reloadingSmbd:      false,
   sambaSetupPresent:  null,
   sambaError:         "",
@@ -549,7 +552,7 @@ export const useFileStore = create<FileState>((set, get) => ({
         ?? (data as { error?: string } | null)?.error;
       if (errMsg) { set({ sambaError: errMsg }); return; }
       await loadShares();
-      set({ addShareOpen: false, newShare: { name: "", path: currentPath, comment: "", readOnly: false } });
+      set({ addShareOpen: false, newShare: { name: "", path: currentPath, comment: "", readOnly: false, guestOk: true } });
     } catch (e) {
       set({ sambaError: e instanceof Error ? e.message : "Failed to add share" });
     }
@@ -572,6 +575,35 @@ export const useFileStore = create<FileState>((set, get) => ({
       set({ sambaError: e instanceof Error ? e.message : "Failed to remove share" });
     } finally {
       set({ removeShareTarget: null });
+    }
+  },
+
+  takeOverShare: async (name) => {
+    set({ sambaError: "" });
+    try {
+      const sambaShares = api.api.samba.shares as unknown as {
+        "take-over": (params: { name: string }) => { post: () => Promise<{ data: unknown; error: { value: unknown } | null }> };
+      };
+      const { data, error } = await sambaShares["take-over"]({ name }).post();
+      const errMsg = (error?.value as { error?: string })?.error
+        ?? (data as { error?: string } | null)?.error;
+      if (errMsg) { set({ sambaError: errMsg }); return; }
+      await get().loadShares();
+    } catch (e) {
+      set({ sambaError: e instanceof Error ? e.message : "Failed to migrate share" });
+    }
+  },
+
+  editShare: async (name, patch) => {
+    set({ sambaError: "" });
+    try {
+      const { data, error } = await api.api.samba.shares({ name }).patch(patch);
+      const errMsg = (error?.value as { error?: string })?.error
+        ?? (data as { error?: string } | null)?.error;
+      if (errMsg) { set({ sambaError: errMsg }); return; }
+      await get().loadShares();
+    } catch (e) {
+      set({ sambaError: e instanceof Error ? e.message : "Failed to update share" });
     }
   },
 

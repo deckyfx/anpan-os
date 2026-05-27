@@ -271,7 +271,7 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
       />
 
       {/* File preview */}
-      <Dialog open={!!drawerEntry} title={drawerEntry?.name ?? ""} onClose={() => setDrawerEntry(null)} size="xl">
+      <Dialog open={!!drawerEntry} title={drawerEntry?.name ?? ""} disableBackdropClose onClose={() => setDrawerEntry(null)} size="xl">
         {drawerEntry && (
           <FilePreview
             entry={drawerEntry} content={fileContent} binary={fileBinary}
@@ -312,7 +312,7 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
       />
 
       {/* Info */}
-      <Dialog open={!!infoTarget} title="Info" onClose={() => setInfoTarget(null)}
+      <Dialog open={!!infoTarget} title="Info" disableBackdropClose onClose={() => setInfoTarget(null)}
         footer={<button onClick={() => setInfoTarget(null)} className="px-4 py-2 rounded-lg text-sm bg-gray-700 hover:bg-gray-600 text-white transition-colors">Close</button>}>
         {infoTarget && (
           <dl className="space-y-2 text-sm">
@@ -338,7 +338,7 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
       </Dialog>
 
       {/* Archive */}
-      <Dialog open={archiveDialog} title="Create Archive" onClose={() => setArchiveDialog(false)}
+      <Dialog open={archiveDialog} title="Create Archive" disableBackdropClose onClose={() => setArchiveDialog(false)}
         footer={
           <div className="flex gap-2 justify-end">
             <button onClick={() => setArchiveDialog(false)} className="px-4 py-2 rounded-lg text-sm text-gray-300 hover:text-white hover:bg-gray-800 transition-colors">Cancel</button>

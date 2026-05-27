@@ -224,7 +224,7 @@ export function DoctorDialog({ open, onClose }: {
   const toolsMissing = tools.filter(t => t.binary !== undefined && !t.available).length;
 
   return (
-    <Dialog open={open} title="System Doctor" onClose={onClose} size="lg"
+    <Dialog open={open} title="System Doctor" disableBackdropClose onClose={onClose} size="lg"
       footer={
         <button onClick={run} disabled={running}
           className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs text-gray-400 hover:text-white hover:bg-gray-800 transition-colors disabled:opacity-40"
