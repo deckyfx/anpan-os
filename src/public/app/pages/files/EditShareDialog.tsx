@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useRef } from "react";
 import { Dialog } from "../../components/Dialog";
 import { useFileStore } from "../../stores/fileStore";
 import type { SambaShare } from "./types";
@@ -16,8 +16,11 @@ function EditShareDialogInner({ share, onClose }: Omit<Props, "open">) {
   const [readOnly, setReadOnly] = useState(share.readOnly);
   const [guestOk,  setGuestOk]  = useState(share.guestOk);
   const [busy,     setBusy]     = useState(false);
+  const isSubmittingRef = useRef(false);
 
   async function handleSubmit() {
+    if (isSubmittingRef.current) return;
+    isSubmittingRef.current = true;
     setBusy(true);
     setSambaError("");
     try {
@@ -25,6 +28,7 @@ function EditShareDialogInner({ share, onClose }: Omit<Props, "open">) {
       if (!useFileStore.getState().sambaError) onClose();
     } finally {
       setBusy(false);
+      isSubmittingRef.current = false;
     }
   }
 

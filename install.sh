@@ -51,8 +51,8 @@ success "Binary installed at ${INSTALL_DIR}/anpan-os"
 
 # ── Config directory ──────────────────────────────────────────────────────────
 
-if [ -d "$CONFIG_DIR" ]; then
-  warn "Config directory $CONFIG_DIR already exists — skipping creation."
+if [ -f "${CONFIG_DIR}/config.toml" ]; then
+  warn "Config ${CONFIG_DIR}/config.toml already exists — skipping creation."
 else
   mkdir -p "${CONFIG_DIR}/certs"
   cat > "${CONFIG_DIR}/config.toml" <<'EOF'

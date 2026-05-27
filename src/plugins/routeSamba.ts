@@ -444,13 +444,18 @@ export function sambaPlugin(jwtSecret: string) {
           guestOk:    target.guestOk,
         });
 
+        // Capture original external conf content before modifying it so we can
+        // restore it if something fails after the write.
+        let originalSrcText: string | undefined;
+
         try {
           // Remove the share section from the external conf file so samba
           // doesn't see duplicate [ShareName] definitions.
           if (target.sourceFile) {
             const srcFile = Bun.file(target.sourceFile);
             if (await srcFile.exists()) {
-              const cleaned = removeShareSection(await srcFile.text(), target.name);
+              originalSrcText = await srcFile.text();
+              const cleaned = removeShareSection(originalSrcText, target.name);
               await Bun.write(target.sourceFile, cleaned);
             }
           }
@@ -458,6 +463,10 @@ export function sambaPlugin(jwtSecret: string) {
           await rebuildConfFromDb();
           await reloadSmbd().catch(rethrowUnlessNotRunning);
         } catch (e) {
+          // Restore the external conf if we modified it.
+          if (originalSrcText !== undefined && target.sourceFile) {
+            await Bun.write(target.sourceFile, originalSrcText).catch(() => {});
+          }
           await SambaShareStore.deleteByName(target.name).catch(() => {});
           throw e;
         }
@@ -487,6 +496,7 @@ export function sambaPlugin(jwtSecret: string) {
             comment:    before.comment,
             readOnly:   before.readOnly,
             browseable: before.browseable,
+            guestOk:    before.guestOk,
           }).catch(() => {});
           throw e;
         }

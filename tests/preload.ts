@@ -5,9 +5,9 @@
  */
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { drizzle } from "drizzle-orm/libsql";
-import { migrate } from "drizzle-orm/libsql/migrator";
-import { createClient } from "@libsql/client";
+import { Database } from "bun:sqlite";
+import { drizzle } from "drizzle-orm/bun-sqlite";
+import { migrate } from "drizzle-orm/bun-sqlite/migrator";
 
 const TEST_DIR = "./configs/anpan-test";
 mkdirSync(TEST_DIR, { recursive: true });
@@ -16,6 +16,6 @@ mkdirSync(TEST_DIR, { recursive: true });
 process.env.RUNTIME_CONFIG_DIR = TEST_DIR;
 
 // Run migrations against the test DB (idempotent — safe to call multiple times).
-const client = createClient({ url: `file:${join(TEST_DIR, "storage.db")}` });
-await migrate(drizzle({ client }), { migrationsFolder: "./drizzle" }).catch(() => {});
-client.close();
+const sqlite = new Database(join(TEST_DIR, "storage.db"));
+try { await migrate(drizzle(sqlite), { migrationsFolder: "./drizzle" }); } catch { /* ignore */ }
+sqlite.close();
