@@ -155,7 +155,7 @@ interface FileState {
   setAddShareOpen:      (v: boolean) => void;
   setNewShare:          (s: NewShare) => void;
   setSambaError:        (v: string) => void;
-  setPendingPath:       (path: string) => void;
+  setPendingPath:       (path: string | null) => void;
 }
 
 export const useFileStore = create<FileState>((set, get) => ({
@@ -388,10 +388,8 @@ export const useFileStore = create<FileState>((set, get) => ({
   confirmDelete: async () => {
     const { deleteTargets, currentPath, loadDirContent } = get();
     if (!deleteTargets.length) return;
-    try {
-      await Promise.all(deleteTargets.map(e => api.api.files.delete.delete({ path: e.path })));
-      await loadDirContent(currentPath);
-    } catch { /* ignore */ }
+    await Promise.allSettled(deleteTargets.map(e => api.api.files.delete.delete({ path: e.path })));
+    await loadDirContent(currentPath);
     set({ deleteTargets: [], selectedPaths: new Set() });
   },
 

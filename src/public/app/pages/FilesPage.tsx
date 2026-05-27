@@ -89,11 +89,10 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
   useEffect(() => {
     const store = useFileStore.getState();
     const pending = store.pendingNavigatePath;
+    store.initialize();
     if (pending) {
-      store.pendingNavigatePath = null; // clear before navigating to avoid re-trigger
+      store.setPendingPath(null);
       void store.navigateTo(pending);
-    } else {
-      store.initialize();
     }
     useStacksStore.getState().initialize();
   }, []);

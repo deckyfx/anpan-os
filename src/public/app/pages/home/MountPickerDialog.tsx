@@ -26,6 +26,8 @@ export function MountPickerDialog({ stack, paths, onPick, onClose }: MountPicker
             <span className="text-xs text-gray-500 truncate max-w-[160px]">{title}</span>
           </div>
           <button
+            type="button"
+            aria-label="Close"
             onClick={onClose}
             className="text-gray-500 hover:text-white transition-colors p-1 rounded-lg hover:bg-gray-800"
           >
