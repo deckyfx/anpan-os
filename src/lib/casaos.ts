@@ -40,15 +40,33 @@ function str(v: unknown): string {
 }
 
 function localised(v: unknown): string {
-  if (!v || typeof v !== "object") return "";
-  const m = v as Record<string, string>;
-  // Try common locale keys in priority order, then fall back to first available value.
-  return (
-    m["custom"] ??
-    m["en_us"]  ??
-    m["en_US"]  ??
-    (Object.values(m).find(Boolean) ?? "")
-  );
+  if (typeof v === "string") return v;
+  if (!v || typeof v !== "object" || Array.isArray(v)) return "";
+  const m = v as Record<string, unknown>;
+  // Use || (not ??) so empty-string values fall through to the next locale key.
+  for (const k of ["custom", "en_us", "en_US"]) {
+    if (typeof m[k] === "string" && m[k]) return m[k] as string;
+  }
+  return (Object.values(m).find(x => typeof x === "string" && x) as string) || "";
+}
+
+/**
+ * Extract a human-readable tip string from a CasaOS `x-casaos.tips` block.
+ *
+ * The tips block can be:
+ *  - a plain string
+ *  - `{custom: "..."}` — user-written note (credentials, port info, etc.)
+ *  - `{before_install: {en_us: "...", zh_cn: "..."}}` — locale map
+ *  - a combination of both keys
+ *
+ * `custom` is always preferred; `before_install` is the fallback.
+ */
+function extractTips(v: unknown): string {
+  if (typeof v === "string") return v;
+  if (!v || typeof v !== "object" || Array.isArray(v)) return "";
+  const m = v as Record<string, unknown>;
+  if (typeof m["custom"] === "string" && m["custom"]) return m["custom"];
+  return localised(m["before_install"]);
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
@@ -65,7 +83,7 @@ export function parseCasaOSMeta(raw: string): CasaOSApp | null {
       icon:        str(meta["icon"]),
       tagline:     localised(meta["tagline"]),
       description: localised(meta["description"]),
-      tips:        localised(meta["tips"]),
+      tips:        extractTips(meta["tips"]),
       scheme:      str(meta["scheme"]) || "http",
       portMap:     str(meta["port_map"]),
       index:       str(meta["index"]) || "/",
@@ -220,7 +238,7 @@ async function fetchAndParseApp(
       author:          str(meta["author"]),
       thumbnail:       str(meta["thumbnail"]),
       screenshots,
-      beforeInstallTip: localised(meta["tips"]) || localised(meta["before_install_tip"]),
+      beforeInstallTip: extractTips(meta["tips"]) || localised(meta["before_install_tip"]),
       portMap:         str(meta["port_map"]),
       mainService:     mainSvc,
       architectures:   archs,
@@ -308,7 +326,7 @@ export async function readCasaOSApps(): Promise<CasaOSApp[]> {
         icon:        str(meta["icon"]),
         tagline:     localised(meta["tagline"]),
         description: localised(meta["description"]),
-        tips:        localised(meta["tips"]),
+        tips:        extractTips(meta["tips"]),
         scheme:      str(meta["scheme"]) || "http",
         portMap:     str(meta["port_map"]),
         index:       str(meta["index"]) || "/",
