@@ -4,6 +4,7 @@ import { useAuthStore } from "../stores/authStore";
 import { useShallow } from "zustand/react/shallow";
 import { browserSupportsWebAuthn } from "@simplewebauthn/browser";
 
+/** Post-login prompt to register a passkey. Auto-skips when WebAuthn is unavailable or passkey is disabled. */
 export function PasskeySetupPage() {
   const { registerPasskey, skipPasskeySetup, loginMethods } = useAuthStore(
     useShallow(s => ({

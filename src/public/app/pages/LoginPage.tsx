@@ -10,6 +10,7 @@ import { browserSupportsWebAuthn } from "@simplewebauthn/browser";
 
 const webAuthnSupported = browserSupportsWebAuthn();
 
+/** Login screen supporting password form and/or passkey sign-in based on server-configured methods. */
 export function LoginPage({ onSuccess }: { onSuccess: (username: string) => Promise<void> }) {
   const { loginWithPasskey, loginMethods } = useAuthStore(
     useShallow(s => ({ loginWithPasskey: s.loginWithPasskey, loginMethods: s.loginMethods })),

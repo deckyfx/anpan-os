@@ -32,6 +32,7 @@ interface AuthState {
   loginWithPasskey: () => Promise<string>;
 }
 
+/** Returns true if the current user has at least one registered passkey credential. */
 async function checkPasskeys(): Promise<boolean> {
   try {
     const { data } = await api.api.auth.passkey.credentials.get();
@@ -41,6 +42,7 @@ async function checkPasskeys(): Promise<boolean> {
   }
 }
 
+/** Fetches the server's active login method flags. Falls back to both enabled on error. */
 async function fetchLoginMethods(): Promise<LoginMethods> {
   try {
     const { data } = await api.api.auth.methods.get();
@@ -53,6 +55,7 @@ async function fetchLoginMethods(): Promise<LoginMethods> {
   return { form: true, passkey: true };
 }
 
+/** Global auth store — manages view routing, login state, passkey presence, and login method flags. */
 export const useAuthStore = create<AuthState>((set, get) => ({
   view:         "loading",
   username:     "",

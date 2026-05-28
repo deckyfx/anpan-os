@@ -62,6 +62,7 @@ const cookieSchema = t.Cookie({ anpan_session: t.Optional(t.String()) });
 
 const MAX_AGE = 7 * 24 * 60 * 60;
 
+/** Writes the JWT session cookie with the project's standard security attributes. */
 function setSession(c: { value: string | undefined; httpOnly: boolean; sameSite: string; secure: boolean; maxAge: number; path: string }, token: string) {
   c.value    = token;
   c.httpOnly = true;

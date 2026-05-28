@@ -85,6 +85,7 @@ class Config {
     this.configPath = join(envConfig.RUNTIME_CONFIG_DIR, CONFIG_FILE);
   }
 
+  /** Returns the singleton Config instance, creating it on first call. */
   static getInstance(): Config {
     if (!Config.instance) {
       Config.instance = new Config();
@@ -128,6 +129,7 @@ class Config {
     }
   }
 
+  /** Raw auth config section from config.toml. */
   get auth(): Readonly<AuthConfig> {
     return this.data.auth;
   }
@@ -233,6 +235,7 @@ class Config {
     return join(envConfig.RUNTIME_CONFIG_DIR, "storage.db");
   }
 
+  /** Writes a blank config.toml template to disk, creating the config directory if needed. */
   private async createBlank(): Promise<void> {
     mkdirSync(envConfig.RUNTIME_CONFIG_DIR, { recursive: true });
     await Bun.write(this.configPath, BLANK_CONFIG);

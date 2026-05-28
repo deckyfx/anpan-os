@@ -15,6 +15,10 @@ import {
 const MAX_AGE = 7 * 24 * 60 * 60; // 7 days in seconds
 const DOCKER_TIMEOUT_MS = 30_000;
 
+/**
+ * Races a spawned process against a timeout.
+ * Kills the process and rejects if `ms` elapses before it exits.
+ */
 async function runWithTimeout(proc: ReturnType<typeof Bun.spawn>, ms: number): Promise<number> {
   let timer: ReturnType<typeof setTimeout>;
   const timeout = new Promise<never>((_, reject) => {
@@ -72,6 +76,7 @@ const cookieSchema = t.Cookie({
   anpan_session: t.Optional(t.String()),
 });
 
+/** Writes the JWT session cookie with the project's standard security attributes. */
 function setSession(c: Cookie<string | undefined>, token: string) {
   c.value = token;
   c.httpOnly = true;
