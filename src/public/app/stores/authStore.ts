@@ -44,7 +44,7 @@ async function checkPasskeys(): Promise<boolean> {
 async function fetchLoginMethods(): Promise<LoginMethods> {
   try {
     const { data } = await api.api.auth.methods.get();
-    if (data && typeof (data as LoginMethods).form === "boolean") {
+    if (data && typeof (data as LoginMethods).form === "boolean" && typeof (data as LoginMethods).passkey === "boolean") {
       return data as LoginMethods;
     }
   } catch {

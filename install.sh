@@ -79,7 +79,7 @@ bind = "public"   # "local" = 127.0.0.1 only | "public" = 0.0.0.0 (all interface
 [auth]
 passkey_allowed_origins = []
 # session_same_site = "strict"   # "lax" for multi-hostname LAN access (default: strict)
-# disable_login_method = []      # "form" disables password login/setup; "passkey" disables passkey auth/registration
+# disable_login_method = ["form"]   # e.g. ["form"], ["passkey"], or ["form","passkey"]; "form" disables password login/setup, "passkey" disables passkey auth/registration
 
 [compose]
 
