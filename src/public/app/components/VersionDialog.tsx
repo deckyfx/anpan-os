@@ -35,8 +35,13 @@ export function VersionDialog({ open, onClose, version }: {
     setUpdating(false);
     setChecking(true);
     void api.api.system["update-check"].get()
-      .then(({ data }) => {
-        if (data) setResult(data as UpdateCheckResult);
+      .then(({ data, error }) => {
+        if (error) {
+          const msg = (error as { value?: { error?: string } }).value?.error ?? "Request failed";
+          setResult({ updateAvailable: false, currentVersion: version, error: msg });
+        } else if (data) {
+          setResult(data as UpdateCheckResult);
+        }
       })
       .catch((e: unknown) => {
         setResult({ updateAvailable: false, currentVersion: version, error: String(e) });
@@ -48,13 +53,30 @@ export function VersionDialog({ open, onClose, version }: {
     setUpdateError("");
     setUpdating(true);
     try {
-      await api.api.system.update.post();
+      const { error } = await api.api.system.update.post();
+      if (error) {
+        const msg = (error as { value?: { error?: string } }).value?.error ?? "Update failed";
+        setUpdateError(msg);
+        setUpdating(false);
+        return;
+      }
       setRestarting(true);
-      // Poll until the server responds (service has restarted), then reload
+      // Poll until the server responds after restart, then reload.
+      // Give up after ~90 s (3 s initial delay + 30 retries × 3 s).
+      const MAX_RETRIES = 30;
+      let attempts = 0;
       const poll = () => {
         void api.api.system.info.get()
           .then(() => { window.location.reload(); })
-          .catch(() => { setTimeout(poll, 2000); });
+          .catch(() => {
+            attempts++;
+            if (attempts >= MAX_RETRIES) {
+              setRestarting(false);
+              setUpdateError("Service did not respond after restart — please reload manually.");
+              return;
+            }
+            setTimeout(poll, 3000);
+          });
       };
       setTimeout(poll, 3000);
     } catch (e: unknown) {

@@ -145,7 +145,10 @@ class Config {
    * "none"             — requires Secure (HTTPS); cross-site usage.
    */
   get sessionSameSite(): "strict" | "lax" | "none" {
-    return this.data.auth.session_same_site ?? "strict";
+    const raw = this.data.auth.session_same_site;
+    if (raw === "lax") return "lax";
+    if (raw === "none") return this._tlsEnabled ? "none" : "lax";
+    return "strict";
   }
 
   /** Compose stacks folder — defaults to RUNTIME_CONFIG_DIR/composes. */

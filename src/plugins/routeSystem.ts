@@ -3,6 +3,15 @@ import { authGuard } from "./authGuard";
 import { bins, commands } from "../lib/commands";
 import { envConfig } from "../env-config";
 
+function semverGt(a: string, b: string): boolean {
+  const parse = (v: string) => v.replace(/^v/, "").split(".").map(n => parseInt(n, 10) || 0);
+  const [aMaj = 0, aMin = 0, aPatch = 0] = parse(a);
+  const [bMaj = 0, bMin = 0, bPatch = 0] = parse(b);
+  if (aMaj !== bMaj) return aMaj > bMaj;
+  if (aMin !== bMin) return aMin > bMin;
+  return aPatch > bPatch;
+}
+
 // Injected at build time via define; falls back to reading package.json from CWD in dev.
 const APP_VERSION: string =
   (process.env.APP_VERSION as string | undefined) ??
@@ -72,7 +81,7 @@ export function systemPlugin(jwtSecret: string) {
         };
 
         const latestVersion = (data.tag_name ?? "").replace(/^v/, "");
-        const updateAvailable = latestVersion !== APP_VERSION && latestVersion !== "";
+        const updateAvailable = latestVersion !== "" && semverGt(latestVersion, APP_VERSION);
 
         const arch        = process.arch === "arm64" ? "arm64" : "x64";
         const binaryName  = `anpan-os-linux-${arch}`;

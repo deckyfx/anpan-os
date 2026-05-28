@@ -39,8 +39,9 @@ jobs:
       - name: Upload binaries to release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ github.event.release.tag_name }}
         run: |
-          gh release upload "${{ github.event.release.tag_name }}" \
+          gh release upload "$TAG_NAME" \
             ./binaries/anpan-os-linux-x64 \
             ./binaries/anpan-os-linux-arm64 \
             ./binaries/anpan-os-linux-x64.sha256 \

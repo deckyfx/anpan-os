@@ -115,6 +115,16 @@ function ScreenshotGallery({ screenshots }: { screenshots: string[] }) {
   );
 }
 
+function isSafeUrl(v: unknown): boolean {
+  if (typeof v !== "string" || !v) return false;
+  try {
+    const { protocol } = new URL(v);
+    return protocol === "http:" || protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function formatDate(v: unknown): string {
@@ -240,9 +250,9 @@ function AppDetailBody({ app }: { app: StoreApp }) {
           )}
 
           {/* Links */}
-          {LINKS.some(l => app[l.key]) && (
+          {LINKS.some(l => isSafeUrl(app[l.key])) && (
             <div className="flex flex-wrap gap-2">
-              {LINKS.filter(l => app[l.key]).map(l => (
+              {LINKS.filter(l => isSafeUrl(app[l.key])).map(l => (
                 <a
                   key={l.key}
                   href={app[l.key]}
