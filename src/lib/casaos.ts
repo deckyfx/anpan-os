@@ -39,6 +39,12 @@ function str(v: unknown): string {
   return typeof v === "string" ? v : "";
 }
 
+function strDate(v: unknown): string {
+  if (typeof v === "string") return v;
+  if (v instanceof Date) return v.toISOString().slice(0, 10);
+  return "";
+}
+
 function localised(v: unknown): string {
   if (typeof v === "string") return v;
   if (!v || typeof v !== "object" || Array.isArray(v)) return "";
@@ -135,6 +141,20 @@ export interface RemoteCasaOSApp {
   architectures:   string[];
   /** raw.githubusercontent.com URL for the compose file */
   composeUrl:      string;
+  /** App version string from x-casaos.version */
+  version:         string;
+  /** ISO date string from x-casaos.updateAt */
+  updatedAt:       string;
+  /** Localised release notes from x-casaos.releaseNotes */
+  releaseNotes:    string;
+  /** App home page URL from x-casaos.website */
+  website:         string;
+  /** Source code URL from x-casaos.repo */
+  repo:            string;
+  /** Support / issue tracker URL from x-casaos.support */
+  support:         string;
+  /** Documentation URL from x-casaos.docs */
+  docs:            string;
 }
 
 /** Parse a github.com repo URL into owner and repo name. */
@@ -243,6 +263,13 @@ async function fetchAndParseApp(
       mainService:     mainSvc,
       architectures:   archs,
       composeUrl:      usedComposeUrl,
+      version:         str(meta["version"]),
+      updatedAt:       strDate(meta["updateAt"]),
+      releaseNotes:    localised(meta["releaseNotes"]),
+      website:         str(meta["website"]),
+      repo:            str(meta["repo"]),
+      support:         str(meta["support"]),
+      docs:            str(meta["docs"]),
     };
   } catch {
     return null;

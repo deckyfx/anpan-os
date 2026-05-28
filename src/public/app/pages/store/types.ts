@@ -24,4 +24,11 @@ export interface StoreApp {
   mainService:      string;
   architectures:    string[];
   composeUrl:       string;
+  version:          string;
+  updatedAt:        string;
+  releaseNotes:     string;
+  website:          string;
+  repo:             string;
+  support:          string;
+  docs:             string;
 }
