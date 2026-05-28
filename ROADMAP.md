@@ -1,5 +1,17 @@
 # Roadmap
 
+## v0.5.1 — 2026-05-28
+
+### New features
+- **`disable_login_method` config** — add `disable_login_method = ["form"]` (or `["passkey"]`, or both) to `[auth]` in `config.toml` to selectively block login methods at the API level; blocked endpoints return 403 regardless of input
+- **`GET /api/auth/methods`** — new public endpoint returns `{ form: boolean, passkey: boolean }` so the UI knows which login methods are active
+- **Login UI adapts to config** — login form hidden when `form` is disabled; passkey button hidden when `passkey` is disabled; "Add passkey" menu item in TopBar hidden when passkey is disabled; PasskeySetupPage auto-skips when passkey is disabled
+
+### Security
+- Admins can harden a production instance to passkey-only login (`disable_login_method = ["form"]`) after completing initial setup, eliminating the credential-guessing attack surface on the password endpoint
+
+---
+
 ## v0.5.0 — 2026-05-28
 
 ### New features

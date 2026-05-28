@@ -15,6 +15,10 @@ import {
 const MAX_AGE = 7 * 24 * 60 * 60; // 7 days in seconds
 const DOCKER_TIMEOUT_MS = 30_000;
 
+/**
+ * Races a spawned process against a timeout.
+ * Kills the process and rejects if `ms` elapses before it exits.
+ */
 async function runWithTimeout(proc: ReturnType<typeof Bun.spawn>, ms: number): Promise<number> {
   let timer: ReturnType<typeof setTimeout>;
   const timeout = new Promise<never>((_, reject) => {
@@ -72,6 +76,7 @@ const cookieSchema = t.Cookie({
   anpan_session: t.Optional(t.String()),
 });
 
+/** Writes the JWT session cookie with the project's standard security attributes. */
 function setSession(c: Cookie<string | undefined>, token: string) {
   c.value = token;
   c.httpOnly = true;
@@ -112,6 +117,14 @@ export function authPlugin(jwtSecret: string) {
     .use(jwt({ name: "jwt", secret: jwtSecret, exp: "7d" }))
     .guard({ cookie: cookieSchema })
 
+    .get("/methods", () => {
+      const disabled = config.disabledLoginMethods;
+      return {
+        form:    !disabled.has("form"),
+        passkey: !disabled.has("passkey"),
+      };
+    })
+
     .get("/status", async ({ jwt: jwtCtx, cookie: { anpan_session } }) => {
       const initialized = (await UserStore.count()) > 0;
       const token = anpan_session.value;
@@ -122,6 +135,11 @@ export function authPlugin(jwtSecret: string) {
     .post(
       "/setup",
       async ({ body, jwt: jwtCtx, cookie: { anpan_session }, set }) => {
+        if (config.disabledLoginMethods.has("form")) {
+          set.status = 403;
+          return { error: "Form login is disabled" };
+        }
+
         const invalid = checkCredentials(body.username, body.password, true);
         if (invalid) return invalid;
 
@@ -150,6 +168,11 @@ export function authPlugin(jwtSecret: string) {
     .post(
       "/login",
       async ({ body, jwt: jwtCtx, cookie: { anpan_session }, set }) => {
+        if (config.disabledLoginMethods.has("form")) {
+          set.status = 403;
+          return { error: "Form login is disabled" };
+        }
+
         // Validate before hitting the DB — usernameField/passwordField use minLength:1
         // so TypeBox already rejects missing fields; this catches empty-string values
         // and returns a message that names the specific field.

@@ -62,6 +62,7 @@ const cookieSchema = t.Cookie({ anpan_session: t.Optional(t.String()) });
 
 const MAX_AGE = 7 * 24 * 60 * 60;
 
+/** Writes the JWT session cookie with the project's standard security attributes. */
 function setSession(c: { value: string | undefined; httpOnly: boolean; sameSite: string; secure: boolean; maxAge: number; path: string }, token: string) {
   c.value    = token;
   c.httpOnly = true;
@@ -92,6 +93,11 @@ export function passkeyPlugin(jwtSecret: string) {
 
     // ── Login options (public) ────────────────────────────────────────────────
     .post("/login-options", async ({ request, set }) => {
+      if (config.disabledLoginMethods.has("passkey")) {
+        set.status = 403;
+        return { error: "Passkey auth is disabled" };
+      }
+
       const origin = request.headers.get("origin") ?? "";
       if (!originAllowed(origin)) {
         set.status = 403;
@@ -121,6 +127,11 @@ export function passkeyPlugin(jwtSecret: string) {
     .post(
       "/login-verify",
       async ({ body, jwt: jwtCtx, cookie: { anpan_session }, request, set }) => {
+        if (config.disabledLoginMethods.has("passkey")) {
+          set.status = 403;
+          return { error: "Passkey auth is disabled" };
+        }
+
         const origin = request.headers.get("origin") ?? "";
         if (!originAllowed(origin)) {
           set.status = 403;
@@ -186,6 +197,11 @@ export function passkeyPlugin(jwtSecret: string) {
 
     // ── Register options ─────────────────────────────────────────────────────
     .post("/register-options", async ({ user, request, set }) => {
+      if (config.disabledLoginMethods.has("passkey")) {
+        set.status = 403;
+        return { error: "Passkey auth is disabled" };
+      }
+
       const origin = request.headers.get("origin") ?? "";
       if (!originAllowed(origin)) {
         set.status = 403;
@@ -226,6 +242,11 @@ export function passkeyPlugin(jwtSecret: string) {
     .post(
       "/register-verify",
       async ({ body, request, set }) => {
+        if (config.disabledLoginMethods.has("passkey")) {
+          set.status = 403;
+          return { error: "Passkey auth is disabled" };
+        }
+
         const origin = request.headers.get("origin") ?? "";
         if (!originAllowed(origin)) {
           set.status = 403;

@@ -9,6 +9,7 @@ import { DockerHubDialog } from "./DockerHubDialog";
 import { browserSupportsWebAuthn } from "@simplewebauthn/browser";
 import { useSystemStore } from "../../stores/systemStore";
 import { useToastStore } from "../../stores/toastStore";
+import { useAuthStore } from "../../stores/authStore";
 
 interface NavItem {
   icon: React.ReactNode;
@@ -52,6 +53,7 @@ export function TopBar({ username, version, hasPasskey, onLogout, onNavigate, on
 }) {
   const { isRoot, hasBin } = useSystemStore();
   const canPowerCtl = isRoot && hasBin("systemctl");
+  const passkeyEnabled = useAuthStore(s => s.loginMethods.passkey);
 
   const [open, setOpen]                     = useState(false);
   const [pos,  setPos]                      = useState({ left: 0, top: 0 });
@@ -250,7 +252,7 @@ export function TopBar({ username, version, hasPasskey, onLogout, onNavigate, on
               <Lock size={14} className="text-gray-500" />
               Change password
             </button>
-            {hasPasskey === false && browserSupportsWebAuthn() && (
+            {hasPasskey === false && browserSupportsWebAuthn() && passkeyEnabled && (
               <button
                 onClick={async () => {
                   setPkLoading(true);
