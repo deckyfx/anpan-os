@@ -6,10 +6,16 @@ import {
 import { api } from "../lib/api";
 import type { View, AuthStatus } from "../types";
 
+interface LoginMethods {
+  form:    boolean;
+  passkey: boolean;
+}
+
 interface AuthState {
-  view:       View;
-  username:   string;
-  hasPasskey: boolean | null;   // null = unknown
+  view:         View;
+  username:     string;
+  hasPasskey:   boolean | null;   // null = unknown
+  loginMethods: LoginMethods;
 
   checkAuth:        () => Promise<void>;
   /** Called after password login — checks for passkeys, offers setup if none. */
@@ -35,20 +41,40 @@ async function checkPasskeys(): Promise<boolean> {
   }
 }
 
-export const useAuthStore = create<AuthState>((set) => ({
-  view:       "loading",
-  username:   "",
-  hasPasskey: null,
+async function fetchLoginMethods(): Promise<LoginMethods> {
+  try {
+    const { data } = await api.api.auth.methods.get();
+    if (data && typeof (data as LoginMethods).form === "boolean") {
+      return data as LoginMethods;
+    }
+  } catch {
+    // ignore — fall through to default
+  }
+  return { form: true, passkey: true };
+}
+
+export const useAuthStore = create<AuthState>((set, get) => ({
+  view:         "loading",
+  username:     "",
+  hasPasskey:   null,
+  loginMethods: { form: true, passkey: true },
 
   checkAuth: async () => {
     try {
-      const { data } = await api.api.auth.status.get();
-      const { initialized, authenticated } = data as AuthStatus;
+      const [statusRes, methods] = await Promise.all([
+        api.api.auth.status.get(),
+        fetchLoginMethods(),
+      ]);
+      const { initialized, authenticated } = statusRes.data as AuthStatus;
+      set({ loginMethods: methods });
       if (authenticated) {
         const has = await checkPasskeys();
         set({ view: "app", hasPasskey: has });
-      } else if (initialized) set({ view: "login" });
-      else set({ view: "setup" });
+      } else if (initialized) {
+        set({ view: "login" });
+      } else {
+        set({ view: "setup" });
+      }
     } catch {
       set({ view: "login" });
     }
@@ -56,6 +82,12 @@ export const useAuthStore = create<AuthState>((set) => ({
 
   login: async (username) => {
     set({ username });
+    const { loginMethods } = get();
+    if (!loginMethods.passkey) {
+      // Passkey disabled — skip passkey setup entirely
+      set({ hasPasskey: true, view: "app" });
+      return;
+    }
     const has = await checkPasskeys();
     set({ hasPasskey: has, view: has ? "app" : "passkeySetup" });
   },

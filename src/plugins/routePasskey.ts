@@ -92,6 +92,11 @@ export function passkeyPlugin(jwtSecret: string) {
 
     // ── Login options (public) ────────────────────────────────────────────────
     .post("/login-options", async ({ request, set }) => {
+      if (config.disabledLoginMethods.has("passkey")) {
+        set.status = 403;
+        return { error: "Passkey auth is disabled" };
+      }
+
       const origin = request.headers.get("origin") ?? "";
       if (!originAllowed(origin)) {
         set.status = 403;
@@ -121,6 +126,11 @@ export function passkeyPlugin(jwtSecret: string) {
     .post(
       "/login-verify",
       async ({ body, jwt: jwtCtx, cookie: { anpan_session }, request, set }) => {
+        if (config.disabledLoginMethods.has("passkey")) {
+          set.status = 403;
+          return { error: "Passkey auth is disabled" };
+        }
+
         const origin = request.headers.get("origin") ?? "";
         if (!originAllowed(origin)) {
           set.status = 403;
@@ -186,6 +196,11 @@ export function passkeyPlugin(jwtSecret: string) {
 
     // ── Register options ─────────────────────────────────────────────────────
     .post("/register-options", async ({ user, request, set }) => {
+      if (config.disabledLoginMethods.has("passkey")) {
+        set.status = 403;
+        return { error: "Passkey auth is disabled" };
+      }
+
       const origin = request.headers.get("origin") ?? "";
       if (!originAllowed(origin)) {
         set.status = 403;
@@ -226,6 +241,11 @@ export function passkeyPlugin(jwtSecret: string) {
     .post(
       "/register-verify",
       async ({ body, request, set }) => {
+        if (config.disabledLoginMethods.has("passkey")) {
+          set.status = 403;
+          return { error: "Passkey auth is disabled" };
+        }
+
         const origin = request.headers.get("origin") ?? "";
         if (!originAllowed(origin)) {
           set.status = 403;

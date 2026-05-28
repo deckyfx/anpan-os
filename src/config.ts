@@ -23,6 +23,7 @@ bind = "local"   # "local" = 127.0.0.1 only | "public" = 0.0.0.0 (all interfaces
 # Leave empty to accept any origin (suitable for local / private networks).
 passkey_allowed_origins = []
 # session_same_site = "strict"   # "lax" allows multi-hostname LAN access (default: strict)
+# disable_login_method = []      # "form" disables password login/setup; "passkey" disables passkey auth/registration
 
 [compose]
 # folder = "/var/lib/anpan-os/composes"   # defaults to $HOME/.anpanos/composes
@@ -48,6 +49,8 @@ interface AuthConfig {
   passkey_allowed_origins?: string[];
   /** SameSite policy for the session cookie. Default "strict". Use "lax" for LAN / multi-hostname access. */
   session_same_site?: "strict" | "lax" | "none";
+  /** Login methods that are turned off. "form" disables password login/setup; "passkey" disables passkey auth/registration. */
+  disable_login_method?: ("passkey" | "form")[];
 }
 
 interface ComposeConfig {
@@ -136,6 +139,16 @@ class Config {
    */
   get passkeyAllowedOrigins(): string[] {
     return this.data.auth.passkey_allowed_origins ?? [];
+  }
+
+  /**
+   * Login methods that are disabled. Returns an empty Set when nothing is disabled.
+   * Valid values: "form" (disables password login/setup), "passkey" (disables passkey auth/registration).
+   */
+  get disabledLoginMethods(): Set<"passkey" | "form"> {
+    const raw = this.data.auth.disable_login_method ?? [];
+    const valid = new Set<"passkey" | "form">(["passkey", "form"]);
+    return new Set(raw.filter((m): m is "passkey" | "form" => valid.has(m as "passkey" | "form")));
   }
 
   /**

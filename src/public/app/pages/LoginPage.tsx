@@ -5,12 +5,15 @@ import { SubmitButton } from "../components/SubmitButton";
 import { ErrorMsg }    from "../components/ErrorMsg";
 import { api }         from "../lib/api";
 import { useAuthStore } from "../stores/authStore";
+import { useShallow } from "zustand/react/shallow";
 import { browserSupportsWebAuthn } from "@simplewebauthn/browser";
 
 const webAuthnSupported = browserSupportsWebAuthn();
 
 export function LoginPage({ onSuccess }: { onSuccess: (username: string) => Promise<void> }) {
-  const { loginWithPasskey } = useAuthStore();
+  const { loginWithPasskey, loginMethods } = useAuthStore(
+    useShallow(s => ({ loginWithPasskey: s.loginWithPasskey, loginMethods: s.loginMethods })),
+  );
 
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -46,22 +49,39 @@ export function LoginPage({ onSuccess }: { onSuccess: (username: string) => Prom
     }
   }
 
+  const showForm    = loginMethods.form;
+  const showPasskey = loginMethods.passkey && webAuthnSupported;
+
+  if (!showForm && !showPasskey) {
+    return (
+      <AuthCard title="Sign in">
+        <p className="text-sm text-gray-400 text-center py-4">
+          Login is currently disabled by the administrator.
+        </p>
+      </AuthCard>
+    );
+  }
+
   return (
     <AuthCard title="Sign in">
-      <form onSubmit={handleSubmit}>
-        <Field label="Username" value={username} onChange={setUsername} />
-        <Field label="Password" type="password" value={password} onChange={setPassword} />
-        <SubmitButton label="Sign in" loading={loading} />
-        {error && <ErrorMsg message={error} />}
-      </form>
+      {showForm && (
+        <form onSubmit={handleSubmit}>
+          <Field label="Username" value={username} onChange={setUsername} />
+          <Field label="Password" type="password" value={password} onChange={setPassword} />
+          <SubmitButton label="Sign in" loading={loading} />
+          {error && <ErrorMsg message={error} />}
+        </form>
+      )}
 
-      {webAuthnSupported && (
+      {showPasskey && (
         <>
-          <div className="flex items-center gap-3 my-5">
-            <div className="flex-1 h-px bg-gray-800" />
-            <span className="text-xs text-gray-500">or</span>
-            <div className="flex-1 h-px bg-gray-800" />
-          </div>
+          {showForm && (
+            <div className="flex items-center gap-3 my-5">
+              <div className="flex-1 h-px bg-gray-800" />
+              <span className="text-xs text-gray-500">or</span>
+              <div className="flex-1 h-px bg-gray-800" />
+            </div>
+          )}
 
           <button
             type="button"
@@ -76,6 +96,8 @@ export function LoginPage({ onSuccess }: { onSuccess: (username: string) => Prom
             )}
             {pkLoading ? "Waiting for authenticator…" : "Sign in with passkey"}
           </button>
+
+          {!showForm && error && <ErrorMsg message={error} />}
         </>
       )}
     </AuthCard>

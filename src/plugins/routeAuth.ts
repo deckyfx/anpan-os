@@ -112,6 +112,14 @@ export function authPlugin(jwtSecret: string) {
     .use(jwt({ name: "jwt", secret: jwtSecret, exp: "7d" }))
     .guard({ cookie: cookieSchema })
 
+    .get("/methods", () => {
+      const disabled = config.disabledLoginMethods;
+      return {
+        form:    !disabled.has("form"),
+        passkey: !disabled.has("passkey"),
+      };
+    })
+
     .get("/status", async ({ jwt: jwtCtx, cookie: { anpan_session } }) => {
       const initialized = (await UserStore.count()) > 0;
       const token = anpan_session.value;
@@ -122,6 +130,11 @@ export function authPlugin(jwtSecret: string) {
     .post(
       "/setup",
       async ({ body, jwt: jwtCtx, cookie: { anpan_session }, set }) => {
+        if (config.disabledLoginMethods.has("form")) {
+          set.status = 403;
+          return { error: "Form login is disabled" };
+        }
+
         const invalid = checkCredentials(body.username, body.password, true);
         if (invalid) return invalid;
 
@@ -150,6 +163,11 @@ export function authPlugin(jwtSecret: string) {
     .post(
       "/login",
       async ({ body, jwt: jwtCtx, cookie: { anpan_session }, set }) => {
+        if (config.disabledLoginMethods.has("form")) {
+          set.status = 403;
+          return { error: "Form login is disabled" };
+        }
+
         // Validate before hitting the DB — usernameField/passwordField use minLength:1
         // so TypeBox already rejects missing fields; this catches empty-string values
         // and returns a message that names the specific field.

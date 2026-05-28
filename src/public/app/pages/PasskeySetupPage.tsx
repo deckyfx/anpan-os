@@ -1,22 +1,29 @@
 import React, { useState, useEffect } from "react";
 import { AuthCard } from "../components/AuthCard";
 import { useAuthStore } from "../stores/authStore";
+import { useShallow } from "zustand/react/shallow";
 import { browserSupportsWebAuthn } from "@simplewebauthn/browser";
 
 export function PasskeySetupPage() {
-  const { registerPasskey, skipPasskeySetup } = useAuthStore();
+  const { registerPasskey, skipPasskeySetup, loginMethods } = useAuthStore(
+    useShallow(s => ({
+      registerPasskey:  s.registerPasskey,
+      skipPasskeySetup: s.skipPasskeySetup,
+      loginMethods:     s.loginMethods,
+    })),
+  );
   const [loading, setLoading] = useState(false);
   const [error, setError]     = useState("");
   const [done, setDone]       = useState(false);
 
-  // Skip silently if browser/context doesn't support WebAuthn.
+  // Skip silently if browser/context doesn't support WebAuthn, or passkey is disabled.
   useEffect(() => {
-    if (!browserSupportsWebAuthn()) {
+    if (!browserSupportsWebAuthn() || !loginMethods.passkey) {
       skipPasskeySetup();
     }
-  }, [skipPasskeySetup]);
+  }, [skipPasskeySetup, loginMethods.passkey]);
 
-  if (!browserSupportsWebAuthn()) {
+  if (!browserSupportsWebAuthn() || !loginMethods.passkey) {
     return null;
   }
 
