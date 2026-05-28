@@ -1,4 +1,4 @@
-import { Elysia, t } from "elysia";
+import { Elysia, t, sse } from "elysia";
 import { authGuard } from "./authGuard";
 import { AppRepoStore } from "../stores/app-repo-store";
 import {
@@ -150,29 +150,42 @@ export function appStorePlugin(jwtSecret: string) {
       { params: t.Object({ id: t.String() }) },
     )
 
-    // ── Apps (merged from all enabled repos) ─────────────────────────────────
+    // ── Apps (streamed from all enabled repos as each resolves) ─────────────
 
-    .get("/apps", async () => {
+    .get("/apps", async function*() {
       const repos = await AppRepoStore.findAll();
       const enabled = repos.filter(r => r.enabled);
 
-      const results = await Promise.allSettled(
-        enabled.map(r => getAppsForRepo(r.id, r.url)),
-      );
-
-      const apps: RemoteCasaOSApp[] = [];
-      const errors: string[] = [];
-
-      for (let i = 0; i < results.length; i++) {
-        const r = results[i]!;
-        if (r.status === "fulfilled") {
-          apps.push(...r.value);
-        } else {
-          errors.push(`${enabled[i]!.name}: ${r.reason instanceof Error ? r.reason.message : String(r.reason)}`);
-        }
+      if (enabled.length === 0) {
+        yield sse({ data: { apps: [] as RemoteCasaOSApp[], errors: [] as string[], done: true } });
+        return;
       }
 
-      return { apps, errors };
+      type RepoResult =
+        | { ok: true; apps: RemoteCasaOSApp[] }
+        | { ok: false; error: string };
+
+      // Kick off all repo fetches concurrently
+      let remaining: Promise<RepoResult>[] = enabled.map(r =>
+        getAppsForRepo(r.id, r.url)
+          .then(apps => ({ ok: true as const, apps }))
+          .catch(e => ({ ok: false as const, error: `${r.name}: ${e instanceof Error ? e.message : String(e)}` })),
+      );
+
+      // Stream each repo's result as it completes (completion order, not original order)
+      while (remaining.length > 0) {
+        const tagged = remaining.map((p, i) => p.then(v => ({ v, i })));
+        const { v, i } = await Promise.race(tagged);
+        remaining.splice(i, 1);
+
+        yield sse({
+          data: {
+            apps:   v.ok ? v.apps : ([] as RemoteCasaOSApp[]),
+            errors: v.ok ? [] : [v.error],
+            done:   remaining.length === 0,
+          },
+        });
+      }
     })
 
     // ── Compose file for a specific app ──────────────────────────────────────

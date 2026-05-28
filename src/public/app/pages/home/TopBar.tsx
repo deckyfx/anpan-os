@@ -1,8 +1,9 @@
 import { useState, useRef, useEffect } from "react";
 import { Menu, X, LayoutGrid, FolderOpen, Activity, Network, LogOut, KeyRound, RotateCcw, PowerOff, Lock, Container, ShoppingBag } from "lucide-react";
 import { api } from "../../lib/api";
-import { DoctorDialog } from "../../components/DoctorDialog";
-import { PortsDialog }  from "./PortsDialog";
+import { DoctorDialog }   from "../../components/DoctorDialog";
+import { VersionDialog }  from "../../components/VersionDialog";
+import { PortsDialog }    from "./PortsDialog";
 import { ChangePasswordDialog } from "./ChangePasswordDialog";
 import { DockerHubDialog } from "./DockerHubDialog";
 import { browserSupportsWebAuthn } from "@simplewebauthn/browser";
@@ -52,12 +53,13 @@ export function TopBar({ username, version, hasPasskey, onLogout, onNavigate, on
   const { isRoot, hasBin } = useSystemStore();
   const canPowerCtl = isRoot && hasBin("systemctl");
 
-  const [open, setOpen]                   = useState(false);
-  const [pos,  setPos]                    = useState({ left: 0, top: 0 });
-  const [doctorOpen, setDoctorOpen]       = useState(false);
-  const [portsOpen,  setPortsOpen]        = useState(false);
-  const [changePwOpen, setChangePwOpen]   = useState(false);
-  const [dockerHubOpen, setDockerHubOpen] = useState(false);
+  const [open, setOpen]                     = useState(false);
+  const [pos,  setPos]                      = useState({ left: 0, top: 0 });
+  const [doctorOpen, setDoctorOpen]         = useState(false);
+  const [portsOpen,  setPortsOpen]          = useState(false);
+  const [changePwOpen, setChangePwOpen]     = useState(false);
+  const [dockerHubOpen, setDockerHubOpen]   = useState(false);
+  const [versionOpen, setVersionOpen]       = useState(false);
   const [pkLoading, setPkLoading]   = useState(false);
   const [confirm, setConfirm]       = useState<"restart" | "shutdown" | null>(null);
   const btnRef  = useRef<HTMLButtonElement>(null);
@@ -147,7 +149,6 @@ export function TopBar({ username, version, hasPasskey, onLogout, onNavigate, on
       >
         <span className="text-lg">🍞</span>
         <span className="font-bold text-amber-400 tracking-wide">anpan-os</span>
-        <span className="text-xs text-gray-600 font-mono">v{version}</span>
       </button>
 
       {/* Separator */}
@@ -168,6 +169,15 @@ export function TopBar({ username, version, hasPasskey, onLogout, onNavigate, on
       >
         {open ? <X size={14} /> : <Menu size={14} />}
         Menu
+      </button>
+
+      {/* Version badge — far right */}
+      <button
+        onClick={() => setVersionOpen(true)}
+        className="ml-auto text-xs text-gray-500 font-mono hover:text-gray-300 px-2 py-1 rounded-lg hover:bg-gray-800 transition-colors shrink-0"
+        aria-label="Show version and update info"
+      >
+        v{version}
       </button>
 
       {/* Dropdown — fixed, anchored via JS measurement */}
@@ -276,10 +286,11 @@ export function TopBar({ username, version, hasPasskey, onLogout, onNavigate, on
 
     </header>
 
-    <DoctorDialog open={doctorOpen} onClose={() => setDoctorOpen(false)} />
-    <PortsDialog  open={portsOpen}  onClose={() => setPortsOpen(false)}  />
-    <ChangePasswordDialog open={changePwOpen} onClose={() => setChangePwOpen(false)} />
-    <DockerHubDialog open={dockerHubOpen} onClose={() => setDockerHubOpen(false)} />
+    <DoctorDialog    open={doctorOpen}    onClose={() => setDoctorOpen(false)}    />
+    <PortsDialog     open={portsOpen}     onClose={() => setPortsOpen(false)}     />
+    <ChangePasswordDialog open={changePwOpen}   onClose={() => setChangePwOpen(false)}   />
+    <DockerHubDialog     open={dockerHubOpen}   onClose={() => setDockerHubOpen(false)}  />
+    <VersionDialog   open={versionOpen}   onClose={() => setVersionOpen(false)}   version={version} />
     </>
   );
 }

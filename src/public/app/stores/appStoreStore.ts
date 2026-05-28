@@ -86,12 +86,29 @@ export const useAppStoreStore = create<AppStoreState>((set, get) => ({
   },
 
   async loadApps() {
-    set({ loadingApps: true, fetchErrors: [] });
+    set({ loadingApps: true, apps: [], fetchErrors: [] });
+
+    type SSEEvent = { data: { apps: StoreApp[]; errors: string[]; done: boolean } };
+
     try {
-      const { data } = await api.api["app-store"].apps.get();
-      if (data && typeof data === "object" && "apps" in data) {
-        const d = data as { apps: StoreApp[]; errors: string[] };
-        set({ apps: d.apps, fetchErrors: d.errors });
+      const { data, error } = await (api.api["app-store"].apps as unknown as {
+        get: () => Promise<{ data: AsyncIterable<SSEEvent> | null; error: unknown }>;
+      }).get();
+
+      if (error) {
+        const msg = (error as { value?: { error?: string } }).value?.error ?? "Request failed";
+        set({ fetchErrors: [msg] });
+        return;
+      }
+      if (data) {
+        for await (const event of data) {
+          const m = event.data;
+          if (!m) continue;
+          set(s => ({
+            apps: m.apps.length > 0 ? [...s.apps, ...m.apps] : s.apps,
+            fetchErrors: m.errors.length > 0 ? [...s.fetchErrors, ...m.errors] : s.fetchErrors,
+          }));
+        }
       }
     } catch (e) {
       set({ fetchErrors: [e instanceof Error ? e.message : String(e)] });

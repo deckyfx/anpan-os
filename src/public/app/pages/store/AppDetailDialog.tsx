@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
+import Viewer from "viewerjs";
 import { useShallow } from "zustand/react/shallow";
 import { Dialog } from "../../components/Dialog";
 import { useAppStoreStore } from "../../stores/appStoreStore";
@@ -80,7 +81,80 @@ export function AppDetailDialog() {
   );
 }
 
+// ── Screenshot gallery with viewerjs zoom ─────────────────────────────────────
+
+function ScreenshotGallery({ screenshots }: { screenshots: string[] }) {
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const viewer = new Viewer(el, {
+      toolbar: {
+        zoomIn: 4, zoomOut: 4, oneToOne: 4, reset: 4,
+        prev: 4, play: 0, next: 4,
+        rotateLeft: 0, rotateRight: 0,
+        flipHorizontal: 0, flipVertical: 0,
+      },
+    });
+    return () => { viewer.destroy(); };
+  }, [screenshots]);
+
+  return (
+    <div ref={containerRef} className="flex gap-3 overflow-x-auto pb-2">
+      {screenshots.map((url, i) => (
+        <img
+          key={i}
+          src={url}
+          alt={`Screenshot ${i + 1}`}
+          className="h-36 rounded-lg object-cover shrink-0 border border-gray-800 cursor-zoom-in"
+          onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }}
+        />
+      ))}
+    </div>
+  );
+}
+
+function isSafeUrl(v: unknown): boolean {
+  if (typeof v !== "string" || !v) return false;
+  try {
+    const { protocol } = new URL(v);
+    return protocol === "http:" || protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function formatDate(v: unknown): string {
+  let d: Date;
+  if (v instanceof Date) {
+    d = v;
+  } else if (typeof v === "string" && v) {
+    d = new Date(v);
+  } else {
+    return "";
+  }
+  if (isNaN(d.getTime())) return String(v);
+  return d.toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
+}
+
+// ── App detail body ────────────────────────────────────────────────────────────
+
+const LINKS = [
+  { key: "website" as const, label: "Website" },
+  { key: "repo"    as const, label: "GitHub"  },
+  { key: "support" as const, label: "Support" },
+  { key: "docs"    as const, label: "Docs"    },
+] as const;
+
 function AppDetailBody({ app }: { app: StoreApp }) {
+  console.log("[AppDetailBody] app data:", app);
+  const hasDevSection =
+    app.version || app.updatedAt || app.releaseNotes ||
+    app.website || app.repo || app.support || app.docs;
+
   return (
     <div className="space-y-5">
       {/* Header */}
@@ -115,6 +189,14 @@ function AppDetailBody({ app }: { app: StoreApp }) {
         </div>
       </div>
 
+      {/* Screenshots */}
+      {app.screenshots.length > 0 && (
+        <div>
+          <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Screenshots</p>
+          <ScreenshotGallery screenshots={app.screenshots} />
+        </div>
+      )}
+
       {/* Before-install tip */}
       {app.beforeInstallTip && (
         <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg px-4 py-3">
@@ -131,21 +213,58 @@ function AppDetailBody({ app }: { app: StoreApp }) {
         </div>
       )}
 
-      {/* Screenshots */}
-      {app.screenshots.length > 0 && (
+      {/* Developer & Release */}
+      {hasDevSection && (
         <div>
-          <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Screenshots</p>
-          <div className="flex gap-3 overflow-x-auto pb-2">
-            {app.screenshots.map((url, i) => (
-              <img
-                key={i}
-                src={url}
-                alt={`Screenshot ${i + 1}`}
-                className="h-36 rounded-lg object-cover shrink-0 border border-gray-800"
-                onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }}
-              />
-            ))}
-          </div>
+          <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">Developer &amp; Release</p>
+
+          {/* Version / updated row */}
+          {(app.version || app.updatedAt) && (
+            <div className="flex gap-4 mb-3">
+              {app.version && (
+                <div>
+                  <p className="text-[10px] text-gray-600 uppercase tracking-wide mb-0.5">Version</p>
+                  <p className="text-sm font-mono text-white">{app.version}</p>
+                </div>
+              )}
+              {app.updatedAt && (
+                <div>
+                  <p className="text-[10px] text-gray-600 uppercase tracking-wide mb-0.5">Updated</p>
+                  <p className="text-sm text-gray-300">{formatDate(app.updatedAt)}</p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Release notes (collapsible) */}
+          {app.releaseNotes && (
+            <details className="mb-3 group">
+              <summary className="text-xs text-gray-500 cursor-pointer select-none hover:text-gray-300 transition-colors list-none flex items-center gap-1">
+                <span className="group-open:rotate-90 inline-block transition-transform">▶</span>
+                Release notes
+              </summary>
+              <pre className="mt-2 text-xs text-gray-300 whitespace-pre-wrap leading-relaxed bg-gray-900 border border-gray-800 rounded-lg px-3 py-2 max-h-48 overflow-y-auto font-sans">
+                {app.releaseNotes}
+              </pre>
+            </details>
+          )}
+
+          {/* Links */}
+          {LINKS.some(l => isSafeUrl(app[l.key])) && (
+            <div className="flex flex-wrap gap-2">
+              {LINKS.filter(l => isSafeUrl(app[l.key])).map(l => (
+                <a
+                  key={l.key}
+                  href={app[l.key]}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-xs px-2.5 py-1 rounded-lg bg-gray-800 text-gray-300 hover:text-white hover:bg-gray-700 border border-gray-700 transition-colors"
+                >
+                  {l.label} ↗
+                </a>
+              ))}
+            </div>
+          )}
         </div>
       )}
 

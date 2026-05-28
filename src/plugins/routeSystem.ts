@@ -3,6 +3,15 @@ import { authGuard } from "./authGuard";
 import { bins, commands } from "../lib/commands";
 import { envConfig } from "../env-config";
 
+function semverGt(a: string, b: string): boolean {
+  const parse = (v: string) => v.replace(/^v/, "").split(".").map(n => parseInt(n, 10) || 0);
+  const [aMaj = 0, aMin = 0, aPatch = 0] = parse(a);
+  const [bMaj = 0, bMin = 0, bPatch = 0] = parse(b);
+  if (aMaj !== bMaj) return aMaj > bMaj;
+  if (aMin !== bMin) return aMin > bMin;
+  return aPatch > bPatch;
+}
+
 // Injected at build time via define; falls back to reading package.json from CWD in dev.
 const APP_VERSION: string =
   (process.env.APP_VERSION as string | undefined) ??
@@ -53,6 +62,94 @@ export function systemPlugin(jwtSecret: string) {
       }
 
       return { user, uid, isRoot, samba: { installed: sambaInstalled, active: sambaActive, enabled: sambaEnabled } };
+    })
+    .get("/update-check", async () => {
+      try {
+        const res = await fetch(
+          "https://api.github.com/repos/deckyfx/anpan-os/releases/latest",
+          {
+            headers: { "User-Agent": "anpan-os" },
+            signal: AbortSignal.timeout(10_000),
+          },
+        );
+        if (!res.ok) return { updateAvailable: false, currentVersion: APP_VERSION, error: `GitHub API returned ${res.status}` };
+
+        const data = await res.json() as {
+          tag_name: string;
+          body?: string;
+          assets?: { name: string; browser_download_url: string }[];
+        };
+
+        const latestVersion = (data.tag_name ?? "").replace(/^v/, "");
+        const updateAvailable = latestVersion !== "" && semverGt(latestVersion, APP_VERSION);
+
+        const arch        = process.arch === "arm64" ? "arm64" : "x64";
+        const binaryName  = `anpan-os-linux-${arch}`;
+        const assets      = data.assets ?? [];
+        const downloadUrl = assets.find(a => a.name === binaryName)?.browser_download_url ?? "";
+        const sha256Url   = assets.find(a => a.name === `${binaryName}.sha256`)?.browser_download_url ?? "";
+
+        return {
+          currentVersion: APP_VERSION,
+          latestVersion,
+          updateAvailable,
+          releaseNotes: data.body ?? "",
+          downloadUrl,
+          sha256Url,
+        };
+      } catch (e) {
+        return { updateAvailable: false, currentVersion: APP_VERSION, error: String(e) };
+      }
+    })
+    .post("/update", async ({ set }) => {
+      if ((process.getuid?.() ?? -1) !== 0) { set.status = 403; return { error: "Requires root" }; }
+
+      // Re-fetch latest release to get download URLs
+      const releaseRes = await fetch(
+        "https://api.github.com/repos/deckyfx/anpan-os/releases/latest",
+        { headers: { "User-Agent": "anpan-os" }, signal: AbortSignal.timeout(15_000) },
+      );
+      if (!releaseRes.ok) { set.status = 502; return { error: `GitHub API returned ${releaseRes.status}` }; }
+
+      const release = await releaseRes.json() as {
+        assets?: { name: string; browser_download_url: string }[];
+      };
+
+      const arch       = process.arch === "arm64" ? "arm64" : "x64";
+      const binaryName = `anpan-os-linux-${arch}`;
+      const assets     = release.assets ?? [];
+      const binaryUrl  = assets.find(a => a.name === binaryName)?.browser_download_url;
+      const sha256Url  = assets.find(a => a.name === `${binaryName}.sha256`)?.browser_download_url;
+
+      if (!binaryUrl || !sha256Url) { set.status = 404; return { error: `No release asset found for ${binaryName}` }; }
+
+      // Download checksum file
+      const sha256Res = await fetch(sha256Url, { signal: AbortSignal.timeout(15_000) });
+      if (!sha256Res.ok) { set.status = 502; return { error: "Failed to download checksum file" }; }
+      const sha256Text    = await sha256Res.text();
+      const expectedHash  = sha256Text.trim().split(/\s+/)[0] ?? "";
+
+      // Download binary
+      const tmpPath = "/tmp/anpan-os-update";
+      const binRes  = await fetch(binaryUrl, { signal: AbortSignal.timeout(120_000) });
+      if (!binRes.ok) { set.status = 502; return { error: "Failed to download binary" }; }
+      const binaryBuffer = await binRes.arrayBuffer();
+
+      // Verify SHA256
+      const hasher   = new Bun.CryptoHasher("sha256");
+      hasher.update(binaryBuffer);
+      const actualHash = hasher.digest("hex");
+      if (actualHash !== expectedHash) { set.status = 422; return { error: "SHA256 mismatch — download may be corrupted" }; }
+
+      // Write to temp path, make executable, then replace the running binary
+      await Bun.write(tmpPath, binaryBuffer);
+      await Bun.$`chmod +x ${tmpPath}`.quiet();
+      await Bun.$`mv ${tmpPath} /usr/local/bin/anpan-os`.quiet();
+
+      // Fire-and-forget restart (response is sent before the process dies)
+      void Bun.$`systemctl restart anpan-os`.quiet().nothrow();
+
+      return { ok: true };
     });
 }
 

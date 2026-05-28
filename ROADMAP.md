@@ -1,5 +1,25 @@
 # Roadmap
 
+## v0.5.0 — 2026-05-28
+
+### New features
+- **Configurable `sameSite` cookie** — add `session_same_site` to `[auth]` in `config.toml` (default `strict`; set `lax` for multi-hostname LAN access where the app is opened from both an IP and a DNS name)
+- **App Store TopBar** — App Store page now shows the shared TopBar so users can navigate back to Home without reloading
+- **Version badge & VersionDialog** — version number moved to the right side of TopBar as a clickable badge; opens a dialog showing current version, release notes fetched from GitHub, and an update button
+- **Self-update endpoint** — `POST /api/system/update` downloads the latest release binary, verifies its SHA256 checksum, replaces the running binary, and restarts the service; `GET /api/system/update-check` returns the current/latest version and whether an update is available
+- **SHA256 release artifacts** — CI now generates and uploads `.sha256` checksum files alongside each release binary; `install.sh` verifies the checksum before installing
+- **App Store streaming** — apps load progressively as each repository resolves (SSE); the grid populates incrementally instead of waiting for all repos to finish
+- **App detail: zoomable screenshots** — screenshot thumbnails open a full lightbox with zoom, pan, and prev/next navigation via viewerjs
+- **App detail: Developer & Release section** — shows version, last updated date, collapsible release notes, and link chips (Website, GitHub, Support, Docs) sourced from the compose file's `x-casaos` metadata
+
+### Improvements
+- Screenshots section appears above the About text in the app detail dialog
+
+### Fixes
+- `updatedAt` YAML date fields (parsed as JavaScript `Date` objects by the YAML library) no longer crash the app detail dialog; rendered as a human-readable locale string
+
+---
+
 ## v0.4.1 — 2026-05-27
 
 ### Fixes
