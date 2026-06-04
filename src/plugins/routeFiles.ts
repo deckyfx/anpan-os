@@ -7,6 +7,7 @@ import { config } from "../config";
 import { bins, commands } from "../lib/commands";
 import { StreamAggregator, drainStream } from "../lib/sse";
 import type { SSEMsg } from "../lib/sse";
+import { SettingsStore } from "../stores/settings-store";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -498,5 +499,63 @@ export function filesPlugin(jwtSecret: string) {
         }
       },
       { query: t.Object({ path: t.String() }) },
-    );
+    )
+
+    // GET /api/files/config — returns file browser configuration
+    .get("/config", async () => {
+      const [startPath, persistRaw, lastPath, bookmarksRaw] = await Promise.all([
+        SettingsStore.get("files_start_path"),
+        SettingsStore.get("files_persist_last_path"),
+        SettingsStore.get("files_last_path"),
+        SettingsStore.get("files_bookmarks"),
+      ]);
+
+      let bookmarks: { name: string; path: string }[] = [];
+      try {
+        const parsed: unknown = JSON.parse(bookmarksRaw ?? "[]");
+        if (Array.isArray(parsed)) {
+          bookmarks = parsed as { name: string; path: string }[];
+        }
+      } catch {
+        bookmarks = [];
+      }
+
+      return {
+        startPath:       startPath       ?? "",
+        persistLastPath: (persistRaw     ?? "0") === "1",
+        lastPath:        lastPath        ?? "",
+        bookmarks,
+      };
+    })
+
+    // PATCH /api/files/config — update file browser configuration (all fields optional)
+    .patch("/config", async ({ body }) => {
+      const tasks: Promise<void>[] = [];
+
+      if (body.startPath !== undefined) {
+        tasks.push(SettingsStore.set("files_start_path", body.startPath));
+      }
+      if (body.persistLastPath !== undefined) {
+        tasks.push(SettingsStore.set("files_persist_last_path", body.persistLastPath ? "1" : "0"));
+      }
+      if (body.lastPath !== undefined) {
+        tasks.push(SettingsStore.set("files_last_path", body.lastPath));
+      }
+      if (body.bookmarks !== undefined) {
+        tasks.push(SettingsStore.set("files_bookmarks", JSON.stringify(body.bookmarks)));
+      }
+
+      await Promise.all(tasks);
+      return { ok: true };
+    }, {
+      body: t.Object({
+        startPath:       t.Optional(t.String()),
+        persistLastPath: t.Optional(t.Boolean()),
+        lastPath:        t.Optional(t.String()),
+        bookmarks:       t.Optional(t.Array(t.Object({
+          name: t.String(),
+          path: t.String(),
+        }))),
+      }),
+    });
 }

@@ -37,3 +37,15 @@ export interface SambaShare {
   source:      "anpan" | "external";
   sourceFile?: string;
 }
+
+export interface FileBookmark {
+  name: string;
+  path: string;
+}
+
+export interface FileBrowserConfig {
+  startPath:       string;
+  persistLastPath: boolean;
+  lastPath:        string;
+  bookmarks:       FileBookmark[];
+}
