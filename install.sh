@@ -57,6 +57,13 @@ rm -f "$TMP_SHA256"
 [ "$EXPECTED_HASH" = "$ACTUAL_HASH" ] || die "SHA256 mismatch — download may be corrupted. Aborting."
 success "Checksum verified."
 
+# Stop the service before replacing the binary — overwriting a running
+# executable causes "Text file busy" on Linux.
+if systemctl is-active --quiet anpan-os 2>/dev/null; then
+  info "Stopping anpan-os service..."
+  systemctl stop anpan-os
+fi
+
 chmod +x "$TMP"
 mv "$TMP" "${INSTALL_DIR}/anpan-os"
 success "Binary installed at ${INSTALL_DIR}/anpan-os"
