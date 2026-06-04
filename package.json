@@ -1,12 +1,13 @@
 {
   "name": "anpan-os",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "module": "src/index.ts",
   "type": "module",
   "private": true,
   "scripts": {
     "dev": "bun run src/index.ts",
     "build": "bun run typecheck && bun run build.ts",
+    "deploy": "bun run build && sudo cp binaries/anpan-os-linux-x64 /usr/local/bin/anpan-os && sudo systemctl restart anpan-os && sudo journalctl -u anpan-os -n 20 --no-pager",
     "typecheck": "tsc --noEmit",
     "migrate": "bun run src/db/migrate.ts",
     "db:generate": "drizzle-kit generate",

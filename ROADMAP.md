@@ -1,5 +1,22 @@
 # Roadmap
 
+## v0.6.0 — 2026-06-04
+
+### Fixes
+- **Auth broken behind HTTP reverse proxy** — session cookie had the `Secure` attribute set based on whether the backend had TLS enabled, not on whether the *client-facing* connection was HTTPS. When Nginx Proxy Manager (or any other proxy) terminates TLS and forwards plain HTTP to anpan-os, browsers silently discarded the `Secure` cookie — login appeared to succeed but all subsequent XHR returned 401. Fixed in `setSession()` (routeAuth + routePasskey): `Secure` is now derived from `X-Forwarded-Proto`, falling back to `config.tlsEnabled` for direct connections
+- **`tokenVersion` null mismatch — all API calls 401 after login** — `requireActiveSession` and `authGuard` compared `payload.tokenVersion` (always `0` for users created before the `tokenVersion` column was added) against `user.tokenVersion` from the DB (which is `null` for those users). `0 !== null` caused every request to fail with 401. Fixed by normalising the DB value with `?? 0` in all three comparison sites (`authGuard.ts`, `routeAuth.ts` × 2)
+
+### New features
+- **CLI arguments** — `anpan-os --version` / `-v` prints the version and exits; `anpan-os --help` / `-h` prints usage, lists all flags, and shows the root requirement note
+- **`bun run deploy` script** — builds the binary from source and installs it to `/usr/local/bin/anpan-os` then restarts the systemd service; useful for local development without a GitHub release
+
+### Improvements
+- CLI argument parsing extracted to `src/cli-parser.ts` (`CliResult` discriminated union + `parseCli()`) — easy to extend with future flags
+- `install.sh` shows a download progress bar (`curl --progress-bar`) instead of running silently
+- README: root requirement (`sudo`) documented in Requirements section and Install warning; dev commands updated to `sudo bun run dev`; config path corrected to `/root/.anpanos/`
+
+---
+
 ## v0.5.1 — 2026-05-28
 
 ### New features

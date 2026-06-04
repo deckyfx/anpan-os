@@ -57,10 +57,87 @@ Manage Docker Compose stacks, browse files, monitor system resources, and instal
 
 - [Bun](https://bun.sh) ≥ 1.1
 - Docker with the Compose plugin (`docker compose`)
+- **Must run as root (`sudo`)** — required for Docker management, full filesystem access, and CasaOS migration
 
 ---
 
-## Getting Started
+## Install
+
+> ⚠️ **anpan-os must run as root.**
+> Without root, Docker socket access, the file manager, and CasaOS migration are either limited or unavailable.
+
+### One-liner (Linux)
+
+Downloads the latest release binary, verifies the SHA256 checksum, creates a default config at `/var/lib/anpan-os/config.toml`, installs a systemd service, and starts it — all in one step:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/deckyfx/anpan-os/main/install.sh | sudo bash
+```
+
+If you prefer not to pipe to `sudo bash`, see [Manual download](#manual-download) below.
+
+After the script completes:
+
+```bash
+# Check service status
+systemctl status anpan-os
+
+# Follow logs
+journalctl -u anpan-os -f
+```
+
+Open `http://<your-server-ip>:5000` and complete the setup wizard on first run.
+
+### Manual download
+
+```bash
+# Detect architecture
+ARCH=$(uname -m)
+[ "$ARCH" = "aarch64" ] && ARCH="arm64" || ARCH="x64"
+
+# Download binary + checksum
+curl -fsSL "https://github.com/deckyfx/anpan-os/releases/latest/download/anpan-os-linux-${ARCH}" -o anpan-os
+curl -fsSL "https://github.com/deckyfx/anpan-os/releases/latest/download/anpan-os-linux-${ARCH}.sha256" -o anpan-os.sha256
+
+# Verify
+sha256sum -c anpan-os.sha256
+
+# Install
+chmod +x anpan-os
+sudo mv anpan-os /usr/local/bin/anpan-os
+
+# Run
+sudo anpan-os
+```
+
+### Systemd service (manual setup)
+
+```bash
+sudo tee /etc/systemd/system/anpan-os.service > /dev/null <<'EOF'
+[Unit]
+Description=anpan-os Home Server OS
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=/var/lib/anpan-os
+ExecStart=/usr/local/bin/anpan-os
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now anpan-os
+```
+
+---
+
+## Getting Started (development)
 
 ```bash
 # Clone
@@ -71,19 +148,21 @@ cd anpan-os
 bun install
 
 # Run database migrations
-bun run migrate
+sudo bun run migrate
 
 # Start (development, with hot reload)
-bun run dev
+sudo bun run dev
 ```
 
 Open `http://localhost:3000` and complete the setup wizard on first run.
+
+> Running as root ensures all features work in development the same way they do in production.
 
 ---
 
 ## Configuration
 
-On first run, a config file is created at `~/.anpanos/config.toml`:
+On first run, a config file is created at `/root/.anpanos/config.toml` (when run as root):
 
 ```toml
 [server]
@@ -99,7 +178,7 @@ bind = "local"   # "local" = 127.0.0.1 | "public" = 0.0.0.0
 root = "/"   # root path the file manager can browse
 ```
 
-All runtime data (config, database, compose files) lives under `~/.anpanos/` by default — easy to back up or relocate.
+All runtime data (config, database, compose files) lives under `/root/.anpanos/` by default — easy to back up or relocate.
 
 ---
 

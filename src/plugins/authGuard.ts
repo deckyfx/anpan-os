@@ -29,7 +29,7 @@ export function authGuard(jwtSecret: string) {
       // Verify tokenVersion to invalidate old JWTs after password change
       const userId = parseInt(String(payload.sub), 10);
       const user = await UserStore.findById(userId);
-      if (!user || (payload.tokenVersion !== user.tokenVersion)) return status(401, "Unauthorized");
+      if (!user || (payload.tokenVersion !== (user.tokenVersion ?? 0))) return status(401, "Unauthorized");
 
       return {
         user: {
