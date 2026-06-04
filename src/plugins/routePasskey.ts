@@ -63,11 +63,13 @@ const cookieSchema = t.Cookie({ anpan_session: t.Optional(t.String()) });
 const MAX_AGE = 7 * 24 * 60 * 60;
 
 /** Writes the JWT session cookie with the project's standard security attributes. */
-function setSession(c: { value: string | undefined; httpOnly: boolean; sameSite: string; secure: boolean; maxAge: number; path: string }, token: string) {
+function setSession(c: { value: string | undefined; httpOnly: boolean; sameSite: string; secure: boolean; maxAge: number; path: string }, token: string, request: Request) {
+  const forwarded = request.headers.get("x-forwarded-proto")?.split(",")[0]?.trim().toLowerCase();
+  const secure = forwarded ? forwarded === "https" : config.tlsEnabled;
   c.value    = token;
   c.httpOnly = true;
   c.sameSite = config.sessionSameSite;
-  c.secure   = config.tlsEnabled;
+  c.secure   = secure;
   c.maxAge   = MAX_AGE;
   c.path     = "/";
 }
@@ -182,7 +184,7 @@ export function passkeyPlugin(jwtSecret: string) {
         if (!dbUser) { set.status = 500; return { error: "User not found" }; }
 
         const token = await jwtCtx.sign({ sub: String(dbUser.id), username: dbUser.username, tokenVersion: dbUser.tokenVersion ?? 0 });
-        setSession(anpan_session as Parameters<typeof setSession>[0], token);
+        setSession(anpan_session as Parameters<typeof setSession>[0], token, request);
 
         return { ok: true, username: dbUser.username };
       },

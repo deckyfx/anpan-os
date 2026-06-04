@@ -49,7 +49,7 @@ async function requireActiveSession(jwtCtx: JwtCtx, token: string | undefined) {
   if (isNaN(userId)) return null;
   const user = await UserStore.findById(userId);
   if (!user) return null;
-  if ((payload.tokenVersion as number) !== user.tokenVersion) return null;
+  if ((payload.tokenVersion as number) !== (user.tokenVersion ?? 0)) return null;
   return user;
 }
 
@@ -76,12 +76,27 @@ const cookieSchema = t.Cookie({
   anpan_session: t.Optional(t.String()),
 });
 
-/** Writes the JWT session cookie with the project's standard security attributes. */
-function setSession(c: Cookie<string | undefined>, token: string) {
+/**
+ * Writes the JWT session cookie with the project's standard security attributes.
+ *
+ * The `Secure` flag is derived from the *client-facing* protocol, not the backend TLS
+ * config.  When anpan-os runs behind a reverse proxy that terminates TLS (e.g. Nginx
+ * Proxy Manager), the browser talks HTTP to the proxy while the backend sees HTTPS.
+ * Setting `Secure` based on backend TLS would cause browsers to silently drop the
+ * cookie on HTTP responses from the proxy.
+ *
+ * Resolution order:
+ *   1. `X-Forwarded-Proto: https` → `Secure` (proxy is terminating TLS for the client)
+ *   2. `X-Forwarded-Proto: http`  → not `Secure`
+ *   3. No `X-Forwarded-Proto` header → fall back to `config.tlsEnabled` (direct connection)
+ */
+function setSession(c: Cookie<string | undefined>, token: string, request: Request) {
+  const forwarded = request.headers.get("x-forwarded-proto")?.split(",")[0]?.trim().toLowerCase();
+  const secure = forwarded ? forwarded === "https" : config.tlsEnabled;
   c.value = token;
   c.httpOnly = true;
   c.sameSite = config.sessionSameSite;
-  c.secure = config.tlsEnabled;
+  c.secure = secure;
   c.maxAge = MAX_AGE;
   c.path = "/";
 }
@@ -134,7 +149,7 @@ export function authPlugin(jwtSecret: string) {
 
     .post(
       "/setup",
-      async ({ body, jwt: jwtCtx, cookie: { anpan_session }, set }) => {
+      async ({ body, jwt: jwtCtx, cookie: { anpan_session }, set, request }) => {
         if (config.disabledLoginMethods.has("form")) {
           set.status = 403;
           return { error: "Form login is disabled" };
@@ -154,7 +169,7 @@ export function authPlugin(jwtSecret: string) {
           username: user.username,
           tokenVersion: user.tokenVersion ?? 0,
         });
-        setSession(anpan_session, token);
+        setSession(anpan_session, token, request);
         return { ok: true, username: user.username };
       },
       {
@@ -167,7 +182,7 @@ export function authPlugin(jwtSecret: string) {
 
     .post(
       "/login",
-      async ({ body, jwt: jwtCtx, cookie: { anpan_session }, set }) => {
+      async ({ body, jwt: jwtCtx, cookie: { anpan_session }, set, request }) => {
         if (config.disabledLoginMethods.has("form")) {
           set.status = 403;
           return { error: "Form login is disabled" };
@@ -195,7 +210,7 @@ export function authPlugin(jwtSecret: string) {
           username: user.username,
           tokenVersion: user.tokenVersion ?? 0,
         });
-        setSession(anpan_session, token);
+        setSession(anpan_session, token, request);
         return { ok: true, username: user.username };
       },
       {
@@ -281,7 +296,7 @@ export function authPlugin(jwtSecret: string) {
 
     .put(
       "/password",
-      async ({ body, jwt: jwtCtx, cookie: { anpan_session }, set }) => {
+      async ({ body, jwt: jwtCtx, cookie: { anpan_session }, set, request }) => {
         const token = anpan_session.value;
         const payload = token ? await jwtCtx.verify(token) : null;
         if (!payload) { set.status = 401; return { error: "Not authenticated" }; }
@@ -289,7 +304,7 @@ export function authPlugin(jwtSecret: string) {
         const userId = parseInt(String(payload.sub), 10);
         const user   = await UserStore.findById(userId);
         if (!user)                                           { set.status = 401; return { error: "User not found" }; }
-        if (payload.tokenVersion !== user.tokenVersion)     { set.status = 401; return { error: "Session expired" }; }
+        if (payload.tokenVersion !== (user.tokenVersion ?? 0)) { set.status = 401; return { error: "Session expired" }; }
 
         const pErr = validatePassword(body.newPassword);
         if (pErr)   { set.status = 422; return { error: pErr }; }
@@ -311,7 +326,7 @@ export function authPlugin(jwtSecret: string) {
             username: updated.username,
             tokenVersion: updated.tokenVersion ?? 0,
           });
-          setSession(anpan_session, newToken);
+          setSession(anpan_session, newToken, request);
         }
 
         return { ok: true };

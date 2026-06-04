@@ -42,9 +42,10 @@ DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${LATEST}/${BINARY}"
 
 # ── Download binary ───────────────────────────────────────────────────────────
 
-info "Downloading $BINARY..."
+info "Downloading $BINARY ($LATEST)..."
 TMP="$(mktemp)"
-curl -fsSL "$DOWNLOAD_URL" -o "$TMP" || die "Download failed: $DOWNLOAD_URL"
+# --progress-bar shows a visual bar; -f fails on HTTP errors; -L follows redirects
+curl -fL --progress-bar "$DOWNLOAD_URL" -o "$TMP" || die "Download failed: $DOWNLOAD_URL"
 
 info "Verifying SHA256 checksum..."
 SHA256_URL="${DOWNLOAD_URL}.sha256"

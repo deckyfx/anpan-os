@@ -5,19 +5,30 @@ import { SettingsStore } from "./stores/settings-store";
 import { AppRepoStore }  from "./stores/app-repo-store";
 import { createApp } from "./app";
 import { appPlugin } from "./plugins/routeApp";
+import { parseCli, printHelp } from "./cli-parser";
 
-// --- CLI: --doctor ---
-// Checks that all required external tools are installed on this system.
-if (Bun.argv.includes("--doctor")) {
-  const { runDoctor } = await import("./cli/doctor");
-  await runDoctor();
-}
-
-// --- CLI: --reset-user ---
-// Wipes the users table so a new admin can be created on next start.
-if (Bun.argv.includes("--reset-user")) {
-  const { runResetUser } = await import("./cli/reset-user");
-  await runResetUser();
+// --- CLI dispatch ---
+const cli = parseCli();
+switch (cli.type) {
+  case "version":
+    console.log(`anpan-os v${process.env.APP_VERSION ?? "dev"}`);
+    process.exit(0);
+    break;
+  case "help":
+    printHelp();
+    process.exit(0);
+    break;
+  case "doctor": {
+    const { runDoctor } = await import("./cli/doctor");
+    await runDoctor(); // exits internally
+    break;
+  }
+  case "reset-user": {
+    const { runResetUser } = await import("./cli/reset-user");
+    await runResetUser(); // exits internally
+    break;
+  }
+  // "serve" falls through to server startup below
 }
 
 // --- Server startup ---
