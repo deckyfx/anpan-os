@@ -13,7 +13,7 @@
 ### Improvements
 - CLI argument parsing extracted to `src/cli-parser.ts` (`CliResult` discriminated union + `parseCli()`) — easy to extend with future flags
 - `install.sh` shows a download progress bar (`curl --progress-bar`) instead of running silently
-- README: root requirement (`sudo`) documented in Requirements section and Install warning; dev commands updated to `sudo bun run dev`; config path corrected to `/root/.anpanos/`
+- README: root requirement (`sudo`) documented in Requirements section and Install warning; dev commands updated to `sudo bun run dev`; config path corrected to `/var/lib/anpan-os/`
 
 ---
 

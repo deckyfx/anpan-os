@@ -64,7 +64,7 @@ const MAX_AGE = 7 * 24 * 60 * 60;
 
 /** Writes the JWT session cookie with the project's standard security attributes. */
 function setSession(c: { value: string | undefined; httpOnly: boolean; sameSite: string; secure: boolean; maxAge: number; path: string }, token: string, request: Request) {
-  const forwarded = request.headers.get("x-forwarded-proto");
+  const forwarded = request.headers.get("x-forwarded-proto")?.split(",")[0]?.trim().toLowerCase();
   const secure = forwarded ? forwarded === "https" : config.tlsEnabled;
   c.value    = token;
   c.httpOnly = true;

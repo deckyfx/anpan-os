@@ -162,7 +162,7 @@ Open `http://localhost:3000` and complete the setup wizard on first run.
 
 ## Configuration
 
-On first run, a config file is created at `/root/.anpanos/config.toml` (when run as root):
+On first run, a config file is created at `/var/lib/anpan-os/config.toml`:
 
 ```toml
 [server]
@@ -178,7 +178,7 @@ bind = "local"   # "local" = 127.0.0.1 | "public" = 0.0.0.0
 root = "/"   # root path the file manager can browse
 ```
 
-All runtime data (config, database, compose files) lives under `/root/.anpanos/` by default — easy to back up or relocate.
+All runtime data (config, database, compose files) lives under `/var/lib/anpan-os/` by default — easy to back up or relocate.
 
 ---
 

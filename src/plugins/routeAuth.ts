@@ -91,7 +91,7 @@ const cookieSchema = t.Cookie({
  *   3. No `X-Forwarded-Proto` header → fall back to `config.tlsEnabled` (direct connection)
  */
 function setSession(c: Cookie<string | undefined>, token: string, request: Request) {
-  const forwarded = request.headers.get("x-forwarded-proto");
+  const forwarded = request.headers.get("x-forwarded-proto")?.split(",")[0]?.trim().toLowerCase();
   const secure = forwarded ? forwarded === "https" : config.tlsEnabled;
   c.value = token;
   c.httpOnly = true;
