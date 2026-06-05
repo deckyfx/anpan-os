@@ -1,7 +1,16 @@
 import { create } from "zustand";
 import { api } from "../lib/api";
-import type { FileEntry, ViewMode, UploadItem, CtxMenu, SambaShare } from "../pages/files/types";
+import type { FileEntry, ViewMode, UploadItem, CtxMenu, SambaShare, FileBrowserConfig } from "../pages/files/types";
 import { normalizePath, parentPath } from "../pages/files/helpers";
+import { useToastStore } from "./toastStore";
+
+function debounce<T extends unknown[]>(fn: (...args: T) => void, ms: number) {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return (...args: T) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => fn(...args), ms);
+  };
+}
 
 interface NavHistory {
   stack: string[];
@@ -87,6 +96,14 @@ interface FileState {
   // ── Cross-page navigation ─────────────────────────────────────────────────
   /** Set by stacksStore before navigating to /files; FilesPage reads + clears it on mount. */
   pendingNavigatePath: string | null;
+
+  // ── File browser config ───────────────────────────────────────────────────
+  fileBrowserConfig:     FileBrowserConfig;
+  configLoaded:          boolean;
+  loadFileBrowserConfig: () => Promise<void>;
+  saveFileBrowserConfig: (patch: Partial<FileBrowserConfig>) => Promise<void>;
+  toggleBookmark:        (path: string, name?: string) => Promise<void>;
+  updateLastPath:        (path: string) => void;
 
   // ── Init ──────────────────────────────────────────────────────────────────
   initialized: boolean;
@@ -215,6 +232,9 @@ export const useFileStore = create<FileState>((set, get) => ({
 
   pendingNavigatePath: null,
 
+  fileBrowserConfig: { startPath: "", persistLastPath: false, lastPath: "", bookmarks: [] },
+  configLoaded: false,
+
   initialized: false,
 
   // ── Init ─────────────────────────────────────────────────────────────────
@@ -223,11 +243,32 @@ export const useFileStore = create<FileState>((set, get) => ({
     if (get().initialized) return;
     set({ initialized: true });
 
+    const store = get();
+
     api.api.files.home.get()
-      .then(({ data }) => {
-        const path = (data as { path: string })?.path ?? "/";
-        set({ homePath: path });
-        return get().navigateTo(path);
+      .then(async ({ data }) => {
+        const homePath = (data as { path: string })?.path ?? "/";
+        set({ homePath });
+
+        await store.loadFileBrowserConfig();
+        const cfg = get().fileBrowserConfig;
+
+        // Validate configured paths before navigating: attempt to list the
+        // directory; on failure fall back to homePath and warn the user.
+        const tryNavigate = async (path: string, label: string): Promise<boolean> => {
+          const ok = await get().loadDirContent(path);
+          if (!ok) {
+            useToastStore.getState().push(`Configured ${label} "${path}" is inaccessible — returning to home`, "error");
+          }
+          return ok;
+        };
+
+        if (cfg.persistLastPath && cfg.lastPath) {
+          if (await tryNavigate(cfg.lastPath, "last path")) return;
+        } else if (cfg.startPath) {
+          if (await tryNavigate(cfg.startPath, "start path")) return;
+        }
+        return get().navigateTo(homePath);
       })
       .catch(() => get().navigateTo("/"));
 
@@ -272,6 +313,7 @@ export const useFileStore = create<FileState>((set, get) => ({
       const newStack = [...stack.slice(0, idx + 1), trimmed];
       return { navHistory: { stack: newStack, idx: newStack.length - 1 } };
     });
+    get().updateLastPath(trimmed);
   },
 
   goBack: () => {
@@ -539,6 +581,49 @@ export const useFileStore = create<FileState>((set, get) => ({
 
   /** Directly set (or clear) the copy/move progress dialog state. */
   setCopyMoveProgress: (v) => set({ copyMoveProgress: v }),
+
+  // ── File browser config ───────────────────────────────────────────────────
+
+  loadFileBrowserConfig: async () => {
+    try {
+      const { data } = await (api.api.files as unknown as { config: { get: () => Promise<{ data: unknown }> } }).config.get();
+      if (data) {
+        set({ fileBrowserConfig: data as FileBrowserConfig, configLoaded: true });
+      }
+    } catch { /* ignore */ }
+  },
+
+  saveFileBrowserConfig: async (patch) => {
+    const prev = get().fileBrowserConfig;
+    set((s) => ({ fileBrowserConfig: { ...s.fileBrowserConfig, ...patch } }));
+    try {
+      await (api.api.files as unknown as { config: { patch: (b: Partial<FileBrowserConfig>) => Promise<{ data: unknown }> } }).config.patch(patch);
+    } catch {
+      set({ fileBrowserConfig: prev });
+      useToastStore.getState().push("Failed to save file browser settings", "error");
+    }
+  },
+
+  toggleBookmark: async (path, name) => {
+    const { fileBrowserConfig, saveFileBrowserConfig } = get();
+    const exists = fileBrowserConfig.bookmarks.some(b => b.path === path);
+    let bookmarks: FileBrowserConfig["bookmarks"];
+    if (exists) {
+      bookmarks = fileBrowserConfig.bookmarks.filter(b => b.path !== path);
+    } else {
+      const segments = path.split("/").filter(Boolean);
+      const label = name ?? (segments[segments.length - 1] ?? path);
+      bookmarks = [...fileBrowserConfig.bookmarks, { name: label, path }];
+    }
+    await saveFileBrowserConfig({ bookmarks });
+  },
+
+  updateLastPath: debounce((path: string) => {
+    const { fileBrowserConfig, saveFileBrowserConfig } = get();
+    if (fileBrowserConfig.persistLastPath) {
+      void saveFileBrowserConfig({ lastPath: path });
+    }
+  }, 500),
 
   // ── Samba ─────────────────────────────────────────────────────────────────
 

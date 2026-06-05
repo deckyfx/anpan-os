@@ -7,7 +7,8 @@ import { TopBar }        from "./home/TopBar";
 import { ChevronLeft, ChevronRight, FolderUp, House, LayoutGrid, List,
          FolderOpen, Pencil, Download, Archive, PackageOpen, ShieldCheck, Info,
          Trash2, FolderPlus, Upload, Network, Share2, FolderMinus,
-         Copy, Scissors, ClipboardPaste, PanelRight, FolderSearch, RefreshCw } from "lucide-react";
+         Copy, Scissors, ClipboardPaste, PanelRight, FolderSearch, RefreshCw,
+         Bookmark, X, Settings, Settings2, Check } from "lucide-react";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { Dialog }        from "../components/Dialog";
 import type { FileEntry } from "./files/types";
@@ -24,6 +25,7 @@ import { AddShareDialog }     from "./files/AddShareDialog";
 import { UploadProgressDialog } from "./files/UploadProgressDialog";
 import { CopyMoveProgressDialog } from "./files/CopyMoveProgressDialog";
 import { FileInfoPanel }  from "./files/FileInfoPanel";
+import { FileBrowserConfigDialog } from "./files/FileBrowserConfigDialog";
 
 /**
  * Render the main file manager UI including navigation controls, file listing (list/grid), right-side info panel, Samba controls, and all related dialogs and context menus.
@@ -63,6 +65,8 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
     clipboard, setClipboard, clearClipboard, pasteClipboard, calculateFolderSize,
     // Samba
     shares, sambaSetupPresent, setRemoveShareTarget, removeShare,
+    // Config / bookmarks
+    fileBrowserConfig, toggleBookmark,
   } = useFileStore();
 
   const { username, logout, hasPasskey, registerPasskey } = useAuthStore();
@@ -77,6 +81,12 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
   const [panelOpen, setPanelOpen] = useState<boolean>(() => {
     try { return localStorage.getItem("files-panel-open") !== "false"; } catch { return true; }
   });
+
+  const [configOpen,           setConfigOpen]           = useState(false);
+  const [showBookmarkPopover,  setShowBookmarkPopover]  = useState(false);
+  const [bookmarkName,         setBookmarkName]         = useState("");
+
+  const isBookmarked = fileBrowserConfig.bookmarks.some(b => b.path === currentPath);
 
   const togglePanel = () => {
     setPanelOpen((v) => {
@@ -97,7 +107,19 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
     useStacksStore.getState().initialize();
   }, []);
 
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const fileInputRef       = useRef<HTMLInputElement>(null);
+  const bookmarkPopoverRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!showBookmarkPopover) return;
+    const handler = (e: MouseEvent) => {
+      if (bookmarkPopoverRef.current && !bookmarkPopoverRef.current.contains(e.target as Node)) {
+        setShowBookmarkPopover(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [showBookmarkPopover]);
 
   const canBack    = navHistory.idx > 0;
   const canForward = navHistory.idx < navHistory.stack.length - 1;
@@ -196,6 +218,61 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
           Go
         </button>
 
+        {/* Bookmark toggle + popover */}
+        <div className="relative shrink-0">
+          <button
+            onClick={() => {
+              if (isBookmarked) {
+                void toggleBookmark(currentPath);
+              } else {
+                const segments = currentPath.split("/").filter(Boolean);
+                setBookmarkName(segments[segments.length - 1] ?? currentPath);
+                setShowBookmarkPopover(true);
+              }
+            }}
+            title={isBookmarked ? "Remove bookmark" : "Bookmark this path"}
+            className={`p-1.5 rounded-lg transition-colors shrink-0 ${isBookmarked ? "text-amber-400 hover:text-amber-300" : "text-gray-400 hover:text-white hover:bg-gray-800"}`}
+          >
+            <Bookmark size={16} fill={isBookmarked ? "currentColor" : "none"} />
+          </button>
+          {showBookmarkPopover && (
+            <div ref={bookmarkPopoverRef} className="absolute top-full left-0 mt-1 z-50 w-64 bg-gray-800 border border-gray-700 rounded-lg shadow-xl p-3 flex gap-2">
+              <input
+                autoFocus
+                value={bookmarkName}
+                onChange={(e) => setBookmarkName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    void toggleBookmark(currentPath, bookmarkName.trim() || undefined);
+                    setShowBookmarkPopover(false);
+                  } else if (e.key === "Escape") {
+                    setShowBookmarkPopover(false);
+                  }
+                }}
+                placeholder="Bookmark name"
+                className="flex-1 bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm text-white outline-none focus:border-blue-500 transition-colors"
+              />
+              <button
+                onClick={() => {
+                  void toggleBookmark(currentPath, bookmarkName.trim() || undefined);
+                  setShowBookmarkPopover(false);
+                }}
+                className="p-1.5 rounded text-green-400 hover:text-green-300 hover:bg-gray-700 transition-colors"
+                title="Add bookmark"
+              >
+                <Check size={14} />
+              </button>
+              <button
+                onClick={() => setShowBookmarkPopover(false)}
+                className="p-1.5 rounded text-gray-400 hover:text-white hover:bg-gray-700 transition-colors"
+                title="Cancel"
+              >
+                <X size={14} />
+              </button>
+            </div>
+          )}
+        </div>
+
         <span className="text-gray-800">|</span>
 
         <input ref={fileInputRef} type="file" multiple className="hidden"
@@ -229,7 +306,47 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
           className={`p-1.5 rounded-lg transition-colors shrink-0 ${panelOpen ? "text-white bg-gray-700" : "text-gray-400 hover:text-white hover:bg-gray-800"}`}>
           <PanelRight size={16} />
         </button>
+
+        <button onClick={() => setConfigOpen(true)} title="File browser settings"
+          className="p-1.5 rounded-lg text-gray-400 hover:text-white hover:bg-gray-800 transition-colors shrink-0">
+          <Settings2 size={16} />
+        </button>
       </div>
+
+      {/* Bookmark chips bar */}
+      {fileBrowserConfig.bookmarks.length > 0 && (
+        <div className="px-5 py-1.5 flex items-center gap-2 border-b border-gray-900 overflow-x-auto scrollbar-thin">
+          {fileBrowserConfig.bookmarks.map((bm) => (
+            <div key={bm.path} className="group relative flex items-center shrink-0">
+              <button
+                onClick={() => void navigateTo(bm.path)}
+                className={`flex items-center gap-1.5 pl-2.5 pr-6 py-1 rounded-full text-xs font-medium transition-colors
+                  ${currentPath === bm.path
+                    ? "bg-amber-500/20 text-amber-300 border border-amber-500/30"
+                    : "bg-gray-800 text-gray-300 hover:text-white hover:bg-gray-700 border border-gray-700"
+                  }`}
+              >
+                <Bookmark size={10} fill={currentPath === bm.path ? "currentColor" : "none"} />
+                {bm.name}
+              </button>
+              <button
+                onClick={() => void toggleBookmark(bm.path)}
+                className="absolute right-1.5 opacity-0 group-hover:opacity-100 transition-opacity text-gray-500 hover:text-red-400"
+                title="Remove bookmark"
+              >
+                <X size={10} />
+              </button>
+            </div>
+          ))}
+          <button
+            onClick={() => setConfigOpen(true)}
+            className="shrink-0 p-1 rounded-full text-gray-600 hover:text-gray-400 transition-colors"
+            title="Manage bookmarks"
+          >
+            <Settings size={13} />
+          </button>
+        </div>
+      )}
 
       {/* File listing + right panel */}
       <div className="flex flex-1 overflow-hidden">
@@ -355,6 +472,8 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
 
       <UploadProgressDialog />
       <CopyMoveProgressDialog />
+
+      <FileBrowserConfigDialog open={configOpen} onClose={() => setConfigOpen(false)} />
 
       {/* Context menu */}
       {ctxMenu && (

@@ -7,6 +7,7 @@ import { config } from "../config";
 import { bins, commands } from "../lib/commands";
 import { StreamAggregator, drainStream } from "../lib/sse";
 import type { SSEMsg } from "../lib/sse";
+import { SettingsStore } from "../stores/settings-store";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -498,5 +499,76 @@ export function filesPlugin(jwtSecret: string) {
         }
       },
       { query: t.Object({ path: t.String() }) },
-    );
+    )
+
+    // GET /api/files/config — returns file browser configuration
+    .get("/config", async () => {
+      const [startPath, persistRaw, lastPath, bookmarksRaw] = await Promise.all([
+        SettingsStore.get("files_start_path"),
+        SettingsStore.get("files_persist_last_path"),
+        SettingsStore.get("files_last_path"),
+        SettingsStore.get("files_bookmarks"),
+      ]);
+
+      let bookmarks: { name: string; path: string }[] = [];
+      try {
+        const parsed: unknown = JSON.parse(bookmarksRaw ?? "[]");
+        if (Array.isArray(parsed)) {
+          bookmarks = parsed.filter(
+            (item): item is { name: string; path: string } =>
+              typeof item?.name === "string" && typeof item?.path === "string",
+          );
+        }
+      } catch {
+        bookmarks = [];
+      }
+
+      return {
+        startPath:       startPath       ?? "",
+        persistLastPath: (persistRaw     ?? "0") === "1",
+        lastPath:        lastPath        ?? "",
+        bookmarks,
+      };
+    })
+
+    // PATCH /api/files/config — update file browser configuration (all fields optional)
+    .patch("/config", async ({ body, set: s }) => {
+      const tasks: Promise<void>[] = [];
+
+      if (body.startPath !== undefined) {
+        // Empty string resets to default — only validate non-empty paths.
+        if (body.startPath !== "") {
+          try { guardPath(body.startPath); } catch { s.status = 400; return { error: "startPath is outside the allowed root" }; }
+        }
+        tasks.push(SettingsStore.set("files_start_path", body.startPath));
+      }
+      if (body.persistLastPath !== undefined) {
+        tasks.push(SettingsStore.set("files_persist_last_path", body.persistLastPath ? "1" : "0"));
+      }
+      if (body.lastPath !== undefined) {
+        if (body.lastPath !== "") {
+          try { guardPath(body.lastPath); } catch { s.status = 400; return { error: "lastPath is outside the allowed root" }; }
+        }
+        tasks.push(SettingsStore.set("files_last_path", body.lastPath));
+      }
+      if (body.bookmarks !== undefined) {
+        for (const bm of body.bookmarks) {
+          try { guardPath(bm.path); } catch { s.status = 400; return { error: `Bookmark path "${bm.path}" is outside the allowed root` }; }
+        }
+        tasks.push(SettingsStore.set("files_bookmarks", JSON.stringify(body.bookmarks)));
+      }
+
+      await Promise.all(tasks);
+      return { ok: true };
+    }, {
+      body: t.Object({
+        startPath:       t.Optional(t.String()),
+        persistLastPath: t.Optional(t.Boolean()),
+        lastPath:        t.Optional(t.String()),
+        bookmarks:       t.Optional(t.Array(t.Object({
+          name: t.String(),
+          path: t.String(),
+        }))),
+      }),
+    });
 }
