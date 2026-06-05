@@ -15,6 +15,7 @@ export function LogsDialog({ stack, logs, loading, open, onClose }: {
       open={open}
       title={stack ? `Logs — ${stack.name}` : "Logs"}
       onClose={onClose}
+      disableBackdropClose
       size="xl"
       footer={
         <button onClick={onClose} className="px-4 py-2 text-sm text-gray-400 hover:text-white transition-colors">
