@@ -27,7 +27,8 @@ export function FileBrowserConfigDialog({ open, onClose }: Props) {
       setPersistLastPath(fileBrowserConfig.persistLastPath);
       setBookmarks([...fileBrowserConfig.bookmarks]);
     }
-  }, [open, fileBrowserConfig]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
 
   function handleSave() {
     void saveFileBrowserConfig({ startPath, persistLastPath, bookmarks });

@@ -514,7 +514,10 @@ export function filesPlugin(jwtSecret: string) {
       try {
         const parsed: unknown = JSON.parse(bookmarksRaw ?? "[]");
         if (Array.isArray(parsed)) {
-          bookmarks = parsed as { name: string; path: string }[];
+          bookmarks = parsed.filter(
+            (item): item is { name: string; path: string } =>
+              typeof item?.name === "string" && typeof item?.path === "string",
+          );
         }
       } catch {
         bookmarks = [];
@@ -529,19 +532,29 @@ export function filesPlugin(jwtSecret: string) {
     })
 
     // PATCH /api/files/config — update file browser configuration (all fields optional)
-    .patch("/config", async ({ body }) => {
+    .patch("/config", async ({ body, set: s }) => {
       const tasks: Promise<void>[] = [];
 
       if (body.startPath !== undefined) {
+        // Empty string resets to default — only validate non-empty paths.
+        if (body.startPath !== "") {
+          try { guardPath(body.startPath); } catch { s.status = 400; return { error: "startPath is outside the allowed root" }; }
+        }
         tasks.push(SettingsStore.set("files_start_path", body.startPath));
       }
       if (body.persistLastPath !== undefined) {
         tasks.push(SettingsStore.set("files_persist_last_path", body.persistLastPath ? "1" : "0"));
       }
       if (body.lastPath !== undefined) {
+        if (body.lastPath !== "") {
+          try { guardPath(body.lastPath); } catch { s.status = 400; return { error: "lastPath is outside the allowed root" }; }
+        }
         tasks.push(SettingsStore.set("files_last_path", body.lastPath));
       }
       if (body.bookmarks !== undefined) {
+        for (const bm of body.bookmarks) {
+          try { guardPath(bm.path); } catch { s.status = 400; return { error: `Bookmark path "${bm.path}" is outside the allowed root` }; }
+        }
         tasks.push(SettingsStore.set("files_bookmarks", JSON.stringify(body.bookmarks)));
       }
 

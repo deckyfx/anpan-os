@@ -8,7 +8,7 @@
     "editor.formatOnSave": true,
     "editor.defaultFormatter": "esbenp.prettier-vscode",
     "editor.tabSize": 2,
-    "typescript.tsdk": "node_modules/typescript/lib"
+    "js/ts.tsdk.path": "node_modules/typescript/lib"
   },
   "extensions": {
     "recommendations": [

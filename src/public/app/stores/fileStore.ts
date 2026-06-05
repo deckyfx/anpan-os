@@ -2,6 +2,15 @@ import { create } from "zustand";
 import { api } from "../lib/api";
 import type { FileEntry, ViewMode, UploadItem, CtxMenu, SambaShare, FileBrowserConfig } from "../pages/files/types";
 import { normalizePath, parentPath } from "../pages/files/helpers";
+import { useToastStore } from "./toastStore";
+
+function debounce<T extends unknown[]>(fn: (...args: T) => void, ms: number) {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return (...args: T) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => fn(...args), ms);
+  };
+}
 
 interface NavHistory {
   stack: string[];
@@ -244,13 +253,22 @@ export const useFileStore = create<FileState>((set, get) => ({
         await store.loadFileBrowserConfig();
         const cfg = get().fileBrowserConfig;
 
+        // Validate configured paths before navigating: attempt to list the
+        // directory; on failure fall back to homePath and warn the user.
+        const tryNavigate = async (path: string, label: string): Promise<boolean> => {
+          const ok = await get().loadDirContent(path);
+          if (!ok) {
+            useToastStore.getState().push(`Configured ${label} "${path}" is inaccessible — returning to home`, "error");
+          }
+          return ok;
+        };
+
         if (cfg.persistLastPath && cfg.lastPath) {
-          return get().navigateTo(cfg.lastPath);
+          if (await tryNavigate(cfg.lastPath, "last path")) return;
         } else if (cfg.startPath) {
-          return get().navigateTo(cfg.startPath);
-        } else {
-          return get().navigateTo(homePath);
+          if (await tryNavigate(cfg.startPath, "start path")) return;
         }
+        return get().navigateTo(homePath);
       })
       .catch(() => get().navigateTo("/"));
 
@@ -576,10 +594,14 @@ export const useFileStore = create<FileState>((set, get) => ({
   },
 
   saveFileBrowserConfig: async (patch) => {
+    const prev = get().fileBrowserConfig;
     set((s) => ({ fileBrowserConfig: { ...s.fileBrowserConfig, ...patch } }));
     try {
       await (api.api.files as unknown as { config: { patch: (b: Partial<FileBrowserConfig>) => Promise<{ data: unknown }> } }).config.patch(patch);
-    } catch { /* ignore */ }
+    } catch {
+      set({ fileBrowserConfig: prev });
+      useToastStore.getState().push("Failed to save file browser settings", "error");
+    }
   },
 
   toggleBookmark: async (path, name) => {
@@ -596,12 +618,12 @@ export const useFileStore = create<FileState>((set, get) => ({
     await saveFileBrowserConfig({ bookmarks });
   },
 
-  updateLastPath: (path) => {
+  updateLastPath: debounce((path: string) => {
     const { fileBrowserConfig, saveFileBrowserConfig } = get();
     if (fileBrowserConfig.persistLastPath) {
       void saveFileBrowserConfig({ lastPath: path });
     }
-  },
+  }, 500),
 
   // ── Samba ─────────────────────────────────────────────────────────────────
 

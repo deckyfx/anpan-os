@@ -107,7 +107,19 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
     useStacksStore.getState().initialize();
   }, []);
 
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const fileInputRef       = useRef<HTMLInputElement>(null);
+  const bookmarkPopoverRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!showBookmarkPopover) return;
+    const handler = (e: MouseEvent) => {
+      if (bookmarkPopoverRef.current && !bookmarkPopoverRef.current.contains(e.target as Node)) {
+        setShowBookmarkPopover(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [showBookmarkPopover]);
 
   const canBack    = navHistory.idx > 0;
   const canForward = navHistory.idx < navHistory.stack.length - 1;
@@ -224,7 +236,7 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
             <Bookmark size={16} fill={isBookmarked ? "currentColor" : "none"} />
           </button>
           {showBookmarkPopover && (
-            <div className="absolute top-full left-0 mt-1 z-50 w-64 bg-gray-800 border border-gray-700 rounded-lg shadow-xl p-3 flex gap-2">
+            <div ref={bookmarkPopoverRef} className="absolute top-full left-0 mt-1 z-50 w-64 bg-gray-800 border border-gray-700 rounded-lg shadow-xl p-3 flex gap-2">
               <input
                 autoFocus
                 value={bookmarkName}
