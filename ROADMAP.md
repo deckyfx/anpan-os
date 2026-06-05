@@ -1,5 +1,22 @@
 # Roadmap
 
+## v0.6.1 — 2026-06-05
+
+### New features
+- **File browser config dialog** — configure the file browser via a new settings dialog (⚙ button in the toolbar):
+  - **Custom start path** — set the directory the browser opens to instead of defaulting to root
+  - **Persist last visited path** — automatically resume where you left off on the next visit; falls back to start path or home if the saved path becomes inaccessible
+  - **Bookmarks** — pin directories for quick access; full management (add, rename, delete) in the config dialog
+
+### Improvements
+- **Bookmark chips bar** — scrollable pill row between toolbar and file list; active path highlighted in amber; hover reveals × to remove instantly; gear icon opens config dialog
+- **Bookmark star button** — filled star in toolbar when current path is bookmarked (click to remove); outline star opens a name popover to add; popover dismisses on click-outside or Escape
+- Bookmark paths and start/last path validated against the allowed file root on save (prevents out-of-root entries persisting in config)
+- `updateLastPath` debounced (500ms) to coalesce rapid navigation saves
+- Config save rolls back optimistically-applied state and shows an error toast on API failure
+
+---
+
 ## v0.6.0 — 2026-06-04
 
 ### Fixes
