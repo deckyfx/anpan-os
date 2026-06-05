@@ -101,7 +101,8 @@ function PullUpdateDialogInner({ stack, onClose, onUpdated }: {
     <Dialog
       open
       title={`Pull Update — ${stack.meta?.title ?? stack.name}`}
-      onClose={onClose}
+      onClose={busy ? () => {} : onClose}
+      disableBackdropClose={busy}
       size="lg"
       notification={error ? (
         <p className="text-red-400 text-sm bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">

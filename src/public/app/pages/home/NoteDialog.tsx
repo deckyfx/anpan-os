@@ -45,7 +45,8 @@ function NoteDialogInner({ target, onClose, onSaved }: {
     <Dialog
       open
       title={`Note — ${target.label}`}
-      onClose={onClose}
+      onClose={busy ? () => {} : onClose}
+      disableBackdropClose={busy}
       size="md"
       footer={
         <>
