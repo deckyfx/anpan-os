@@ -85,6 +85,14 @@ export const useUpdateCheckStore = create<UpdateCheckState>((set, get) => ({
             set({ checking: false, checkingStack: null, checkingImage: null });
           }
         }
+
+        // Stream ended without an explicit done/error message — clean up so spinner doesn't run forever
+        if (!signal.aborted) {
+          set(s => s.checking
+            ? { checking: false, checkingStack: null, checkingImage: null, lastChecked: new Date().toISOString() }
+            : {},
+          );
+        }
       } catch {
         if (!signal.aborted) {
           set({ checking: false, checkingStack: null, checkingImage: null });

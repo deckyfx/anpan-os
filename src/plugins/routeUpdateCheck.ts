@@ -25,14 +25,23 @@ interface ImageCheck {
   image: string;
 }
 
-/** Returns all unique (stack, image) pairs from running+stopped compose containers. */
+/**
+ * Returns all unique (stack, image) pairs from running+stopped compose containers.
+ * Throws if `docker ps` exits non-zero.
+ */
 async function getComposeImages(docker: string): Promise<ImageCheck[]> {
   const proc = Bun.spawn([docker, "ps", "-a", "--format", "{{json .}}"], {
     stdout: "pipe",
     stderr: "ignore",
   });
-  const output = await new Response(proc.stdout).text();
-  await proc.exited;
+  const [output, exitCode] = await Promise.all([
+    new Response(proc.stdout).text(),
+    proc.exited,
+  ]);
+
+  if (exitCode !== 0) {
+    throw new Error(`docker ps exited with code ${exitCode}`);
+  }
 
   const seen = new Set<string>();
   const checks: ImageCheck[] = [];
@@ -70,32 +79,61 @@ async function getComposeImages(docker: string): Promise<ImageCheck[]> {
 }
 
 /** Local digest for the image, e.g. "sha256:abc…". Returns null if unavailable. */
-async function getLocalDigest(docker: string, image: string): Promise<string | null> {
+async function getLocalDigest(docker: string, image: string, signal: AbortSignal): Promise<string | null> {
+  if (signal.aborted) return null;
+
   const proc = Bun.spawn(
     [docker, "image", "inspect", image, "--format", "{{index .RepoDigests 0}}"],
     { stdout: "pipe", stderr: "ignore" },
   );
-  const out = (await new Response(proc.stdout).text()).trim();
-  await proc.exited;
+
+  const onAbort = () => proc.kill();
+  signal.addEventListener("abort", onAbort, { once: true });
+
+  const [out] = await Promise.all([
+    new Response(proc.stdout).text(),
+    proc.exited,
+  ]);
+
+  signal.removeEventListener("abort", onAbort);
+
+  if (signal.aborted) return null;
+
   // format: "nginx@sha256:abc" → "sha256:abc"
-  const at = out.indexOf("@");
-  return at >= 0 ? out.slice(at + 1) : null;
+  const trimmed = out.trim();
+  const at = trimmed.indexOf("@");
+  return at >= 0 ? trimmed.slice(at + 1) : null;
 }
 
 /**
  * Remote manifest digest via `docker manifest inspect --verbose`.
  * Returns null if the command fails (e.g. auth required, network error).
  */
-async function getRemoteDigest(docker: string, image: string): Promise<string | null> {
+async function getRemoteDigest(docker: string, image: string, signal: AbortSignal): Promise<string | null> {
+  if (signal.aborted) return null;
+
   const proc = Bun.spawn([docker, "manifest", "inspect", "--verbose", image], {
     stdout: "pipe",
     stderr: "ignore",
   });
-  const out = (await new Response(proc.stdout).text()).trim();
-  await proc.exited;
-  if (!out) return null;
+
+  const onAbort = () => proc.kill();
+  signal.addEventListener("abort", onAbort, { once: true });
+
+  const [out] = await Promise.all([
+    new Response(proc.stdout).text(),
+    proc.exited,
+  ]);
+
+  signal.removeEventListener("abort", onAbort);
+
+  if (signal.aborted) return null;
+
+  const trimmed = out.trim();
+  if (!trimmed) return null;
+
   try {
-    const json = JSON.parse(out) as unknown;
+    const json = JSON.parse(trimmed) as unknown;
     // Single manifest
     if (json && typeof json === "object" && !Array.isArray(json)) {
       const j = json as Record<string, unknown>;
@@ -139,7 +177,14 @@ export function updateCheckPlugin(jwtSecret: string) {
         return;
       }
 
-      const checks = await getComposeImages(docker);
+      let checks: ImageCheck[];
+      try {
+        checks = await getComposeImages(docker);
+      } catch (e) {
+        yield sse({ data: { error: e instanceof Error ? e.message : "Failed to list containers" } satisfies UpdateCheckMsg });
+        return;
+      }
+
       if (checks.length === 0) {
         yield sse({ data: { done: { found: 0 } } satisfies UpdateCheckMsg });
         return;
@@ -152,15 +197,16 @@ export function updateCheckPlugin(jwtSecret: string) {
 
         yield sse({ data: { checking: { stack, image } } satisfies UpdateCheckMsg });
 
-        // Run both fetches concurrently; abort-race so we don't hang forever
+        // Run both fetches concurrently; abort-race so we don't hang forever.
+        // getLocalDigest/getRemoteDigest both accept signal and kill their subprocess on abort.
         const abortPromise = new Promise<null>(resolve =>
           signal.addEventListener("abort", () => resolve(null), { once: true }),
         );
 
         const checkResult = await Promise.race([
           Promise.all([
-            getLocalDigest(docker, image),
-            getRemoteDigest(docker, image),
+            getLocalDigest(docker, image, signal),
+            getRemoteDigest(docker, image, signal),
           ]).then(([local, remote]) => ({ local, remote })),
           abortPromise,
         ]);

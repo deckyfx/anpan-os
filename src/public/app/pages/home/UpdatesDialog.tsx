@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { CheckSquare, Square, Loader2, CheckCircle2, XCircle } from "lucide-react";
 import { Dialog } from "../../components/Dialog";
 import { api } from "../../lib/api";
@@ -46,6 +46,9 @@ export function UpdatesDialog({ open, onClose, onUpdated }: {
   const [currentLog, setCurrentLog] = useState<string[]>([]);
   const [updateResults, setUpdateResults] = useState<UpdateResult[]>([]);
 
+  // AbortController for the currently-running per-stack pull (outside state to avoid re-renders)
+  const stackAbortRef = useRef<AbortController | null>(null);
+
   const logRef = useRef<HTMLPreElement | null>(null);
 
   // Reset to select phase when opened
@@ -66,6 +69,12 @@ export function UpdatesDialog({ open, onClose, onUpdated }: {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
   }, [currentLog]);
 
+  // Abort current stack and clear queue → useEffect detects empty queue → phase goes to "done"
+  const cancelAll = useCallback(() => {
+    stackAbortRef.current?.abort();
+    setQueue([]);
+  }, []);
+
   // Run sequential updates when queue changes
   useEffect(() => {
     if (phase !== "updating" || updateQueue.length === 0 || current !== null) return;
@@ -81,15 +90,29 @@ export function UpdatesDialog({ open, onClose, onUpdated }: {
     setQueue(rest);
 
     void (async () => {
+      const abort = new AbortController();
+      stackAbortRef.current = abort;
+      // 5-minute hard guard so a hung SSE stream can't block the queue forever
+      const timeoutId = setTimeout(() => abort.abort(), 5 * 60 * 1000);
+
       try {
-        const { data, error: err } = await api.api.compose.stacks({ name: next }).pull.post();
+        // Pass AbortSignal to the fetch so we can cancel the SSE stream
+        const { data, error: err } = await (
+          (api.api.compose.stacks({ name: next }).pull.post as (body?: unknown, opts?: unknown) => Promise<{
+            data: AsyncIterable<{ data: SSEMsg }> | null;
+            error: unknown;
+          }>)(undefined, { fetch: { signal: abort.signal } })
+        );
+
         if (err || !data) {
-          const msg = err ? ((err.value as { error?: string })?.error ?? "Request failed") : "No data";
+          const msg = err ? ((err as { value?: { error?: string } }).value?.error ?? "Request failed") : "No data";
           setUpdateResults(prev => [...prev, { stack: next, success: false, error: msg }]);
           setCurrent(null);
           return;
         }
+
         for await (const event of data as AsyncIterable<{ data: SSEMsg }>) {
+          if (abort.signal.aborted) break;
           const m = event.data as SSEMsg;
           if (m.log !== undefined) {
             setCurrentLog(prev => [...prev, m.log!]);
@@ -104,13 +127,18 @@ export function UpdatesDialog({ open, onClose, onUpdated }: {
             return;
           }
         }
-        // Stream ended without ok/error
-        setUpdateResults(prev => [...prev, { stack: next, success: false, error: "Stream ended unexpectedly" }]);
+
+        // Stream ended without ok/error (includes abort/timeout)
+        const endMsg = abort.signal.aborted ? "Cancelled" : "Stream ended unexpectedly";
+        setUpdateResults(prev => [...prev, { stack: next, success: false, error: endMsg }]);
         setCurrent(null);
       } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        setUpdateResults(prev => [...prev, { stack: next, success: false, error: msg }]);
+        const errorMsg = abort.signal.aborted ? "Cancelled" : (e instanceof Error ? e.message : String(e));
+        setUpdateResults(prev => [...prev, { stack: next, success: false, error: errorMsg }]);
         setCurrent(null);
+      } finally {
+        clearTimeout(timeoutId);
+        stackAbortRef.current = null;
       }
     })();
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -270,9 +298,13 @@ export function UpdatesDialog({ open, onClose, onUpdated }: {
     </div>
   );
 
+  // Cancel aborts the current pull and clears the remaining queue; dialog transitions to "done"
   const updatingFooter = (
-    <button disabled className="px-4 py-2 text-sm text-gray-500 cursor-not-allowed">
-      Updating…
+    <button
+      onClick={cancelAll}
+      className="px-4 py-2 text-sm text-gray-400 hover:text-white transition-colors"
+    >
+      Cancel
     </button>
   );
 
@@ -322,7 +354,7 @@ export function UpdatesDialog({ open, onClose, onUpdated }: {
         phase === "updating" ? "Updating Stacks…" :
                                "Update Complete"
       }
-      onClose={phase === "updating" ? () => {} : handleClose}
+      onClose={phase === "updating" ? cancelAll : handleClose}
       disableBackdropClose={phase === "updating"}
       size="md"
       footer={
