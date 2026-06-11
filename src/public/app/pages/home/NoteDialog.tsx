@@ -45,11 +45,12 @@ function NoteDialogInner({ target, onClose, onSaved }: {
     <Dialog
       open
       title={`Note — ${target.label}`}
-      onClose={onClose}
+      onClose={busy ? () => {} : onClose}
+      disableBackdropClose={busy}
       size="md"
       footer={
         <>
-          <button onClick={onClose} className="px-4 py-2 text-sm text-gray-400 hover:text-white transition-colors">
+          <button onClick={busy ? () => {} : onClose} disabled={busy} className="px-4 py-2 text-sm text-gray-400 hover:text-white transition-colors disabled:opacity-50">
             Cancel
           </button>
           <button

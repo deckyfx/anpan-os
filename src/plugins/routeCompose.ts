@@ -205,7 +205,7 @@ export function composePlugin(jwtSecret: string) {
         try {
           // Phase 1: pull images
           const pullProc = Bun.spawn(
-            [docker!, "compose", "pull", "--progress", "plain"],
+            [docker!, "compose", "pull"],
             { cwd: dir, stdout: "pipe", stderr: "pipe" },
           );
           const [, , pullExit] = await Promise.all([
