@@ -3,6 +3,7 @@ import { useStacksStore }   from "../stores/stacksStore";
 import { useAuthStore }     from "../stores/authStore";
 import { useBookmarkStore } from "../stores/bookmarkStore";
 import { useToastStore }    from "../stores/toastStore";
+import { useUpdateCheckStore } from "../stores/updateCheckStore";
 
 import { TopBar }            from "./home/TopBar";
 import { BottomBar }         from "./home/BottomBar";
@@ -17,6 +18,7 @@ import { GuidedStackDialog } from "./home/GuidedStackDialog";
 import { DeleteStackDialog } from "./home/DeleteStackDialog";
 import { PullUpdateDialog }     from "./home/PullUpdateDialog";
 import { MigrateCasaosDialog }  from "./home/MigrateCasaosDialog";
+import { UpdatesDialog }        from "./home/UpdatesDialog";
 import { BookmarkDialog }    from "./home/BookmarkDialog";
 import { ContainerLogsDialog }  from "./home/ContainerLogsDialog";
 import { MountPickerDialog }    from "./home/MountPickerDialog";
@@ -64,9 +66,11 @@ export function HomePage({ username, onLogout, onNavigate }: {
   } = useBookmarkStore();
 
   // Lazy-init: starts polling, loads stacks + stats + bookmarks. Runs once per mount.
+  // Also kicks off a background docker image update check.
   useEffect(() => {
     initialize();
     void loadBookmarks();
+    useUpdateCheckStore.getState().startCheck();
   }, []);
 
   const [filter, setFilter] = useState("");
@@ -350,6 +354,12 @@ export function HomePage({ username, onLogout, onNavigate }: {
         logs={installLogText}
         loading={installLogLoading}
         onClose={() => useStacksStore.setState({ installLogStack: null })}
+      />
+
+      <UpdatesDialog
+        open={useUpdateCheckStore(s => s.dialogOpen)}
+        onClose={() => useUpdateCheckStore.getState().closeDialog()}
+        onUpdated={() => void loadStacks()}
       />
 
       {mountPickerStack && (
