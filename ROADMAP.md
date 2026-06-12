@@ -1,5 +1,21 @@
 # Roadmap
 
+## v0.7.0 — 2026-06-12
+
+### New features
+- **Docker image update checker** — one-click check of all running and stopped compose containers for available image updates; compares local vs remote digest via `docker manifest inspect`
+- **Per-stack update badge** — amber ↑ badge on the stack tile when a newer image is available
+- **TopBar "Updates" button** — live spinner while checking; click to cancel; amber count badge opens the updates dialog when results are ready; auto-check runs on dashboard mount
+- **Mass update dialog** — select which stacks to update, then pull+redeploy them sequentially; live log stream per stack; shows success/failure summary when done; Cancel button aborts the current pull and clears the remaining queue
+- **Update check SSE endpoint** — `GET /api/docker/update-check`; streams `checking`, `result`, and `done` events; cancels any previous check when a new request arrives; surfaces docker errors as SSE error events
+
+### Improvements
+- Update checker kills spawned `docker inspect` / `docker manifest inspect` subprocesses immediately on abort — no orphaned processes
+- 5-minute per-stack timeout guard in the mass update dialog prevents a hung SSE stream from blocking the queue indefinitely
+- `checking` spinner state clears correctly if the SSE stream ends without an explicit `done`/`error` message
+
+---
+
 ## v0.6.1 — 2026-06-05
 
 ### New features
