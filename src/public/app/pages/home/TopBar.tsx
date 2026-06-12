@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import { Menu, X, LayoutGrid, FolderOpen, Activity, Network, LogOut, KeyRound, RotateCcw, PowerOff, Lock, Container, ShoppingBag } from "lucide-react";
+import { Menu, X, LayoutGrid, FolderOpen, Activity, Network, LogOut, KeyRound, RotateCcw, PowerOff, Lock, Container, ShoppingBag, RefreshCw } from "lucide-react";
 import { api } from "../../lib/api";
 import { DoctorDialog }   from "../../components/DoctorDialog";
 import { VersionDialog }  from "../../components/VersionDialog";
@@ -10,6 +10,7 @@ import { browserSupportsWebAuthn } from "@simplewebauthn/browser";
 import { useSystemStore } from "../../stores/systemStore";
 import { useToastStore } from "../../stores/toastStore";
 import { useAuthStore } from "../../stores/authStore";
+import { useUpdateCheckStore } from "../../stores/updateCheckStore";
 
 interface NavItem {
   icon: React.ReactNode;
@@ -54,6 +55,10 @@ export function TopBar({ username, version, hasPasskey, onLogout, onNavigate, on
   const { isRoot, hasBin } = useSystemStore();
   const canPowerCtl = isRoot && hasBin("systemctl");
   const passkeyEnabled = useAuthStore(s => s.loginMethods.passkey);
+
+  const { checking, checkingStack, startCheck, cancelCheck, openDialog, updatesCount } =
+    useUpdateCheckStore();
+  const updateCount = updatesCount();
 
   const [open, setOpen]                     = useState(false);
   const [pos,  setPos]                      = useState({ left: 0, top: 0 });
@@ -172,6 +177,35 @@ export function TopBar({ username, version, hasPasskey, onLogout, onNavigate, on
         {open ? <X size={14} /> : <Menu size={14} />}
         Menu
       </button>
+
+      {/* Check Updates button */}
+      <div className="ml-3 relative shrink-0">
+        <button
+          onClick={() => checking ? cancelCheck() : startCheck()}
+          title={checking
+            ? (checkingStack ? `Checking ${checkingStack}… (click to cancel)` : "Checking… (click to cancel)")
+            : "Check docker images for updates"
+          }
+          className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-lg transition-colors text-gray-400 hover:text-white hover:bg-gray-800"
+        >
+          {checking
+            ? <span className="w-3.5 h-3.5 border-2 border-sky-400 border-t-transparent rounded-full animate-spin shrink-0" />
+            : <RefreshCw size={14} />
+          }
+          Updates
+        </button>
+
+        {/* Update count badge — click to open dialog */}
+        {updateCount > 0 && !checking && (
+          <button
+            onClick={openDialog}
+            title={`${updateCount} stack${updateCount !== 1 ? "s" : ""} have image updates available`}
+            className="absolute -top-1 -right-1 min-w-4 h-4 px-1 rounded-full bg-amber-500 text-black text-[9px] font-bold flex items-center justify-center hover:bg-amber-400 transition-colors leading-none"
+          >
+            {updateCount}
+          </button>
+        )}
+      </div>
 
       {/* Version badge — far right */}
       <button

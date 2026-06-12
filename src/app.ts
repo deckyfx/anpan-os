@@ -11,6 +11,7 @@ import { casaosPlugin } from "./plugins/routeCasaos";
 import { portsPlugin }      from "./plugins/routePorts";
 import { bookmarksPlugin }  from "./plugins/routeBookmarks";
 import { appStorePlugin }   from "./plugins/routeAppStore";
+import { updateCheckPlugin } from "./plugins/routeUpdateCheck";
 
 function errorPage(title: string, detail: string, stack?: string): Response {
   const rows = stack
@@ -77,6 +78,7 @@ export function createApp(jwtSecret: string) {
     .use(portsPlugin(jwtSecret))
     .use(bookmarksPlugin(jwtSecret))
     .use(appStorePlugin(jwtSecret))
+    .use(updateCheckPlugin(jwtSecret))
     .get("/api/health", () => ({ status: "ok" }));
 }
 

@@ -3,11 +3,12 @@ import {
   Play, Square, RotateCw, ScrollText, StickyNote,
   Settings2, FileDown, PackagePlus, Trash2,
   MoreVertical, GripVertical, ExternalLink,
-  Pencil, RefreshCcw, ArrowRightLeft, HardDrive,
+  Pencil, RefreshCcw, ArrowRightLeft, HardDrive, ArrowUp,
 } from "lucide-react";
 import type { ComposeOrigin, Stack, StackAction } from "./types";
 import { buildLaunchUrl, stackStateColor } from "./utils";
 import { useSystemStore } from "../../stores/systemStore";
+import { useUpdateCheckStore } from "../../stores/updateCheckStore";
 
 const ORIGIN_LABEL: Record<NonNullable<ComposeOrigin>, string> = {
   managed: "⚙ Managed",
@@ -123,8 +124,10 @@ export interface StackTileProps {
  * Grid tile representing a single Docker Compose stack.
  *
  * Shows the app icon, name, service count, launch link, and origin badge.
- * A colored status badge (green/yellow/red) is always visible at the top-right
- * corner; the action menu button overlays it on hover.
+ * A colored status dot overlays the bottom-right of the icon; the action menu
+ * button sits exclusively at top-right and is revealed on hover.
+ * An amber update badge overlays the top-left of the icon when an image update
+ * is available for this stack.
  * Supports drag-and-drop reordering when `dragEnabled` is true.
  */
 export function StackTile({
@@ -133,10 +136,11 @@ export function StackTile({
   onDragStart, onDragOver, onDrop, onDragEnd,
 }: StackTileProps) {
   const [menuOpen, setMenuOpen] = useState(false);
-  const launchUrl = buildLaunchUrl(stack);
-  const title     = stack.meta?.title ?? stack.name;
-  const icon      = stack.meta?.icon ?? stack.icon ?? null;
-  const initial   = stack.name.charAt(0).toUpperCase();
+  const launchUrl   = buildLaunchUrl(stack);
+  const title       = stack.meta?.title ?? stack.name;
+  const icon        = stack.meta?.icon ?? stack.icon ?? null;
+  const initial     = stack.name.charAt(0).toUpperCase();
+  const hasUpdate   = useUpdateCheckStore(s => s.hasUpdateFor(stack.name));
 
   return (
     <div
@@ -163,11 +167,30 @@ export function StackTile({
           </div>
         )}
 
-        <div className="w-16 h-16 rounded-2xl bg-gray-800 border border-gray-700 flex items-center justify-center overflow-hidden">
-          {icon
-            ? <img src={icon} alt={title} className="w-full h-full object-contain p-1" onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }} />
-            : <span className="text-3xl font-bold text-gray-200">{initial}</span>
-          }
+        {/* Icon with status dot (bottom-right) and update badge (top-left) overlaid */}
+        <div className="relative w-16 h-16 shrink-0">
+          <div className="w-full h-full rounded-2xl bg-gray-800 border border-gray-700 flex items-center justify-center overflow-hidden">
+            {icon
+              ? <img src={icon} alt={title} className="w-full h-full object-contain p-1" onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }} />
+              : <span className="text-3xl font-bold text-gray-200">{initial}</span>
+            }
+          </div>
+
+          {/* Status dot — bottom-right of icon, always visible */}
+          <span
+            title={`Status: ${stack.state}`}
+            className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-gray-900 ${stackStateColor[stack.state]} ${stack.state === "partial" ? "animate-pulse" : ""}`}
+          />
+
+          {/* Update available badge — top-left of icon */}
+          {hasUpdate && (
+            <span
+              title="Image update available"
+              className="absolute -top-1 -left-1 w-4 h-4 rounded-full bg-amber-500 border-2 border-gray-900 flex items-center justify-center"
+            >
+              <ArrowUp size={8} className="text-black" strokeWidth={3} />
+            </span>
+          )}
         </div>
 
         <div className="w-full text-center space-y-1">
@@ -196,13 +219,7 @@ export function StackTile({
         </div>
       </div>
 
-      {/* Status badge — top-right corner, always visible */}
-      <span
-        title={`Status: ${stack.state}`}
-        className={`absolute top-2 right-2 w-3.5 h-3.5 rounded-full border-2 border-gray-900 ${stackStateColor[stack.state]} ${stack.state === "partial" ? "animate-pulse" : ""}`}
-      />
-
-      {/* Menu button — overlays badge on hover */}
+      {/* Menu button — top-right corner, revealed on hover */}
       <button
         className="absolute top-2 right-2 text-gray-600 hover:text-gray-200 opacity-0 group-hover:opacity-100 transition-opacity w-6 h-6 flex items-center justify-center rounded-lg hover:bg-gray-700"
         onClick={(e) => { e.stopPropagation(); setMenuOpen((v) => !v); }}
