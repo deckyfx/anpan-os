@@ -1,12 +1,13 @@
 import { create } from "zustand";
 import { api } from "../lib/api";
-import type { Stack, SystemStats, SortMode, StackAction } from "../pages/home/types";
+import type { Stack, SystemStats, SortMode, StackAction, DockerSummary } from "../pages/home/types";
 import { useToastStore } from "./toastStore";
 import { useFileStore } from "./fileStore";
 
 interface StacksState {
   stacks:  Stack[];
   stats:   SystemStats | null;
+  summary: DockerSummary | null;
   version: string;
 
   sortMode:   SortMode;
@@ -36,6 +37,7 @@ interface StacksState {
   initialize:      () => void;
   loadStacks:      () => Promise<void>;
   loadStats:       () => Promise<void>;
+  loadSummary:     () => Promise<void>;
   setSortMode:     (mode: SortMode) => void;
   setDragSrcIdx:   (idx: number | null) => void;
   setDragOverIdx:  (idx: number | null) => void;
@@ -56,6 +58,7 @@ const POLL_INTERVAL = 30_000;
 export const useStacksStore = create<StacksState>((set, get) => ({
   stacks:       [],
   stats:        null,
+  summary:      null,
   version:      "…",
   sortMode:     "custom",
   dragSrcIdx:   null,
@@ -82,6 +85,7 @@ export const useStacksStore = create<StacksState>((set, get) => ({
 
     void get().loadStacks();
     void get().loadStats();
+    void get().loadSummary();
 
     api.api.system.info.get()
       .then(({ data }) => {
@@ -93,6 +97,7 @@ export const useStacksStore = create<StacksState>((set, get) => ({
     setInterval(() => {
       void get().loadStacks();
       void get().loadStats();
+      void get().loadSummary();
     }, POLL_INTERVAL);
   },
 
@@ -108,6 +113,15 @@ export const useStacksStore = create<StacksState>((set, get) => ({
       const { data } = await api.api.system.stats.get();
       if (data) set({ stats: data as SystemStats });
     } catch { /* network error — keep last known stats */ }
+  },
+
+  loadSummary: async () => {
+    try {
+      const { data } = await api.api.docker.summary.get();
+      // A 502 body carries { error }, not a summary — keep the last good one rather than
+      // blanking the bar because one poll hit a busy daemon.
+      if (data && !("error" in (data as object))) set({ summary: data as DockerSummary });
+    } catch { /* network error — keep last known summary */ }
   },
 
   setSortMode:     (sortMode) => set({ sortMode }),

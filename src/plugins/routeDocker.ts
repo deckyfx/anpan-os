@@ -241,5 +241,12 @@ export function dockerPlugin(jwtSecret: string) {
       const result = await DockerClient.getInfo();
       if (!result.ok) { set.status = 502; return { error: result.error }; }
       return result.data;
+    })
+
+    /** Host-wide totals for the dashboard summary bar. */
+    .get("/summary", async ({ set }) => {
+      const result = await DockerClient.getSummary();
+      if (!result.ok) { set.status = 502; return { error: result.error }; }
+      return result.data;
     });
 }
