@@ -108,6 +108,29 @@ export function HomePage({ username, onLogout, onNavigate }: {
     );
   }, [bookmarks, filter]);
 
+  // ── Section counts ────────────────────────────────────────────────────────
+  //
+  // Counted from the displayed lists, not the full ones, so the numbers always describe
+  // what is actually on screen while a filter is active.
+
+  const stackCounts = useMemo(() => {
+    let running = 0, partial = 0, stopped = 0;
+    for (const s of displayedStacks) {
+      if (s.state === "running")      running++;
+      else if (s.state === "partial") partial++;
+      else                            stopped++;
+    }
+    return { running, partial, stopped };
+  }, [displayedStacks]);
+
+  // "partial" (some services up, some down) is omitted when zero — it is the uncommon
+  // case, and naming it every time would crowd the far more useful running/stopped pair.
+  const stackCountLabel = [
+    `${stackCounts.running} running`,
+    ...(stackCounts.partial > 0 ? [`${stackCounts.partial} partial`] : []),
+    `${stackCounts.stopped} stopped`,
+  ].join(" · ");
+
   // ── Bookmark note target ──────────────────────────────────────────────────
 
   const bookmarkNoteTarget: NoteTarget | null = noteTarget
@@ -192,6 +215,9 @@ export function HomePage({ username, onLogout, onNavigate }: {
           {/* ── Docker Stacks section ─────────────────────────────────────── */}
           <p className="text-[10px] text-gray-600 font-semibold uppercase tracking-widest mb-3">
             Docker Stacks
+            <span className="ml-2 text-gray-500 normal-case tracking-normal font-normal">
+              ({stackCountLabel})
+            </span>
           </p>
 
           <div className="grid grid-cols-[repeat(auto-fill,minmax(160px,1fr))] gap-4 mb-8">
@@ -250,6 +276,9 @@ export function HomePage({ username, onLogout, onNavigate }: {
           {/* ── External Apps section ─────────────────────────────────────── */}
           <p className="text-[10px] text-gray-600 font-semibold uppercase tracking-widest mb-3">
             External Apps
+            <span className="ml-2 text-gray-500 normal-case tracking-normal font-normal">
+              ({displayedBookmarks.length} {displayedBookmarks.length === 1 ? "link" : "links"})
+            </span>
           </p>
 
           <div className="grid grid-cols-[repeat(auto-fill,minmax(160px,1fr))] gap-4">
