@@ -180,22 +180,30 @@ export function ComposeSourcesDialog({ open, onClose }: {
   const [showAll, setShowAll] = useState(false);
   const [error,   setError]   = useState("");
 
+  // `load` runs from the open/showAll effect, the Re-scan button and onRepaired, so two
+  // calls can be in flight at once and resolve out of order. Every state write is gated on
+  // still being the newest request, otherwise a slow earlier scan overwrites a fresh one.
+  const requestIdRef = useRef(0);
+
   const load = async (all: boolean) => {
+    const requestId = ++requestIdRef.current;
     setLoading(true);
     setError("");
     try {
       const { data, error: err } = await api.api.compose["compose-sources"].get(
         all ? { query: { all: "1" } } : { query: {} },
       );
+      if (requestId !== requestIdRef.current) return;
       if (err) throw new Error(String(err.status));
       const payload = data as { stacks?: ComposeSourceReport[]; error?: string } | null;
       if (payload?.error) setError(payload.error);
       setReports(payload?.stacks ?? []);
     } catch (e) {
+      if (requestId !== requestIdRef.current) return;
       setError(e instanceof Error ? e.message : "Could not load compose sources");
       setReports([]);
     }
-    setLoading(false);
+    if (requestId === requestIdRef.current) setLoading(false);
   };
 
   useEffect(() => {

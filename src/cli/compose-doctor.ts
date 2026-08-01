@@ -5,6 +5,7 @@ import {
   scanComposeSources,
   adoptComposeFile,
   buildComposeSourceReport,
+  composeFileExistsChecker,
   findOrphanServices,
 } from "../lib/compose-source";
 import type { ComposeSourceReport } from "../lib/compose-source";
@@ -56,7 +57,6 @@ export async function runComposeDoctor(showAll: boolean): Promise<never> {
 
   const shown = showAll ? reports : reports.filter(r => r.needsRepair);
   for (const r of shown) printReport(r);
-  if (shown.length === 0) console.log(`  ${GREEN}All stacks point at the managed compose folder.${RESET}`);
 
   const broken   = reports.filter(r => r.needsRepair);
   const external = reports.filter(r => r.status === "external");
@@ -98,7 +98,10 @@ export async function runComposeRepair(names: string[], all: boolean): Promise<n
   if (all) {
     targets = (await scanComposeSources()).filter(r => r.needsRepair);
   } else {
-    const requested = await Promise.all(names.map(buildComposeSourceReport));
+    // Wrapped rather than passed by reference: Array.map would hand the index in as the
+    // `exists` argument. One memo shared across the batch, as in scanComposeSources.
+    const exists    = composeFileExistsChecker();
+    const requested = await Promise.all(names.map(n => buildComposeSourceReport(n, exists)));
     // Recreating a healthy stack only costs it a restart — skip rather than churn.
     for (const r of requested.filter(r => !r.needsRepair)) {
       console.log(`${DIM}skipping ${r.stack} — already ${r.status}${RESET}`);

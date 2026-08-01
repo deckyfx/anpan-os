@@ -20,7 +20,7 @@ import { join } from "node:path";
 import { mkdirSync } from "node:fs";
 import { config } from "../config";
 import { bins } from "./commands";
-import { DockerClient } from "./docker";
+import { DockerClient, normalizeComposePath } from "./docker";
 
 /**
  * How a stack's containers relate to the managed compose file.
@@ -75,6 +75,29 @@ export async function composeFileExists(path: string): Promise<boolean> {
   return result.exitCode === 0;
 }
 
+/**
+ * An existence checker that asks about each distinct path at most once.
+ *
+ * {@link composeFileExists} spawns `sudo -n test -f` whenever the direct check fails, and a
+ * full scan queries the same handful of paths repeatedly — once per config file per
+ * container, across every project in parallel. Memoising the promise (not the result)
+ * collapses concurrent callers onto one subprocess.
+ *
+ * Scoped per scan rather than module-global on purpose: a cached "missing" must not
+ * outlive the scan that observed it, or repair would keep seeing a stale answer for a
+ * file it just wrote.
+ */
+export function composeFileExistsChecker(): (path: string) => Promise<boolean> {
+  const cache = new Map<string, Promise<boolean>>();
+  return path => {
+    const hit = cache.get(path);
+    if (hit) return hit;
+    const pending = composeFileExists(path);
+    cache.set(path, pending);
+    return pending;
+  };
+}
+
 /** The managed compose path for a stack, under the configured compose folder. */
 export function managedComposePath(name: string): string {
   return join(config.composeFolder, name, "docker-compose.yml");
@@ -86,24 +109,31 @@ export function managedComposePath(name: string): string {
  * A stack is healthy when all its containers carry the managed path; see
  * {@link ComposeSourceStatus} for how the other states arise.
  */
-export async function buildComposeSourceReport(name: string): Promise<ComposeSourceReport> {
+export async function buildComposeSourceReport(
+  name: string,
+  exists: (path: string) => Promise<boolean> = composeFileExists,
+): Promise<ComposeSourceReport> {
   const expected = managedComposePath(name);
   const result   = await DockerClient.listProjectComposeSources(name);
   const sources  = result.ok ? result.data : [];
 
+  // Compare canonical paths — the label holds a resolved path, `expected` is built by
+  // join(), and the two differ whenever the compose folder route contains a symlink.
+  const expectedKey = normalizeComposePath(expected);
+
   const containers = await Promise.all(
     sources.map(async s => {
-      const matches  = s.configFiles.includes(expected);
+      const matches  = s.configFiles.map(normalizeComposePath).includes(expectedKey);
       const dangling = s.configFiles.length > 0
-        && !(await Promise.all(s.configFiles.map(composeFileExists))).some(Boolean);
+        && !(await Promise.all(s.configFiles.map(exists))).some(Boolean);
       return { ...s, matches, dangling };
     }),
   );
 
   const labelled       = containers.filter(c => c.configFiles.length > 0);
-  const distinctPaths  = new Set(labelled.flatMap(c => c.configFiles));
-  const foreignPaths   = [...distinctPaths].filter(p => p !== expected);
-  const expectedExists = await composeFileExists(expected);
+  const distinctPaths  = new Set(labelled.flatMap(c => c.configFiles).map(normalizeComposePath));
+  const foreignPaths   = [...distinctPaths].filter(p => p !== expectedKey);
+  const expectedExists = await exists(expected);
 
   const status: ComposeSourceStatus =
     labelled.length === 0            ? "unknown"
@@ -130,7 +160,9 @@ export async function scanComposeSources(): Promise<ComposeSourceReport[]> {
   const names = result.data
     .map(s => s.name)
     .filter(n => /^[a-zA-Z0-9_-]+$/.test(n));
-  return Promise.all(names.map(buildComposeSourceReport));
+  // One memo for the whole scan: projects overwhelmingly reference the same few paths.
+  const exists = composeFileExistsChecker();
+  return Promise.all(names.map(n => buildComposeSourceReport(n, exists)));
 }
 
 /**
@@ -185,6 +217,19 @@ export async function adoptComposeFile(
   report: ComposeSourceReport,
 ): Promise<{ ok: true; adoptedFrom: string | null } | { ok: false; error: string }> {
   if (report.expectedExists) return { ok: true, adoptedFrom: null };
+
+  // A split stack has no single donor that describes it. Picking one would write a compose
+  // file covering only part of the project; repair then aborts on the orphan check, but the
+  // partial file is already on disk and the stack now looks adopted (`expectedExists`), so
+  // the next edit or pull would deploy from it and delete everything it omits.
+  if (report.foreignPaths.length > 1) {
+    return {
+      ok: false,
+      error: `Stack "${report.stack}" is split across ${report.foreignPaths.length} compose files: `
+        + `${report.foreignPaths.join(", ")}. Merge them into ${report.expected} by hand, `
+        + `then repair.`,
+    };
+  }
 
   const donor = report.foreignPaths[0];
   if (!donor) return { ok: false, error: "No compose file found for this stack — nothing to adopt" };

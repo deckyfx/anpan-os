@@ -9,10 +9,18 @@
 ### New features
 - **Compose source doctor** — reports, per stack, which compose file each container was actually created from, flagging containers anchored to a foreign or deleted path
 - **Compose repair** — re-anchors a stack onto the managed compose folder by recreating its containers; adopts a stray compose file into the managed folder when the managed copy is missing. Volumes and networks are preserved; containers restart
-- **Orphan guard on repair** — repair refuses to run when `--remove-orphans` would delete a running service that the managed compose file does not define, naming the services that must be merged first
+- **Orphan guard on repair *and* migration** — both refuse to run when `--remove-orphans` would delete a running service that the compose file does not define, naming the services that must be merged first
+- **Split stacks are never partially adopted** — when a stack's containers come from two or more compose files, adoption refuses and lists every path instead of copying one arbitrary file into the managed folder as if it described the whole stack
+- **External stacks require explicit intent** — repairing a stack wholly owned by another tool would take it over and restart every container, so it now needs `?adopt=1` rather than being reachable by stack name alone
 - **Doctor dialog "Compose paths" check** — new row in System Doctor; opens a Compose Sources dialog listing drifted stacks, their containers, and the offending paths, with repair available per stack
 - **`GET /api/compose/compose-sources`** and **`POST /api/compose/stacks/:name/repair`** (SSE log stream) back the dialog
 - **CLI: `--compose-doctor`** (add `--all` to include healthy stacks) and **`--compose-repair <stack…> | --all`** for the same workflow from a terminal
+
+### Robustness
+- Compose paths are compared in canonical form — a symlinked or non-canonical compose folder no longer reports every healthy stack as drifted and force-recreates on every deploy
+- Repair and migration kill the `docker compose` subprocess when the client disconnects; previously the stream producers suspended forever once the buffer filled, leaking the subprocess, its pipes and the log writer for the lifetime of the server
+- Compose Sources dialog ignores out-of-order responses, so a slow earlier scan can no longer overwrite a newer one
+- A full scan checks each distinct compose path once instead of spawning a `sudo -n test -f` per container
 
 ### Tooling
 - **`install-local.sh`** — builds the current working tree and installs it over the systemd service, matching the layout `install.sh` produces. For testing changes under a real production run (root, systemd, real Docker socket) instead of `bun run dev`. Supports `--skip-build`, `--no-typecheck`, `--no-follow`; refuses to run as root; verifies the service is actually active afterwards and dumps the journal if not

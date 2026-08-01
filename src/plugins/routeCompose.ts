@@ -379,8 +379,13 @@ export function composePlugin(jwtSecret: string) {
      * relabelled against the managed path. The project name is unchanged, so named
      * volumes and networks are reused — but containers ARE recreated, which means a brief
      * restart and the loss of anything written to a container's writable layer.
+     *
+     * Only stacks that actually need repair are accepted. An `external` stack — one wholly
+     * owned by another tool — is a valid state, not a fault, and repairing it would copy its
+     * compose file into our folder and restart every container. That takes `?adopt=1`, an
+     * explicit statement of intent, rather than being reachable by stack name alone.
      */
-    .post("/stacks/:name/repair", async function*({ params }) {
+    .post("/stacks/:name/repair", async function*({ params, query, request }) {
       const { name } = params;
       if (!STACK_NAME_RE.test(name)) {
         yield sse({ data: { error: "Invalid stack name" } satisfies SSEMsg });
@@ -393,7 +398,21 @@ export function composePlugin(jwtSecret: string) {
         return;
       }
 
-      const report  = await buildComposeSourceReport(name);
+      const report = await buildComposeSourceReport(name);
+
+      // Deliberately narrower than "reject whenever needsRepair is false": adopting an
+      // external stack on purpose is a real workflow, so it stays available behind ?adopt=1
+      // instead of being refused outright. `ok` and `unknown` have nothing to repair.
+      const mayAdoptExternal = report.status === "external" && query.adopt === "1";
+      if (!report.needsRepair && !mayAdoptExternal) {
+        yield sse({ data: { error: report.status === "external"
+          ? `Stack "${name}" is managed outside anpan-os (${report.foreignPaths.join(", ")}). `
+            + `Repairing would take it over and restart every container — resend with ?adopt=1 to confirm.`
+          : `Stack "${name}" reports status "${report.status}" and does not need repair.`
+        } satisfies SSEMsg });
+        return;
+      }
+
       const adopted = await adoptComposeFile(report);
       if (!adopted.ok) {
         yield sse({ data: { error: adopted.error } satisfies SSEMsg });
@@ -417,13 +436,20 @@ export function composePlugin(jwtSecret: string) {
         return;
       }
 
+      const logWriter = await openLogWriter(name, "repair");
+      const agg = new StreamAggregator();
+
       const proc = Bun.spawn(
         [docker!, "compose", "up", "-d", "--remove-orphans", "--force-recreate"],
         { cwd: stackDir, stdout: "pipe", stderr: "pipe" },
       );
 
-      const logWriter = await openLogWriter(name, "repair");
-      const agg = new StreamAggregator();
+      // A disconnected client stops consuming, so once the buffer fills, every drainStream
+      // producer suspends forever inside agg.push — the subprocess, its pipes and the log
+      // writer would then leak for the lifetime of the server. Ending the aggregator
+      // releases the producers so the cleanup below can run. Repair recreates every
+      // container, so it is long enough for a disconnect to be likely.
+      request.signal.addEventListener("abort", () => { proc.kill(); agg.end(); }, { once: true });
 
       void (async () => {
         try {
