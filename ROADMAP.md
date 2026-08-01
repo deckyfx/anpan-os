@@ -1,5 +1,25 @@
 # Roadmap
 
+## v0.8.0 — 2026-08-01
+
+### Bug fixes
+- **CasaOS migration left containers bound to the old compose file** — migration ran plain `docker compose up -d`, which only recreates containers whose service definition changed. Containers that happened to be identical kept the labels of the CasaOS file, so a migrated stack stayed split across two compose sources and, once the CasaOS file was deleted, pointed at a path that no longer existed. Migration now deploys with `--force-recreate`
+- **Ordinary deploys can now heal the same drift** — `docker compose up` gains `--force-recreate` automatically when a stack's containers are found to come from a compose file other than the managed one. Stacks with no drift still restart only the services that actually changed
+
+### New features
+- **Compose source doctor** — reports, per stack, which compose file each container was actually created from, flagging containers anchored to a foreign or deleted path
+- **Compose repair** — re-anchors a stack onto the managed compose folder by recreating its containers; adopts a stray compose file into the managed folder when the managed copy is missing. Volumes and networks are preserved; containers restart
+- **Orphan guard on repair** — repair refuses to run when `--remove-orphans` would delete a running service that the managed compose file does not define, naming the services that must be merged first
+- **Doctor dialog "Compose paths" check** — new row in System Doctor; opens a Compose Sources dialog listing drifted stacks, their containers, and the offending paths, with repair available per stack
+- **`GET /api/compose/compose-sources`** and **`POST /api/compose/stacks/:name/repair`** (SSE log stream) back the dialog
+- **CLI: `--compose-doctor`** (add `--all` to include healthy stacks) and **`--compose-repair <stack…> | --all`** for the same workflow from a terminal
+
+### Tooling
+- **`install-local.sh`** — builds the current working tree and installs it over the systemd service, matching the layout `install.sh` produces. For testing changes under a real production run (root, systemd, real Docker socket) instead of `bun run dev`. Supports `--skip-build`, `--no-typecheck`, `--no-follow`; refuses to run as root; verifies the service is actually active afterwards and dumps the journal if not
+- **`BUILD_TARGETS` env filter in `build.ts`** — build a single architecture instead of all of them; the clean step now removes only the artifacts being rebuilt, so a filtered build no longer wipes the other architecture's binary
+
+---
+
 ## v0.7.0 — 2026-06-12
 
 ### New features

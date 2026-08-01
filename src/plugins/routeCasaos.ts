@@ -90,8 +90,15 @@ export function casaosPlugin(jwtSecret: string) {
         }
 
         // Step 3: Deploy via docker compose up -d
+        //
+        // --force-recreate is required, not optional. Plain `up -d` only recreates
+        // containers whose service definition changed; identical ones keep running with
+        // the labels of the compose file that created them — i.e. still pointing at the
+        // CasaOS path we are migrating away from. That leaves the project split across
+        // two compose files (visible in `docker compose ls`), and once the CasaOS file is
+        // removed those containers reference a file that no longer exists.
         yield sse({ data: { step: "deploying" } as MigrateMsg });
-        const proc = Bun.spawn([docker, "compose", "up", "-d", "--remove-orphans"], {
+        const proc = Bun.spawn([docker, "compose", "up", "-d", "--remove-orphans", "--force-recreate"], {
           cwd: stackDir,
           stdout: "pipe",
           stderr: "pipe",

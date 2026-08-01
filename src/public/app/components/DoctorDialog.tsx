@@ -1,11 +1,12 @@
 import { useState, useEffect } from "react";
 import {
   CheckCircle, XCircle, Loader2, RefreshCw, AlertCircle,
-  ShieldCheck, ShieldAlert, User, Terminal, FolderOpen,
+  ShieldCheck, ShieldAlert, User, Terminal, FolderOpen, ChevronRight,
 } from "lucide-react";
 import { Dialog } from "./Dialog";
 import { api } from "../lib/api";
 import { useSystemStore } from "../stores/systemStore";
+import { ComposeSourcesDialog } from "./ComposeSourcesDialog";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -35,6 +36,7 @@ const INITIAL_CHECKS: Check[] = [
   { label: "Stacks",        detail: "Counting…",    status: "pending" },
   { label: "Samba install", detail: "Checking…",    status: "pending" },
   { label: "Samba service", detail: "Checking…",    status: "pending" },
+  { label: "Compose paths", detail: "Checking…",    status: "pending" },
 ];
 
 // ─── Check runners ────────────────────────────────────────────────────────────
@@ -76,6 +78,25 @@ async function runServiceChecks(set: (i: number, patch: Partial<Check>) => void)
   }
 }
 
+/**
+ * Check 6: whether every stack's containers agree with the managed compose file.
+ *
+ * Reports only — repairing recreates containers, so it lives behind the Compose Sources
+ * dialog this row links to.
+ */
+async function runComposeSourceCheck(set: (i: number, patch: Partial<Check>) => void) {
+  try {
+    const { data, error } = await api.api.compose["compose-sources"].get({ query: {} });
+    if (error) throw new Error(String(error.status));
+    const stacks = (data as { stacks?: unknown[] } | null)?.stacks ?? [];
+    set(6, stacks.length === 0
+      ? { status: "ok",   detail: "All stacks point at the managed folder" }
+      : { status: "error", detail: `${stacks.length} stack${stacks.length !== 1 ? "s" : ""} drifted — click to review` });
+  } catch {
+    set(6, { status: "warn", detail: "Could not check compose paths" });
+  }
+}
+
 function applySambaChecks(env: EnvInfo, set: (i: number, patch: Partial<Check>) => void) {
   if (!env.samba.installed) {
     set(4, { status: "warn", detail: "smbd not found on PATH" });
@@ -102,7 +123,7 @@ function statusIcon(status: CheckStatus) {
   }[status];
 }
 
-function CheckRow({ check }: { check: Check }) {
+function CheckRow({ check, onClick }: { check: Check; onClick?: () => void }) {
   const labelColor = {
     pending: "text-gray-400",
     ok:      "text-gray-200",
@@ -110,12 +131,23 @@ function CheckRow({ check }: { check: Check }) {
     error:   "text-red-300",
   }[check.status];
 
-  return (
-    <div className="flex items-center gap-3 py-2.5 border-b border-gray-800/50 last:border-0">
+  const body = (
+    <>
       <span className="shrink-0">{statusIcon(check.status)}</span>
       <span className={`text-sm font-medium w-32 shrink-0 ${labelColor}`}>{check.label}</span>
       <span className="text-xs text-gray-500 truncate">{check.detail}</span>
-    </div>
+      {onClick && <ChevronRight size={13} className="ml-auto shrink-0 text-gray-600" />}
+    </>
+  );
+
+  const cls = "flex items-center gap-3 py-2.5 border-b border-gray-800/50 last:border-0";
+
+  return onClick ? (
+    <button onClick={onClick} className={`${cls} w-full text-left hover:bg-gray-900/60 transition-colors`}>
+      {body}
+    </button>
+  ) : (
+    <div className={cls}>{body}</div>
   );
 }
 
@@ -169,6 +201,7 @@ export function DoctorDialog({ open, onClose }: {
   const [checks,    setChecks]    = useState<Check[]>(INITIAL_CHECKS);
   const [running,   setRunning]   = useState(false);
   const [configDir, setConfigDir] = useState<string | null>(null);
+  const [sourcesOpen, setSourcesOpen] = useState(false);
 
   const setCheck = (i: number, patch: Partial<Check>) =>
     setChecks(prev => prev.map((c, idx) => (idx === i ? { ...c, ...patch } : c)));
@@ -179,6 +212,7 @@ export function DoctorDialog({ open, onClose }: {
     setConfigDir(null);
 
     await Promise.all([
+      runComposeSourceCheck(setCheck),
       runServiceChecks(setCheck).then(async () => {
         // piggyback configDir from the info response
         try {
@@ -209,6 +243,7 @@ export function DoctorDialog({ open, onClose }: {
 
   const serviceChecks = checks.slice(0, 4);
   const sambaChecks   = checks.slice(4, 6);
+  const composeCheck  = checks[6];
   const tools         = systemStore.tools;
   const toolsLoaded   = systemStore.loaded;
 
@@ -224,6 +259,7 @@ export function DoctorDialog({ open, onClose }: {
   const toolsMissing = tools.filter(t => t.binary !== undefined && !t.available).length;
 
   return (
+    <>
     <Dialog open={open} title="System Doctor" disableBackdropClose onClose={onClose} size="lg"
       footer={
         <button onClick={run} disabled={running}
@@ -283,6 +319,16 @@ export function DoctorDialog({ open, onClose }: {
             {sambaChecks.map((c, i) => <CheckRow key={i} check={c} />)}
           </Section>
 
+          {/* Compose sources — row opens the detail dialog where repair lives */}
+          <Section label="Stacks">
+            {composeCheck && (
+              <CheckRow
+                check={composeCheck}
+                onClick={composeCheck.status === "pending" ? undefined : () => setSourcesOpen(true)}
+              />
+            )}
+          </Section>
+
           {/* Summary */}
           {summary && (
             <div className={`px-4 py-2.5 rounded-xl border text-xs font-medium ${summary.color} ${summary.bg}`}>
@@ -318,5 +364,13 @@ export function DoctorDialog({ open, onClose }: {
 
       </div>
     </Dialog>
+
+    {/* Sibling, not nested: a fixed-position dialog inside the parent's scrollable
+        body is subject to the parent's containing block and clipping. */}
+    <ComposeSourcesDialog
+      open={sourcesOpen}
+      onClose={() => { setSourcesOpen(false); void runComposeSourceCheck(setCheck); }}
+    />
+    </>
   );
 }

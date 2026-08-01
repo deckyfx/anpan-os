@@ -233,6 +233,48 @@ export class DockerClient {
     };
   }
 
+  /**
+   * Report which compose file each container of a project was created from.
+   *
+   * Compose stamps `com.docker.compose.project.config_files` onto every container it
+   * creates. Because `up -d` only recreates containers whose service definition changed,
+   * containers left untouched keep the label of whichever compose file created them —
+   * so a project can end up with containers pointing at several different files.
+   */
+  static async listProjectComposeSources(
+    projectName: string,
+  ): Promise<DockerResult<Array<{ container: string; configFiles: string[]; workingDir: string }>>> {
+    const result = await DockerClient.listProjectContainers(projectName);
+    if (!result.ok) return result;
+    return {
+      ok: true,
+      data: result.data.map(c => ({
+        container: c.Names[0]?.replace(/^\//, "") ?? c.Id.slice(0, 12),
+        configFiles: (c.Labels?.["com.docker.compose.project.config_files"] ?? "")
+          .split(",")
+          .map(s => s.trim())
+          .filter(Boolean),
+        workingDir: c.Labels?.["com.docker.compose.project.working_dir"] ?? "",
+      })),
+    };
+  }
+
+  /**
+   * True when any container of the project was created from a compose file other than
+   * `expectedComposePath`. Such containers keep stale labels — often pointing at a file
+   * that no longer exists — until they are recreated.
+   *
+   * Returns false when the project has no containers, or when Docker is unreachable:
+   * callers treat drift detection as an optimisation, never as a gate.
+   */
+  static async hasComposeDrift(projectName: string, expectedComposePath: string): Promise<boolean> {
+    const result = await DockerClient.listProjectComposeSources(projectName);
+    if (!result.ok) return false;
+    return result.data.some(
+      c => c.configFiles.length > 0 && !c.configFiles.includes(expectedComposePath),
+    );
+  }
+
   /** Force-remove a container (stops it first if running). `v=1` removes anonymous volumes. */
   static removeContainer(id: string): Promise<{ ok: boolean; error?: string }> {
     return dockerAction(`/containers/${id}?force=true&v=1`, "DELETE");

@@ -23,6 +23,18 @@ switch (cli.type) {
     await runDoctor(); // exits internally
     break;
   }
+  case "compose-doctor": {
+    await config.load(); // needed for config.composeFolder
+    const { runComposeDoctor } = await import("./cli/compose-doctor");
+    await runComposeDoctor(cli.all); // exits internally
+    break;
+  }
+  case "compose-repair": {
+    await config.load(); // needed for config.composeFolder
+    const { runComposeRepair } = await import("./cli/compose-doctor");
+    await runComposeRepair(cli.stacks, cli.all); // exits internally
+    break;
+  }
   case "reset-user": {
     const { runResetUser } = await import("./cli/reset-user");
     await runResetUser(); // exits internally
