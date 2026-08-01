@@ -185,6 +185,10 @@ export function ComposeSourcesDialog({ open, onClose }: {
   // still being the newest request, otherwise a slow earlier scan overwrites a fresh one.
   const requestIdRef = useRef(0);
 
+  // Latest filter value, readable from callbacks that outlive the render they were made in.
+  const showAllRef = useRef(showAll);
+  showAllRef.current = showAll;
+
   const load = async (all: boolean) => {
     const requestId = ++requestIdRef.current;
     setLoading(true);
@@ -261,13 +265,22 @@ export function ComposeSourcesDialog({ open, onClose }: {
             <div className="flex items-center gap-2 py-6 text-xs text-gray-600">
               <Loader2 size={13} className="animate-spin" /> Scanning compose projects…
             </div>
+          ) : error ? (
+            // A failed scan empties `reports`, which would otherwise fall through to the
+            // green "all clear" line and claim success directly beneath the error banner.
+            <p className="py-6 text-xs text-gray-500">
+              Scan failed — use Re-scan to try again.
+            </p>
           ) : reports.length === 0 ? (
             <p className="py-6 text-xs text-green-400">
               All stacks point at the managed compose folder.
             </p>
           ) : (
             reports.map(r => (
-              <StackRow key={r.stack} report={r} onRepaired={() => void load(showAll)} />
+              // showAllRef, not showAll: repair is async, and StackRow's handler keeps the
+              // prop from the render that started it. Toggling the filter mid-repair would
+              // otherwise refresh with the filter the user just moved away from.
+              <StackRow key={r.stack} report={r} onRepaired={() => void load(showAllRef.current)} />
             ))
           )}
         </div>
