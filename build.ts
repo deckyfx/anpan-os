@@ -5,7 +5,7 @@ const APP_VERSION = pkg.version ?? "0.0.0";
 
 console.log(`🏗️  Building anpan-os binaries  (v${APP_VERSION})\n`);
 
-await Bun.$`rm -rf ./binaries && mkdir -p ./binaries`;
+await Bun.$`mkdir -p ./binaries`;
 
 type BunCrossTarget =
   | "bun-linux-x64"
@@ -14,16 +14,32 @@ type BunCrossTarget =
   | "bun-darwin-arm64"
   | "bun-windows-x64";
 
-const targets: { target: BunCrossTarget; outfile: string }[] = [
+const allTargets: { target: BunCrossTarget; outfile: string }[] = [
   { target: "bun-linux-x64",   outfile: "./binaries/anpan-os-linux-x64"   },
   { target: "bun-linux-arm64", outfile: "./binaries/anpan-os-linux-arm64" },
 ];
+
+// Optional filter: BUILD_TARGETS="bun-linux-x64" (comma-separated) builds a subset.
+// Used by install-local.sh to build only the host architecture.
+const filter = Bun.env.BUILD_TARGETS?.split(",").map((t) => t.trim()).filter(Boolean);
+const targets = filter?.length
+  ? allTargets.filter((t) => filter.includes(t.target))
+  : allTargets;
+
+if (targets.length === 0) {
+  console.error(`❌ BUILD_TARGETS matched no known target. Known: ${allTargets.map((t) => t.target).join(", ")}`);
+  process.exit(1);
+}
 
 const define = {
   "process.env.NODE_ENV":    JSON.stringify("production"),
   "process.env.RUN_MODE":    JSON.stringify("binary"),
   "process.env.APP_VERSION": JSON.stringify(APP_VERSION),
 };
+
+// Remove only the artifacts we are about to rebuild, so a filtered build
+// does not delete a previously built binary for another architecture.
+for (const { outfile } of targets) await Bun.$`rm -f ${outfile}`;
 
 let allPassed = true;
 

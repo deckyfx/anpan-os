@@ -7,6 +7,7 @@ import { StackStore } from "../stores/stack-store";
 import { config } from "../config";
 import { bins } from "../lib/commands";
 import { StreamAggregator, drainStream } from "../lib/sse";
+import { buildComposeSourceReport, findOrphanServices } from "../lib/compose-source";
 import type { SSEMsg } from "../lib/sse";
 import { invalidateOriginCache } from "./routeDocker";
 
@@ -42,7 +43,7 @@ export function casaosPlugin(jwtSecret: string) {
 
     .post(
       "/migrate/:name",
-      async function*({ params, body }) {
+      async function*({ params, body, request }) {
         const { name } = params;
 
         // Reject names containing path traversal sequences or separators.
@@ -89,15 +90,44 @@ export function casaosPlugin(jwtSecret: string) {
           return;
         }
 
+        // Guard: --remove-orphans deletes any container in the project that this compose
+        // file does not define. A CasaOS project can have picked up services from another
+        // compose file over its life, and those are exactly the containers the CasaOS file
+        // omits — migrating would destroy them silently. Refuse and name them instead.
+        const orphanCheck = await findOrphanServices(await buildComposeSourceReport(name));
+        if (!orphanCheck.ok) {
+          yield sse({ data: { error: orphanCheck.error } satisfies SSEMsg });
+          return;
+        }
+        if (orphanCheck.orphans.length > 0) {
+          yield sse({ data: { error:
+            `Migration would delete these running services, which ${composePath} does not define: `
+            + `${orphanCheck.orphans.join(", ")}. Merge them into the compose file first.`
+          } satisfies SSEMsg });
+          return;
+        }
+
         // Step 3: Deploy via docker compose up -d
+        //
+        // --force-recreate is required, not optional. Plain `up -d` only recreates
+        // containers whose service definition changed; identical ones keep running with
+        // the labels of the compose file that created them — i.e. still pointing at the
+        // CasaOS path we are migrating away from. That leaves the project split across
+        // two compose files (visible in `docker compose ls`), and once the CasaOS file is
+        // removed those containers reference a file that no longer exists.
         yield sse({ data: { step: "deploying" } as MigrateMsg });
-        const proc = Bun.spawn([docker, "compose", "up", "-d", "--remove-orphans"], {
+
+        const agg = new StreamAggregator();
+
+        const proc = Bun.spawn([docker, "compose", "up", "-d", "--remove-orphans", "--force-recreate"], {
           cwd: stackDir,
           stdout: "pipe",
           stderr: "pipe",
         });
 
-        const agg = new StreamAggregator();
+        // Without this, a client that disconnects mid-migration leaves the producers
+        // suspended in agg.push once the buffer fills, leaking the subprocess and its pipes.
+        request.signal.addEventListener("abort", () => { proc.kill(); agg.end(); }, { once: true });
 
         void (async () => {
           try {

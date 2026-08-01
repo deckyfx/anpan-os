@@ -1,5 +1,31 @@
 /** Typed wrapper over the Docker HTTP API via Unix socket. */
 
+import { realpathSync } from "node:fs";
+import { resolve } from "node:path";
+
+/**
+ * Canonical form of a compose file path, for comparing our own paths against the
+ * `com.docker.compose.project.config_files` label.
+ *
+ * Compose stores resolved absolute paths in that label, so a plain string compare against
+ * a path we built with `join()` fails whenever the compose folder contains a symlink or a
+ * non-canonical segment — reporting healthy stacks as drifted and forcing --force-recreate
+ * on every deploy.
+ *
+ * realpath is best-effort on purpose: the paths we compare are frequently unresolvable —
+ * a label may name a compose file that has since been deleted, and a root-owned parent
+ * directory can deny traversal to a non-root process. Both throw, and in both cases the
+ * lexical form is the best answer available, so we fall back to it rather than failing.
+ */
+export function normalizeComposePath(path: string): string {
+  if (!path) return path;
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
+  }
+}
+
 export interface DockerPort {
   IP?: string;
   PrivatePort: number;
@@ -231,6 +257,50 @@ export class DockerClient {
       ok: true,
       data: result.data.filter(c => c.Labels?.["com.docker.compose.project"] === projectName),
     };
+  }
+
+  /**
+   * Report which compose file each container of a project was created from.
+   *
+   * Compose stamps `com.docker.compose.project.config_files` onto every container it
+   * creates. Because `up -d` only recreates containers whose service definition changed,
+   * containers left untouched keep the label of whichever compose file created them —
+   * so a project can end up with containers pointing at several different files.
+   */
+  static async listProjectComposeSources(
+    projectName: string,
+  ): Promise<DockerResult<Array<{ container: string; configFiles: string[]; workingDir: string }>>> {
+    const result = await DockerClient.listProjectContainers(projectName);
+    if (!result.ok) return result;
+    return {
+      ok: true,
+      data: result.data.map(c => ({
+        container: c.Names[0]?.replace(/^\//, "") ?? c.Id.slice(0, 12),
+        configFiles: (c.Labels?.["com.docker.compose.project.config_files"] ?? "")
+          .split(",")
+          .map(s => s.trim())
+          .filter(Boolean),
+        workingDir: c.Labels?.["com.docker.compose.project.working_dir"] ?? "",
+      })),
+    };
+  }
+
+  /**
+   * True when any container of the project was created from a compose file other than
+   * `expectedComposePath`. Such containers keep stale labels — often pointing at a file
+   * that no longer exists — until they are recreated.
+   *
+   * Returns false when the project has no containers, or when Docker is unreachable:
+   * callers treat drift detection as an optimisation, never as a gate.
+   */
+  static async hasComposeDrift(projectName: string, expectedComposePath: string): Promise<boolean> {
+    const result = await DockerClient.listProjectComposeSources(projectName);
+    if (!result.ok) return false;
+    const expected = normalizeComposePath(expectedComposePath);
+    return result.data.some(
+      c => c.configFiles.length > 0
+        && !c.configFiles.map(normalizeComposePath).includes(expected),
+    );
   }
 
   /** Force-remove a container (stops it first if running). `v=1` removes anonymous volumes. */
