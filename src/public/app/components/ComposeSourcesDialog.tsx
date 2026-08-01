@@ -186,8 +186,11 @@ export function ComposeSourcesDialog({ open, onClose }: {
   const requestIdRef = useRef(0);
 
   // Latest filter value, readable from callbacks that outlive the render they were made in.
+  // Synced in an effect rather than assigned during render: render-phase ref writes are
+  // unsafe under concurrent rendering, where a render can be discarded before it commits
+  // and would otherwise leave the ref holding a value the UI never actually showed.
   const showAllRef = useRef(showAll);
-  showAllRef.current = showAll;
+  useEffect(() => { showAllRef.current = showAll; }, [showAll]);
 
   const load = async (all: boolean) => {
     const requestId = ++requestIdRef.current;
