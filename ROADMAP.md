@@ -1,5 +1,24 @@
 # Roadmap
 
+## v0.8.1 — 2026-08-01
+
+### New features
+- **Section counts on the dashboard** — headers now read `Docker Stacks (12 running · 3 stopped)` and `External Apps (8 links)`. Counts follow the search filter, so they always describe what is on screen, and `partial` stacks (some services up, some down) are counted separately and shown only when non-zero rather than being misfiled as running or stopped
+
+### Installer
+- **Re-running the installer is now a no-op when nothing changed** — the `.sha256` asset is fetched before the binary, so an already-current host transfers ~85 bytes instead of ~95 MB, and the service is neither stopped nor restarted. Comparing hashes rather than version strings also covers dev builds and hand-copied binaries
+- **The systemd unit is written only when its contents differ**, so `daemon-reload` and the restart are skipped on an unchanged install — while a service that was down is still started
+- **`--release TAG`** installs a specific release instead of the latest. Installing an older tag is detected as a rollback: it warns that config and database are not downgraded, and confirms with a default of *no*
+- **`--list`** shows available releases with dates, marking which is latest and which is installed. Runs without root
+- **`--yes` / `--force`** for automation and forced reinstalls
+- **Shows the installed version, the target version, and the release notes** before doing anything, condensed to a single status line such as `Update: v0.7.0 → v0.8.0`
+- Fixed the installed-version parse: the binary prints a `Run mode` banner before the version line, which the old field-based parse reported as `Run`
+
+### Documentation
+- README documents the installer options and the rollback caveat, and gains a CLI section — `--doctor`, `--compose-doctor`, `--compose-repair` and `--reset-user` were previously undocumented
+
+---
+
 ## v0.8.0 — 2026-08-01
 
 ### Bug fixes
