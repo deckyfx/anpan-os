@@ -8,9 +8,12 @@
 # service. Only a genuinely different binary — or a changed unit file — causes downtime.
 #
 # Options (append after `bash -s --`, e.g. `... | sudo bash -s -- --yes`):
-#   -y, --yes     Never prompt; assume yes. Implied when there is no terminal to ask on.
-#   -f, --force   Reinstall even when the installed binary is already identical.
-#   -h, --help    Show this help.
+#   -y, --yes           Never prompt; assume yes. Implied when there is no terminal to ask on.
+#   -f, --force         Reinstall even when the installed binary is already identical.
+#   -r, --release TAG   Install a specific release (e.g. v0.7.0) instead of the latest.
+#                       Installing an older tag is a rollback and is confirmed separately.
+#   -l, --list          List available releases and exit. Does not require root.
+#   -h, --help          Show this help.
 
 set -euo pipefail
 
@@ -29,28 +32,87 @@ die()     { echo -e "${RED}[FAIL]${NC}  $*" >&2; exit 1; }
 
 ASSUME_YES="${ASSUME_YES:-0}"
 FORCE=0
+LIST=0
+TARGET_TAG=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
     -y|--yes)   ASSUME_YES=1 ;;
     -f|--force) FORCE=1 ;;
+    -l|--list)  LIST=1 ;;
+    -r|--release)
+      shift
+      [ $# -gt 0 ] || die "--release needs a tag (e.g. --release v0.7.0). Try --list."
+      TARGET_TAG="$1"
+      # Accept "0.7.0" as readily as "v0.7.0"; the tags themselves carry the v.
+      case "$TARGET_TAG" in v*) ;; *) TARGET_TAG="v${TARGET_TAG}" ;; esac
+      ;;
     -h|--help)  awk 'NR>1 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "$0"; exit 0 ;;
     *) die "Unknown option: $1 (try --help)" ;;
   esac
   shift
 done
 
+# True when $1 is an older version than $2. sort -V understands v-prefixed semver, so the
+# smaller of the pair sorts first; equal versions are not "older".
+is_older() {
+  [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n1)" = "$1" ]
+}
+
 # This script is normally piped into bash, so stdin is the script itself — never a user.
 # Prompts therefore have to come from the controlling terminal, and when there is none
 # (CI, cloud-init, a self-update call) we proceed without asking.
+# confirm "question" [default]   — default is "yes" unless "no" is passed.
 confirm() {
+  local default="${2:-yes}" reply hint
   [ "$ASSUME_YES" -eq 1 ] && return 0
   [ -r /dev/tty ] || return 0
-  local reply
-  printf "%b" "${CYAN}[ ?  ]${NC}  $1 [Y/n] " > /dev/tty
-  read -r reply < /dev/tty || return 0
-  case "$reply" in [nN]*) return 1 ;; *) return 0 ;; esac
+  [ "$default" = "no" ] && hint="[y/N]" || hint="[Y/n]"
+  printf "%b" "${CYAN}[ ?  ]${NC}  $1 ${hint} " > /dev/tty
+  read -r reply < /dev/tty || reply=""
+  if [ "$default" = "no" ]; then
+    case "$reply" in [yY]*) return 0 ;; *) return 1 ;; esac
+  else
+    case "$reply" in [nN]*) return 1 ;; *) return 0 ;; esac
+  fi
 }
+
+# Installed version, or "" when absent/unreadable. Scrapes the first vX.Y.Z anywhere in the
+# output rather than a fixed field: the binary prints a "Run mode" banner before the version
+# line, and that preamble may change again.
+installed_version() {
+  [ -x "${INSTALL_DIR}/anpan-os" ] || return 0
+  "${INSTALL_DIR}/anpan-os" --version 2>/dev/null | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true
+}
+
+# ── --list ────────────────────────────────────────────────────────────────────
+# Handled before the root check: listing what exists is a read-only question.
+
+if [ "$LIST" -eq 1 ]; then
+  RELEASES="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases?per_page=30")" \
+    || die "Could not reach the GitHub release API."
+  INSTALLED_NOW="$(installed_version)"
+
+  echo ""
+  echo -e "${CYAN}Available anpan-os releases:${NC}"
+  if command -v jq >/dev/null 2>&1; then
+    printf '%s' "$RELEASES" | jq -r '.[] | "\(.tag_name)\t\(.published_at[0:10])\t\(.name // "")"'
+  else
+    printf '%s' "$RELEASES" | grep '"tag_name"' | cut -d'"' -f4 | sed 's/$/\t\t/'
+  fi | {
+    first=1
+    while IFS=$'\t' read -r tag date name; do
+      marker=""
+      [ "$first" -eq 1 ] && { marker="${GREEN}(latest)${NC}"; first=0; }
+      [ -n "$INSTALLED_NOW" ] && [ "$tag" = "$INSTALLED_NOW" ] && marker="${marker} ${CYAN}(installed)${NC}"
+      printf "   %-10s ${DIM}%s${NC}  %b\n" "$tag" "$date" "$marker"
+    done
+  }
+  echo ""
+  echo -e "${DIM}   Install one with: ... | sudo bash -s -- --release <tag>${NC}"
+  echo ""
+  exit 0
+fi
 
 # ── Root check ────────────────────────────────────────────────────────────────
 
@@ -68,21 +130,24 @@ esac
 # ── Installed version ─────────────────────────────────────────────────────────
 
 INSTALLED_BIN="${INSTALL_DIR}/anpan-os"
-CURRENT_VERSION=""
-if [ -x "$INSTALLED_BIN" ]; then
-  # `anpan-os --version` prints "anpan-os vX.Y.Z". Tolerate a binary too old or too broken
-  # to answer — an unreadable version is not a reason to refuse to install over it.
-  CURRENT_VERSION="$("$INSTALLED_BIN" --version 2>/dev/null | awk '{print $2}' || true)"
-  info "Installed version: ${CURRENT_VERSION:-unknown}"
+# Tolerate a binary too old or too broken to answer — an unreadable version is not a
+# reason to refuse to install over it.
+CURRENT_VERSION="$(installed_version)"
+
+# ── Fetch the target release ──────────────────────────────────────────────────
+#
+# Everything up to the summary line below stays quiet: the interesting fact is the
+# comparison, not the several lookups taken to reach it.
+
+if [ -n "$TARGET_TAG" ]; then
+  info "Fetching release ${TARGET_TAG}..."
+  RELEASE_JSON="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/tags/${TARGET_TAG}")" \
+    || die "No such release: ${TARGET_TAG}. Run with --list to see what is available."
 else
-  info "No existing installation found."
+  info "Checking for updates..."
+  RELEASE_JSON="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest")" \
+    || die "Could not reach the GitHub release API."
 fi
-
-# ── Fetch latest release ──────────────────────────────────────────────────────
-
-info "Fetching latest release from GitHub..."
-RELEASE_JSON="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest")" \
-  || die "Could not reach the GitHub release API."
 
 if command -v jq >/dev/null 2>&1; then
   LATEST="$(printf '%s' "$RELEASE_JSON" | jq -r '.tag_name // empty')"
@@ -91,10 +156,17 @@ else
   LATEST="$(printf '%s' "$RELEASE_JSON" | grep '"tag_name"' | cut -d'"' -f4)"
   NOTES=""   # parsing Markdown out of JSON without jq is not worth the fragility
 fi
-[ -n "$LATEST" ] || die "Could not determine latest release."
-info "Latest version: $LATEST"
+[ -n "$LATEST" ] || die "Could not determine the release to install."
 
 DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${LATEST}/${BINARY}"
+
+# Going backwards is legitimate — rolling back a bad release, or exercising this script —
+# but it is never what someone wants by accident, so it is called out and confirmed
+# separately from an ordinary upgrade.
+ROLLBACK=0
+if [ -n "$CURRENT_VERSION" ] && is_older "$LATEST" "$CURRENT_VERSION"; then
+  ROLLBACK=1
+fi
 
 # ── Decide whether anything needs to change ───────────────────────────────────
 #
@@ -119,12 +191,27 @@ elif [ -z "$EXPECTED_HASH" ] && [ -n "$CURRENT_VERSION" ] && [ "$CURRENT_VERSION
 fi
 
 if [ "$BINARY_UP_TO_DATE" -eq 1 ] && [ "$FORCE" -eq 0 ]; then
-  success "Already running ${LATEST} — binary is identical, nothing to download."
   # Still make sure the unit exists and the service is up; a current binary that is not
   # running is exactly the state someone re-runs this script to fix.
   NEED_DOWNLOAD=0
 else
   NEED_DOWNLOAD=1
+fi
+
+# One line saying where we stand, instead of narrating each lookup that got us here.
+if [ -z "$CURRENT_VERSION" ] && [ ! -f "$INSTALLED_BIN" ]; then
+  info "Installing ${LATEST} — no existing installation found."
+elif [ "$NEED_DOWNLOAD" -eq 0 ]; then
+  success "${LATEST} is already installed and identical — nothing to download."
+elif [ "$ROLLBACK" -eq 1 ]; then
+  warn "Rollback: ${CURRENT_VERSION} → ${LATEST}  (installing an OLDER release)"
+  warn "Config and database are not downgraded; an older binary may not understand them."
+elif [ "$BINARY_UP_TO_DATE" -eq 1 ]; then
+  info "Reinstalling ${LATEST} (--force; installed binary is already identical)."
+elif [ "$CURRENT_VERSION" = "$LATEST" ]; then
+  info "Update: ${LATEST} — same version, different binary."
+else
+  info "Update: ${CURRENT_VERSION:-unknown} → ${LATEST}"
 fi
 
 # ── Changelog + confirmation ──────────────────────────────────────────────────
@@ -148,7 +235,12 @@ if [ "$NEED_DOWNLOAD" -eq 1 ]; then
     echo -e "${DIM}   Release notes: https://github.com/${REPO}/releases/tag/${LATEST}  (install jq to show them here)${NC}"
   fi
 
-  if [ -n "$CURRENT_VERSION" ]; then
+  if [ "$ROLLBACK" -eq 1 ]; then
+    # Defaults to no: a downgrade is the one path here that can leave the service unable
+    # to read state the newer version wrote.
+    confirm "Really roll back ${CURRENT_VERSION} → ${LATEST}?" no \
+      || { info "Aborted — nothing changed."; exit 0; }
+  elif [ -n "$CURRENT_VERSION" ]; then
     PROMPT="Update anpan-os ${CURRENT_VERSION} → ${LATEST}?"
     [ "$FORCE" -eq 1 ] && [ "$BINARY_UP_TO_DATE" -eq 1 ] && PROMPT="Reinstall anpan-os ${LATEST} (identical binary)?"
     confirm "$PROMPT" || { info "Aborted — nothing changed."; exit 0; }

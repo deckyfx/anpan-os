@@ -26,6 +26,8 @@ Manage Docker Compose stacks, browse files, monitor system resources, and instal
 - **Live install logs** — real-time streaming of `docker compose up` output
 - **Live container logs** — per-tab streaming log viewer for running containers
 - **Pull & update** — one-click image pull and stack redeploy
+- **Compose source doctor** — reports which compose file each container was actually created from, flagging stacks left anchored to a foreign or deleted path
+- **Compose repair** — re-anchors a drifted stack onto the managed compose folder, refusing when doing so would delete a running service the compose file does not define
 
 ### App Store
 - **Browse remote apps** — search and install apps from any CasaOS-compatible GitHub repository
@@ -75,6 +77,30 @@ curl -fsSL https://raw.githubusercontent.com/deckyfx/anpan-os/main/install.sh | 
 ```
 
 If you prefer not to pipe to `sudo bash`, see [Manual download](#manual-download) below.
+
+**The same command updates an existing install**, and re-running it is cheap: the checksum is fetched before the binary, so a host that is already current downloads nothing and the service is never restarted.
+
+Options go after `bash -s --`:
+
+```bash
+# See what's available (no root needed)
+curl -fsSL .../install.sh | bash -s -- --list
+
+# Install or roll back to a specific release
+curl -fsSL .../install.sh | sudo bash -s -- --release v0.7.0
+
+# Never prompt (CI, automation)
+curl -fsSL .../install.sh | sudo bash -s -- --yes
+```
+
+| Option | Effect |
+| --- | --- |
+| `-l, --list` | List available releases and exit. Does not require root. |
+| `-r, --release TAG` | Install a specific release instead of the latest. Going backwards is treated as a rollback: it warns and asks for explicit confirmation. |
+| `-y, --yes` | Never prompt. Implied automatically when no terminal is available. |
+| `-f, --force` | Reinstall even when the installed binary is already identical. |
+
+> ⚠️ **On rollback:** the config file and database are not downgraded, so an older binary may not understand state a newer one wrote.
 
 After the script completes:
 
@@ -157,6 +183,30 @@ sudo bun run dev
 Open `http://localhost:3000` and complete the setup wizard on first run.
 
 > Running as root ensures all features work in development the same way they do in production.
+
+---
+
+## CLI
+
+Running `anpan-os` with no arguments starts the server. These flags run a single task and exit:
+
+| Flag | Purpose |
+| --- | --- |
+| `--doctor` | Check required system binaries and report what is missing |
+| `--compose-doctor [--all]` | Report which compose file each stack's containers were created from. Exits non-zero when any stack needs repair, so it can gate a deploy script. `--all` lists healthy stacks too |
+| `--compose-repair <stack…>`<br>`--compose-repair --all` | Re-anchor stacks onto the managed compose folder. Containers are recreated; named volumes and networks are kept |
+| `--reset-user` | Wipe the users table, so the setup wizard runs again on next start |
+| `-v, --version` | Print version |
+| `-h, --help` | Show help |
+
+**Why compose drift happens:** `docker compose up -d` only recreates containers whose service definition changed. Untouched containers keep the labels of whichever compose file created them, so moving a stack can leave part of it anchored to the old path — and once that file is deleted, those containers reference something that no longer exists. `--compose-doctor` finds them; `--compose-repair` fixes them.
+
+```bash
+sudo anpan-os --compose-doctor          # what drifted?
+sudo anpan-os --compose-repair mystack  # fix one stack
+```
+
+Repair refuses rather than destroys: if the managed compose file does not define a service that is currently running, it names that service and stops, so you can merge the files by hand first.
 
 ---
 
