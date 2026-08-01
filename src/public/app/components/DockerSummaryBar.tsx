@@ -17,6 +17,15 @@ function formatBytes(bytes: number): string {
   return `${Math.round(bytes / 1_000_000)} MB`;
 }
 
+/**
+ * One icon + value pair.
+ *
+ * `title` is both the hover tooltip and the accessible name. Several metrics here render
+ * as a bare number whose meaning is carried only by the icon and its colour — "45, 0, 14"
+ * announced on its own is meaningless, and colour alone is not available to every reader.
+ * The label is therefore rendered for assistive technology and the icon marked decorative,
+ * so the svg is not announced in its place.
+ */
 function Metric({ icon, children, title }: {
   icon: React.ReactNode;
   children: React.ReactNode;
@@ -24,7 +33,8 @@ function Metric({ icon, children, title }: {
 }) {
   return (
     <span className="flex items-center gap-1.5 whitespace-nowrap" title={title}>
-      {icon}
+      <span aria-hidden="true" className="flex items-center">{icon}</span>
+      {title && <span className="sr-only">{title}: </span>}
       <span>{children}</span>
     </span>
   );
