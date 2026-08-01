@@ -8,6 +8,7 @@ import { useUpdateCheckStore } from "../stores/updateCheckStore";
 import { TopBar }            from "./home/TopBar";
 import { BottomBar }         from "./home/BottomBar";
 import { ClockWidget, CalendarWidget, SystemWidget, DiskWidget, NetworkWidget } from "./home/SideWidgets";
+import { DockerSummaryBar }  from "../components/DockerSummaryBar";
 import { StackTile }         from "./home/StackTile";
 import { BookmarkTile }      from "./home/BookmarkTile";
 import { StackDetailDialog } from "./home/StackDetailDialog";
@@ -36,7 +37,7 @@ export function HomePage({ username, onLogout, onNavigate }: {
   const { hasPasskey, registerPasskey } = useAuthStore();
 
   const {
-    stacks, stats, version,
+    stacks, stats, summary, version,
     sortMode, setSortMode,
     dragSrcIdx, dragOverIdx, setDragSrcIdx, setDragOverIdx,
     newStackOpen, setNewStackOpen,
@@ -211,6 +212,10 @@ export function HomePage({ username, onLogout, onNavigate }: {
               )}
             </div>
           </div>
+
+          {/* Host-wide totals — unaffected by the search filter, unlike the section
+              counts below, which describe only what is currently rendered. */}
+          <DockerSummaryBar summary={summary} />
 
           {/* ── Docker Stacks section ─────────────────────────────────────── */}
           <p className="text-[10px] text-gray-600 font-semibold uppercase tracking-widest mb-3">

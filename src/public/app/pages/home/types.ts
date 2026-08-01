@@ -40,6 +40,18 @@ export interface Stack {
   origin: ComposeOrigin;
 }
 
+/** Host-wide Docker totals shown in the dashboard summary bar. */
+export interface DockerSummary {
+  stacks: number;
+  containers: { total: number; running: number; stopped: number; paused: number };
+  /** Only containers declaring a HEALTHCHECK report health, so these do not sum to `total`. */
+  health: { healthy: number; unhealthy: number; starting: number };
+  volumes: number;
+  images: number;
+  cpus: number;
+  memTotal: number;
+}
+
 export interface DiskMount {
   device: string;
   mount: string;

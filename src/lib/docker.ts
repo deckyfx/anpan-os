@@ -105,8 +105,25 @@ export interface DockerInfo {
   ContainersRunning: number;
   ContainersPaused: number;
   ContainersStopped: number;
+  Images: number;
+  /** Logical CPUs visible to the daemon. */
+  NCPU: number;
+  /** Total host memory in bytes. */
+  MemTotal: number;
   ServerVersion: string;
   OperatingSystem: string;
+}
+
+/** Host-wide totals for the dashboard summary bar. */
+export interface DockerSummary {
+  stacks: number;
+  containers: { total: number; running: number; stopped: number; paused: number };
+  /** Only containers declaring a HEALTHCHECK report health, so these do not sum to `total`. */
+  health: { healthy: number; unhealthy: number; starting: number };
+  volumes: number;
+  images: number;
+  cpus: number;
+  memTotal: number;
 }
 
 type DockerResult<T> =
@@ -245,6 +262,65 @@ export class DockerClient {
   /** Get Docker daemon info. */
   static getInfo(): Promise<DockerResult<DockerInfo>> {
     return dockerFetch<DockerInfo>("/info");
+  }
+
+  /**
+   * Host-wide totals for the dashboard summary bar.
+   *
+   * Three daemon calls, run concurrently: the container list (which alone yields stack
+   * count, container states and health), `/info` for images/CPU/memory, and the volume
+   * list. Container states come from the list rather than `/info` so every number in the
+   * bar describes the same instant — `/info` counters are maintained separately and can
+   * disagree with the list mid-transition.
+   *
+   * A failure of `/volumes` or `/info` degrades to zero for those fields instead of
+   * failing the whole summary: a partially populated bar beats an empty one.
+   */
+  static async getSummary(): Promise<DockerResult<DockerSummary>> {
+    const [listResult, infoResult, volumesResult] = await Promise.all([
+      dockerFetch<DockerContainer[]>("/containers/json?all=1"),
+      DockerClient.getInfo(),
+      dockerFetch<{ Volumes: Array<unknown> | null }>("/volumes"),
+    ]);
+
+    if (!listResult.ok) return listResult;
+
+    const projects = new Set<string>();
+    const containers = { total: 0, running: 0, stopped: 0, paused: 0 };
+    const health = { healthy: 0, unhealthy: 0, starting: 0 };
+
+    for (const c of listResult.data) {
+      containers.total++;
+
+      // Docker reports many states; "running" and "paused" are distinct, and everything
+      // else (exited, created, restarting, dead, removing) reads as not running.
+      if (c.State === "running")     containers.running++;
+      else if (c.State === "paused") containers.paused++;
+      else                           containers.stopped++;
+
+      const project = c.Labels?.["com.docker.compose.project"];
+      if (project) projects.add(project);
+
+      // Health rides along in the human-readable status, e.g. "Up 3 hours (healthy)".
+      // There is no dedicated field on the list endpoint; only /containers/{id}/json has
+      // one, and that would mean a request per container.
+      if (c.Status?.includes("(healthy)"))             health.healthy++;
+      else if (c.Status?.includes("(unhealthy)"))      health.unhealthy++;
+      else if (c.Status?.includes("(health: starting)")) health.starting++;
+    }
+
+    return {
+      ok: true,
+      data: {
+        stacks: projects.size,
+        containers,
+        health,
+        volumes: volumesResult.ok ? (volumesResult.data.Volumes?.length ?? 0) : 0,
+        images:  infoResult.ok ? infoResult.data.Images   : 0,
+        cpus:    infoResult.ok ? infoResult.data.NCPU     : 0,
+        memTotal:infoResult.ok ? infoResult.data.MemTotal : 0,
+      },
+    };
   }
 
   /** List all containers (including stopped) that belong to a compose project. */
