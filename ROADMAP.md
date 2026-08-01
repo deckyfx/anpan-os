@@ -1,5 +1,23 @@
 # Roadmap
 
+## v0.8.2 — 2026-08-01
+
+### New features
+- **Docker summary bar on the dashboard** — a host-wide totals row above the grids: stacks, containers with running/stopped/paused, healthy/unhealthy counts, volumes, images, CPU count and total RAM
+- **`GET /api/docker/summary`** — backs the bar from three concurrent daemon calls: the container list (which alone yields stack count, container states and health), `/info` for images/CPU/memory, and the volume list
+
+### Design notes
+- The summary bar is deliberately separate from the per-section header counts. Those follow the search filter and describe what is on screen; everything in the bar is a fact about the host and cannot follow a filter — combining them would make both ambiguous
+- Container states are read from the container list rather than from `/info`, whose counters are maintained separately and can disagree with the list mid-transition. Sourcing them together keeps every number in the bar describing the same instant
+- A failure of `/volumes` or `/info` degrades those fields to zero rather than failing the whole summary, and a 502 keeps the last good values rather than blanking the bar
+- Health is only reported by containers declaring a `HEALTHCHECK`, so those counts never sum to the container total; healthy, unhealthy, starting and paused are each shown only when non-zero
+- The bar renders nothing until the first poll lands — a row of zeroes on first paint reads as a broken host rather than as "not loaded yet"
+
+### Accessibility
+- Summary bar metrics carry screen-reader labels. Several render as a bare number whose meaning comes only from icon colour, which alone announced as "45, 0, 14"; icons are marked decorative so the svg is not announced in place of the label
+
+---
+
 ## v0.8.1 — 2026-08-01
 
 ### New features
