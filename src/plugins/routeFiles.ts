@@ -57,6 +57,19 @@ function canonicalMime(type: string): string {
   return CANONICAL_MIME[type] ?? type;
 }
 
+/**
+ * Percent-encode a string for an RFC 5987 ext-value, as used by `filename*`.
+ *
+ * encodeURIComponent is close but not sufficient: it leaves ' ( ) * unescaped, and none of
+ * those are in RFC 5987's attr-char set. A client that validates strictly discards the
+ * whole filename* and falls back to the ASCII filename, which for a name like
+ * "Album (2026).flac" means losing the parenthesised part of a perfectly ordinary title.
+ */
+function rfc5987(value: string): string {
+  return encodeURIComponent(value)
+    .replace(/['()*]/g, c => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+}
+
 function forbidden()   { return Response.json({ error: "Access denied" },     { status: 403 }); }
 function notFound()    { return Response.json({ error: "Not found" },          { status: 404 }); }
 function tooLarge()    { return Response.json({ error: "File too large" },     { status: 413 }); }
@@ -233,7 +246,7 @@ export function filesPlugin(jwtSecret: string) {
       const disposition =
         `${query.inline === "1" ? "inline" : "attachment"}; `
         + `filename="${asciiName}"; `
-        + `filename*=UTF-8''${encodeURIComponent(name)}`;
+        + `filename*=UTF-8''${rfc5987(name)}`;
       const range = request.headers.get("range");
 
       // Only "bytes=start-end" is honoured; multi-range requests are rare and no browser
