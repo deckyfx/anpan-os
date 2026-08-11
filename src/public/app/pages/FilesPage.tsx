@@ -8,7 +8,7 @@ import { ChevronLeft, ChevronRight, FolderUp, House, LayoutGrid, List,
          FolderOpen, Pencil, Download, Archive, PackageOpen, ShieldCheck, Info,
          Trash2, FolderPlus, Upload, Network, Share2, FolderMinus,
          Copy, Scissors, ClipboardPaste, PanelRight, FolderSearch, RefreshCw,
-         Bookmark, X, Settings, Settings2, Check, Eye, EyeOff } from "lucide-react";
+         Bookmark, X, Settings, Settings2, Check, Eye, EyeOff, AudioLines } from "lucide-react";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { Dialog }        from "../components/Dialog";
 import type { FileEntry } from "./files/types";
@@ -23,7 +23,7 @@ import { SambaSection }  from "./files/SambaSection";
 import { SambaManagerDialog } from "./files/SambaManagerDialog";
 import { AddShareDialog }     from "./files/AddShareDialog";
 import { UploadProgressDialog } from "./files/UploadProgressDialog";
-import { CopyMoveProgressDialog } from "./files/CopyMoveProgressDialog";
+import { OperationProgressDialog } from "./files/OperationProgressDialog";
 import { FileInfoPanel }  from "./files/FileInfoPanel";
 import { FileBrowserConfigDialog } from "./files/FileBrowserConfigDialog";
 
@@ -51,6 +51,8 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
     // View / selection
     viewMode, setViewMode, selectedPaths, toggleSelect, toggleSelectAll,
     showHidden, toggleShowHidden,
+    // Convert
+    convertFlac, convertFlacFolder,
     // Context menu
     ctxMenu, setCtxMenu,
     // Upload
@@ -491,7 +493,7 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
       </Dialog>
 
       <UploadProgressDialog />
-      <CopyMoveProgressDialog />
+      <OperationProgressDialog />
 
       <FileBrowserConfigDialog open={configOpen} onClose={() => setConfigOpen(false)} />
 
@@ -532,6 +534,12 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
                 <CtxItem label="Archive…"    icon={<Archive     size={14} />} onClick={() => { const e = ctxMenu.entry!; setCtxMenu(null); openCtxArchive(e); }} />
                 {ARCHIVE_EXTS.has(ctxMenu.entry.ext) && (
                   <CtxItem label="Extract here" icon={<PackageOpen size={14} />} onClick={() => { const e = ctxMenu.entry!; setCtxMenu(null); void handleExtract(e); }} />
+                )}
+                {ctxMenu.entry.ext === "flac" && (
+                  <CtxItem label="Convert to MP3" icon={<AudioLines size={14} />} onClick={() => { const e = ctxMenu.entry!; setCtxMenu(null); void convertFlac(e.path); }} />
+                )}
+                {ctxMenu.entry.isDir && (
+                  <CtxItem label="Convert FLACs to MP3" icon={<AudioLines size={14} />} onClick={() => { const e = ctxMenu.entry!; setCtxMenu(null); void convertFlacFolder(e.path); }} />
                 )}
                 <CtxSep />
                 <CtxItem label="Permissions…" icon={<ShieldCheck  size={14} />} onClick={() => { setChmodTarget(ctxMenu.entry!); setCtxMenu(null); }} />

@@ -5,6 +5,7 @@ import type { FileEntry } from "./types";
 import { IMAGE_EXTS, VIDEO_EXTS, AUDIO_EXTS } from "./constants";
 import { formatSize } from "./helpers";
 import { MonacoPreview } from "./MonacoPreview";
+import { AudioMetaPanel } from "./AudioMetaPanel";
 
 export { monacoLang } from "./MonacoPreview";
 
@@ -89,7 +90,14 @@ export function FilePreview({ entry, content, binary, onContentChange, onSave, s
 
   if (IMAGE_EXTS.has(entry.ext)) return <ImageViewer src={inlineUrl} name={entry.name} />;
   if (VIDEO_EXTS.has(entry.ext)) return <MediaPlayer src={inlineUrl} kind="video" />;
-  if (AUDIO_EXTS.has(entry.ext)) return <MediaPlayer src={inlineUrl} kind="audio" />;
+  if (AUDIO_EXTS.has(entry.ext)) {
+    return (
+      <>
+        <MediaPlayer src={inlineUrl} kind="audio" />
+        <AudioMetaPanel path={entry.path} />
+      </>
+    );
+  }
 
   if (!binary) {
     return (

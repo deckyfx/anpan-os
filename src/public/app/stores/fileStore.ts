@@ -100,7 +100,17 @@ interface FileState {
 
   // ── Clipboard / copy-move ────────────────────────────────────────────────
   clipboard:        { op: "copy" | "cut"; paths: string[] } | null;
-  copyMoveProgress: { title: string; logs: string[]; done: boolean; error: string } | null;
+  /** Shared progress state for long file operations: copy, move, and FLAC conversion. */
+  opProgress: {
+    title:  string;
+    logs:   string[];
+    done:   boolean;
+    error:  string;
+    /** 0–100 when the operation can report completion; absent when it can only log. */
+    percent?: number;
+    /** Set when the operation stopped on an existing output — runs it again, replacing. */
+    onReplace?: () => void;
+  } | null;
 
   // ── Folder sizes ─────────────────────────────────────────────────────────
   folderSizes: Record<string, string>;
@@ -155,7 +165,9 @@ interface FileState {
   clearClipboard:        () => void;
   pasteClipboard:        (destination: string) => Promise<void>;
   calculateFolderSize:   (path: string) => Promise<void>;
-  setCopyMoveProgress:   (v: FileState["copyMoveProgress"]) => void;
+  setOpProgress:   (v: FileState["opProgress"]) => void;
+  convertFlac:       (path: string, overwrite?: boolean) => Promise<void>;
+  convertFlacFolder: (path: string) => Promise<void>;
 
   // Samba
   loadShares:       () => Promise<void>;
@@ -243,7 +255,7 @@ export const useFileStore = create<FileState>((set, get) => ({
   archivePaths:  [],
 
   clipboard:        null,
-  copyMoveProgress: null,
+  opProgress: null,
   folderSizes:      {},
 
   shares:             [],
@@ -558,7 +570,7 @@ export const useFileStore = create<FileState>((set, get) => ({
       ? `Copying ${clipboard.paths.length} item(s)…`
       : `Moving ${clipboard.paths.length} item(s)…`;
 
-    set({ copyMoveProgress: { title, logs: [], done: false, error: "" } });
+    set({ opProgress: { title, logs: [], done: false, error: "" } });
 
     type SSEEvent = { data: { log?: string; ok?: boolean; error?: string } };
 
@@ -569,11 +581,11 @@ export const useFileStore = create<FileState>((set, get) => ({
 
       const { data, error } = await endpoint.post({ sources: clipboard.paths, destination });
       if (error) {
-        set((s) => ({ copyMoveProgress: s.copyMoveProgress ? { ...s.copyMoveProgress, done: true, error: (error as { value?: { error?: string } }).value?.error ?? "Request failed" } : null }));
+        set((s) => ({ opProgress: s.opProgress ? { ...s.opProgress, done: true, error: (error as { value?: { error?: string } }).value?.error ?? "Request failed" } : null }));
         return;
       }
       if (!data) {
-        set((s) => ({ copyMoveProgress: s.copyMoveProgress ? { ...s.copyMoveProgress, done: true, error: "No stream received" } : null }));
+        set((s) => ({ opProgress: s.opProgress ? { ...s.opProgress, done: true, error: "No stream received" } : null }));
         return;
       }
 
@@ -581,17 +593,17 @@ export const useFileStore = create<FileState>((set, get) => ({
         const m = event.data;
         if (!m) continue;
         if (m.log !== undefined) {
-          set((s) => ({ copyMoveProgress: s.copyMoveProgress ? { ...s.copyMoveProgress, logs: [...s.copyMoveProgress.logs, m.log!] } : null }));
+          set((s) => ({ opProgress: s.opProgress ? { ...s.opProgress, logs: [...s.opProgress.logs, m.log!] } : null }));
         } else if (m.ok) {
           if (clipboard.op === "cut") set({ clipboard: null });
           await loadDirContent(destination);
-          set((s) => ({ copyMoveProgress: s.copyMoveProgress ? { ...s.copyMoveProgress, done: true } : null }));
+          set((s) => ({ opProgress: s.opProgress ? { ...s.opProgress, done: true } : null }));
         } else if (m.error) {
-          set((s) => ({ copyMoveProgress: s.copyMoveProgress ? { ...s.copyMoveProgress, done: true, error: m.error! } : null }));
+          set((s) => ({ opProgress: s.opProgress ? { ...s.opProgress, done: true, error: m.error! } : null }));
         }
       }
     } catch (err) {
-      set((s) => ({ copyMoveProgress: s.copyMoveProgress ? { ...s.copyMoveProgress, done: true, error: err instanceof Error ? err.message : String(err) } : null }));
+      set((s) => ({ opProgress: s.opProgress ? { ...s.opProgress, done: true, error: err instanceof Error ? err.message : String(err) } : null }));
     }
   },
 
@@ -605,7 +617,92 @@ export const useFileStore = create<FileState>((set, get) => ({
   },
 
   /** Directly set (or clear) the copy/move progress dialog state. */
-  setCopyMoveProgress: (v) => set({ copyMoveProgress: v }),
+  setOpProgress: (v) => set({ opProgress: v }),
+
+  /** Convert every FLAC in a folder, streaming per-file progress into the shared dialog. */
+  convertFlacFolder: async (path) => {
+    const name = path.split("/").pop() || path;
+    set({ opProgress: { title: `Converting FLACs in ${name}…`, logs: [], done: false, error: "", percent: 0 } });
+
+    type SSEEvent = { data: { log?: string; ok?: boolean; error?: string; progress?: number } };
+    const patch = (p: Partial<NonNullable<FileState["opProgress"]>>) =>
+      set((s) => ({ opProgress: s.opProgress ? { ...s.opProgress, ...p } : null }));
+
+    try {
+      const endpoint = (api.api.files as unknown as {
+        "convert-folder": { post: (b: { path: string }) => Promise<{ data: unknown; error: unknown }> };
+      })["convert-folder"];
+
+      const { data, error } = await endpoint.post({ path });
+      if (error) {
+        patch({ done: true, error: (error as { value?: { error?: string } }).value?.error ?? "Request failed", percent: undefined });
+        return;
+      }
+      if (!data) { patch({ done: true, error: "No stream received", percent: undefined }); return; }
+
+      for await (const event of data as AsyncIterable<SSEEvent>) {
+        const m = event.data;
+        if (!m) continue;
+        if (m.progress !== undefined) patch({ percent: m.progress });
+        else if (m.log !== undefined) set((s) => ({ opProgress: s.opProgress ? { ...s.opProgress, logs: [...s.opProgress.logs, m.log!] } : null }));
+        else if (m.ok)                { await get().loadDirContent(get().currentPath); patch({ done: true, percent: 100 }); }
+        else if (m.error)             patch({ done: true, error: m.error, percent: undefined });
+      }
+    } catch (err) {
+      patch({ done: true, error: err instanceof Error ? err.message : String(err), percent: undefined });
+    }
+  },
+
+  /**
+   * Convert a FLAC to MP3, streaming ffmpeg's progress into the shared operation dialog.
+   *
+   * `overwrite` is opt-in: the server refuses when the .mp3 already exists, and the caller
+   * re-invokes with it set only after the user has agreed to replace the file.
+   */
+  convertFlac: async (path, overwrite) => {
+    const name = path.split("/").pop() ?? path;
+    set({ opProgress: { title: `Converting ${name} → MP3…`, logs: [], done: false, error: "", percent: 0 } });
+
+    type SSEEvent = { data: { log?: string; ok?: boolean; error?: string; progress?: number; conflict?: boolean } };
+    const patch = (p: Partial<NonNullable<FileState["opProgress"]>>) =>
+      set((s) => ({ opProgress: s.opProgress ? { ...s.opProgress, ...p } : null }));
+
+    try {
+      const endpoint = (api.api.files as unknown as {
+        convert: { post: (b: { path: string; overwrite?: boolean }) => Promise<{ data: unknown; error: unknown }> };
+      }).convert;
+
+      const { data, error } = await endpoint.post({ path, overwrite });
+      if (error) {
+        patch({ done: true, error: (error as { value?: { error?: string } }).value?.error ?? "Request failed" });
+        return;
+      }
+      if (!data) {
+        patch({ done: true, error: "No stream received" });
+        return;
+      }
+
+      for await (const event of data as AsyncIterable<SSEEvent>) {
+        const m = event.data;
+        if (!m) continue;
+        if (m.progress !== undefined)   patch({ percent: m.progress });
+        else if (m.log !== undefined)   set((s) => ({ opProgress: s.opProgress ? { ...s.opProgress, logs: [...s.opProgress.logs, m.log!] } : null }));
+        else if (m.ok)                  { await get().loadDirContent(get().currentPath); patch({ done: true, percent: 100 }); }
+        else if (m.error) {
+          patch({
+            done:  true,
+            error: m.error,
+            // Offer the replace only for a conflict — every other failure is not something
+            // re-running with overwrite would fix.
+            percent:   undefined,
+            onReplace: m.conflict ? () => { void get().convertFlac(path, true); } : undefined,
+          });
+        }
+      }
+    } catch (err) {
+      patch({ done: true, error: err instanceof Error ? err.message : String(err) });
+    }
+  },
 
   // ── File browser config ───────────────────────────────────────────────────
 

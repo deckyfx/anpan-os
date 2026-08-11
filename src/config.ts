@@ -30,6 +30,7 @@ passkey_allowed_origins = []
 
 [files]
 root = "/"   # root path the file manager is allowed to browse
+# metadata_lookup = false   # allow track lookup at iTunes / MusicBrainz (sends track and album names off-box)
 
 [samba]
 # smb_conf = "/etc/samba/smb.conf"   # system smb.conf (anpan-os adds one include line here)
@@ -59,6 +60,15 @@ interface ComposeConfig {
 
 interface FilesConfig {
   root?: string;
+  /**
+   * Allow looking up track metadata at iTunes and MusicBrainz.
+   *
+   * Off by default and opt-in: anpan-os otherwise talks only to the local Docker socket
+   * and to registries the user has already chosen to pull from. Sending track and album
+   * names — which describe a private library — to third parties should be a decision, not
+   * a default.
+   */
+  metadata_lookup?: boolean;
 }
 
 interface SambaConfig {
@@ -174,6 +184,11 @@ class Config {
   /** Root path the file manager is allowed to browse — defaults to "/". */
   get filesRoot(): string {
     return this.data.files.root ?? "/";
+  }
+
+  /** Whether online metadata lookup is permitted. Off unless explicitly enabled. */
+  get metadataLookupEnabled(): boolean {
+    return this.data.files.metadata_lookup === true;
   }
 
   /**

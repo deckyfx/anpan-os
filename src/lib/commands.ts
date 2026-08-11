@@ -147,6 +147,16 @@ const TOOLS = {
       darwin: "Built-in",
     },
   },
+  ffmpeg: {
+    name:        "ffmpeg",
+    description: "Audio and video transcoding",
+    feature:     "file manager — convert FLAC to MP3",
+    binary:      { linux: "ffmpeg", darwin: "ffmpeg" },
+    installHint: {
+      linux:  "apt install ffmpeg  /  yum install ffmpeg",
+      darwin: "brew install ffmpeg",
+    },
+  },
 } as const satisfies Record<string, ToolDef>;
 
 export type ToolId = keyof typeof TOOLS;
