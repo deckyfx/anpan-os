@@ -1,6 +1,18 @@
 /** Shared SSE streaming utilities used by compose and file operation routes. */
 
-export interface SSEMsg { log?: string; ok?: boolean; error?: string }
+export interface SSEMsg {
+  log?:   string;
+  ok?:    boolean;
+  error?: string;
+  /** 0–100 completion, for operations that can report it rather than only logging. */
+  progress?: number;
+  /**
+   * Set alongside `error` when the operation stopped because its output already exists.
+   * A flag rather than a parsed message, so the client can offer to replace the file
+   * without matching on error text that is free to change.
+   */
+  conflict?: boolean;
+}
 
 export type LogWriter = { write(s: string): Promise<void>; flush(): Promise<void> };
 

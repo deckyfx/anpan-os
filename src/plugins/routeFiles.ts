@@ -5,6 +5,8 @@ import { homedir } from "node:os";
 import { authGuard } from "./authGuard";
 import { config } from "../config";
 import { bins, commands } from "../lib/commands";
+import { parseFile } from "music-metadata";
+import NodeID3 from "node-id3";
 import { StreamAggregator, drainStream } from "../lib/sse";
 import type { SSEMsg } from "../lib/sse";
 import { SettingsStore } from "../stores/settings-store";
@@ -68,6 +70,92 @@ function canonicalMime(type: string): string {
 function rfc5987(value: string): string {
   return encodeURIComponent(value)
     .replace(/['()*]/g, c => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+}
+
+// ─── Online metadata lookup ───────────────────────────────────────────────────
+
+/** A track suggestion from an external catalogue. */
+interface LookupCandidate {
+  title:  string;
+  artist: string;
+  album:  string;
+  genre:  string | null;
+  year:   string | null;
+  artworkUrl: string | null;
+  source: "itunes" | "musicbrainz";
+}
+
+/** Neither service is load-bearing, so a slow one must not hold a request open. */
+const LOOKUP_TIMEOUT_MS = 8_000;
+
+interface ItunesTrack {
+  trackName?:        string;
+  artistName?:       string;
+  collectionName?:   string;
+  primaryGenreName?: string;
+  releaseDate?:      string;
+  artworkUrl100?:    string;
+}
+
+async function lookupItunes(q: string, limit = 5): Promise<LookupCandidate[]> {
+  // No country parameter: results should follow the caller's query, not a locale this
+  // server happens to be configured with.
+  const url = `https://itunes.apple.com/search?term=${encodeURIComponent(q)}&media=music&limit=${limit}`;
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(LOOKUP_TIMEOUT_MS) });
+    if (!res.ok) return [];
+    const data = await res.json() as { results?: ItunesTrack[] };
+    return (data.results ?? [])
+      .filter(r => r.trackName && r.artistName)
+      .map(r => ({
+        title:  r.trackName!,
+        artist: r.artistName!,
+        album:  r.collectionName ?? r.trackName!,
+        genre:  r.primaryGenreName ?? null,
+        year:   r.releaseDate?.slice(0, 4) ?? null,
+        // The 100px thumbnail URL yields a usable cover by substitution; iTunes serves the
+        // larger size from the same path.
+        artworkUrl: r.artworkUrl100?.replace("100x100bb", "600x600bb") ?? null,
+        source: "itunes" as const,
+      }));
+  } catch {
+    return [];   // offline, blocked, or timed out — the caller falls through
+  }
+}
+
+interface MBRecording {
+  title?: string;
+  "artist-credit"?: Array<{ artist?: { name?: string } }>;
+  releases?: Array<{ title?: string; date?: string }>;
+}
+
+async function lookupMusicBrainz(q: string, limit = 5): Promise<LookupCandidate[]> {
+  const url = `https://musicbrainz.org/ws/2/recording/?query=${encodeURIComponent(q)}&fmt=json&limit=${limit}`;
+  try {
+    const res = await fetch(url, {
+      // MusicBrainz requires a User-Agent identifying the application and a contact URL;
+      // requests without one are rejected or throttled.
+      headers: { "User-Agent": `anpan-os/${process.env.APP_VERSION ?? "dev"} ( https://github.com/deckyfx/anpan-os )` },
+      signal:  AbortSignal.timeout(LOOKUP_TIMEOUT_MS),
+    });
+    if (!res.ok) return [];
+    const data = await res.json() as { recordings?: MBRecording[] };
+    return (data.recordings ?? [])
+      .filter(r => r.title)
+      .map(r => ({
+        title:  r.title!,
+        artist: r["artist-credit"]?.[0]?.artist?.name ?? "",
+        album:  r.releases?.[0]?.title ?? r.title!,
+        genre:  null,
+        year:   r.releases?.[0]?.date?.slice(0, 4) ?? null,
+        // Cover Art Archive would need a second round trip per candidate; left for the
+        // user to supply rather than firing N more external requests per search.
+        artworkUrl: null,
+        source: "musicbrainz" as const,
+      }));
+  } catch {
+    return [];
+  }
 }
 
 function forbidden()   { return Response.json({ error: "Access denied" },     { status: 403 }); }
@@ -424,6 +512,444 @@ export function filesPlugin(jwtSecret: string) {
         return { path: config.filesRoot };
       }
     })
+
+    /**
+     * GET /api/files/audio-meta?path= — tags and technical detail for one audio file.
+     *
+     * Cover art is deliberately excluded and served by /audio-art instead: embedded art
+     * routinely runs to hundreds of kilobytes, and base64 in JSON would inflate it by a
+     * third and make it uncacheable.
+     */
+    .get("/audio-meta", async ({ query }) => {
+      let resolved: string;
+      try { resolved = guardPath(query.path); } catch { return forbidden(); }
+      if (!(await Bun.file(resolved).exists())) return notFound();
+
+      let parsed: Awaited<ReturnType<typeof parseFile>>;
+      try {
+        parsed = await parseFile(resolved);
+      } catch {
+        // An unreadable or non-audio file is an expected outcome here, not a fault.
+        return Response.json({ error: "Could not read audio metadata" }, { status: 422 });
+      }
+
+      const { common, format } = parsed;
+      return {
+        title:    common.title  ?? null,
+        artist:   common.artist ?? null,
+        album:    common.album  ?? null,
+        albumArtist: common.albumartist ?? null,
+        genre:    common.genre?.[0] ?? null,
+        year:     common.year   ?? null,
+        track:    common.track?.no ?? null,
+        trackOf:  common.track?.of ?? null,
+        container:  format.container  ?? null,
+        codec:      format.codec      ?? null,
+        bitrate:    format.bitrate    ? Math.round(format.bitrate) : null,
+        sampleRate: format.sampleRate ?? null,
+        bitsPerSample: format.bitsPerSample ?? null,
+        channels:   format.numberOfChannels ?? null,
+        duration:   format.duration   ?? null,
+        lossless:   format.lossless   ?? null,
+        hasArt:     (parsed.common.picture?.length ?? 0) > 0,
+      };
+    }, { query: t.Object({ path: t.String() }) })
+
+    /** GET /api/files/audio-art?path= — the first embedded cover image, as raw bytes. */
+    .get("/audio-art", async ({ query }) => {
+      let resolved: string;
+      try { resolved = guardPath(query.path); } catch { return forbidden(); }
+      if (!(await Bun.file(resolved).exists())) return notFound();
+
+      let pic: { format: string; data: Uint8Array } | undefined;
+      try {
+        pic = (await parseFile(resolved)).common.picture?.[0];
+      } catch {
+        return notFound();
+      }
+      if (!pic) return notFound();
+
+      return new Response(new Uint8Array(pic.data), {
+        headers: {
+          "Content-Type":  pic.format || "image/jpeg",
+          "Content-Length": String(pic.data.length),
+          // Private: this is the user's own library, not something a shared proxy may hold.
+          "Cache-Control": "private, max-age=300",
+        },
+      });
+    }, { query: t.Object({ path: t.String() }) })
+
+    /**
+     * POST /api/files/audio-tags-copy — copy tags from one audio file onto an MP3.
+     *
+     * Artwork is included, unlike the online lookup: both paths are local and already
+     * constrained by guardPath, so there is no request to a caller-supplied address here.
+     */
+    .post("/audio-tags-copy", async ({ body }) => {
+      let from: string, to: string;
+      try {
+        from = guardPath(body.from);
+        to   = guardPath(body.to);
+      } catch { return forbidden(); }
+
+      if (extname(to).toLowerCase() !== ".mp3") {
+        return Response.json({ error: "Tags can only be written to MP3 files" }, { status: 422 });
+      }
+      if (from === to) {
+        return Response.json({ error: "Source and destination are the same file" }, { status: 422 });
+      }
+      if (!(await Bun.file(from).exists()) || !(await Bun.file(to).exists())) return notFound();
+
+      let parsed: Awaited<ReturnType<typeof parseFile>>;
+      try {
+        parsed = await parseFile(from);
+      } catch {
+        return Response.json({ error: "Could not read tags from the source file" }, { status: 422 });
+      }
+
+      const { common } = parsed;
+      const tags: Record<string, unknown> = {};
+      if (common.title)  tags.title  = common.title;
+      if (common.artist) tags.artist = common.artist;
+      if (common.album)  tags.album  = common.album;
+      if (common.genre?.[0]) tags.genre = common.genre[0];
+      if (common.year)   tags.year   = String(common.year);
+
+      const pic = common.picture?.[0];
+      if (pic) {
+        tags.image = {
+          mime: pic.format,
+          type: { id: 3, name: "front cover" },
+          description: pic.description ?? "",
+          imageBuffer: Buffer.from(pic.data),
+        };
+      }
+
+      // Track number is deliberately excluded: it identifies a position within an album,
+      // so copying it from another track is nearly always wrong.
+      if (Object.keys(tags).length === 0) {
+        return Response.json({ error: "The source file has no tags to copy" }, { status: 422 });
+      }
+
+      try {
+        const result = NodeID3.update(tags, to);
+        if (result !== true) {
+          return Response.json(
+            { error: result instanceof Error ? result.message : "Failed to write tags" },
+            { status: 500 },
+          );
+        }
+      } catch (err) {
+        return Response.json(
+          { error: err instanceof Error ? err.message : "Failed to write tags" },
+          { status: 500 },
+        );
+      }
+
+      return { ok: true, copied: Object.keys(tags) };
+    }, { body: t.Object({ from: t.String(), to: t.String() }) })
+
+    /**
+     * GET /api/files/audio-lookup?q= — candidate track metadata from iTunes, then
+     * MusicBrainz if iTunes returns nothing.
+     *
+     * Gated on files.metadata_lookup. This is the only route in anpan-os that sends user
+     * data to a third party — the query describes what is in someone's library — so it
+     * stays off until explicitly enabled rather than degrading quietly.
+     */
+    .get("/audio-lookup", async ({ query }) => {
+      if (!config.metadataLookupEnabled) {
+        return Response.json(
+          { error: "Online metadata lookup is disabled. Set files.metadata_lookup = true in config.toml." },
+          { status: 403 },
+        );
+      }
+
+      const q = query.q.trim();
+      if (!q) return Response.json({ error: "Empty query" }, { status: 422 });
+
+      const candidates = await lookupItunes(q);
+      if (candidates.length > 0) return { candidates, source: "itunes" };
+
+      const fallback = await lookupMusicBrainz(q);
+      return { candidates: fallback, source: "musicbrainz" };
+    }, { query: t.Object({ q: t.String() }) })
+
+    /**
+     * POST /api/files/audio-tags — write ID3 tags to an MP3.
+     *
+     * MP3 only: node-id3 writes ID3 frames, which is not the tagging format FLAC or MP4
+     * use. Editing those would mean remuxing through ffmpeg — a whole-file rewrite to
+     * change one string — so they are refused here rather than silently mishandled.
+     *
+     * Uses update() rather than write(): update merges into the existing tag, so frames
+     * this UI does not expose — embedded art above all — survive an edit instead of being
+     * dropped on the first save.
+     */
+    .post("/audio-tags", async ({ body }) => {
+      let resolved: string;
+      try { resolved = guardPath(body.path); } catch { return forbidden(); }
+
+      if (extname(resolved).toLowerCase() !== ".mp3") {
+        return Response.json({ error: "Only MP3 files can be tagged" }, { status: 422 });
+      }
+      if (!(await Bun.file(resolved).exists())) return notFound();
+
+      // Undefined leaves a frame untouched; empty string clears it. Without this
+      // distinction a UI that omits a field would silently wipe it.
+      const tags: Record<string, string> = {};
+      for (const key of ["title", "artist", "album", "genre", "year", "trackNumber"] as const) {
+        const value = body[key];
+        if (value !== undefined) tags[key] = value;
+      }
+
+      if (Object.keys(tags).length === 0) {
+        return Response.json({ error: "No tags supplied" }, { status: 422 });
+      }
+
+      try {
+        const result = NodeID3.update(tags, resolved);
+        if (result !== true) {
+          return Response.json(
+            { error: result instanceof Error ? result.message : "Failed to write tags" },
+            { status: 500 },
+          );
+        }
+      } catch (err) {
+        return Response.json(
+          { error: err instanceof Error ? err.message : "Failed to write tags" },
+          { status: 500 },
+        );
+      }
+
+      return { ok: true };
+    }, {
+      body: t.Object({
+        path:        t.String(),
+        title:       t.Optional(t.String()),
+        artist:      t.Optional(t.String()),
+        album:       t.Optional(t.String()),
+        genre:       t.Optional(t.String()),
+        year:        t.Optional(t.String()),
+        trackNumber: t.Optional(t.String()),
+      }),
+    })
+
+    /**
+     * POST /api/files/convert-folder — SSE streaming conversion of every FLAC in a folder.
+     *
+     * Non-recursive: an album is one directory, and walking deeper would quietly turn
+     * "convert this album" into "convert this entire library".
+     *
+     * Files whose .mp3 already exists are skipped rather than treated as failures, so
+     * re-running after an interruption resumes instead of redoing the work.
+     */
+    .post(
+      "/convert-folder",
+      async function*({ body, request }) {
+        let dir: string;
+        try { dir = guardPath(body.path); } catch {
+          yield sse({ data: { error: "Access denied" } satisfies SSEMsg });
+          return;
+        }
+
+        const ffmpeg = bins.ffmpeg;
+        if (!ffmpeg) {
+          yield sse({ data: { error: "ffmpeg is not installed — see System Doctor" } satisfies SSEMsg });
+          return;
+        }
+
+        let names: string[];
+        try {
+          names = await readdir(dir);
+        } catch {
+          yield sse({ data: { error: "Could not read folder" } satisfies SSEMsg });
+          return;
+        }
+
+        const flacs = names.filter(n => extname(n).toLowerCase() === ".flac").sort();
+        if (flacs.length === 0) {
+          yield sse({ data: { error: "No FLAC files in this folder" } satisfies SSEMsg });
+          return;
+        }
+
+        const agg = new StreamAggregator();
+        let current: Bun.Subprocess | null = null;
+        let aborted = false;
+
+        request.signal.addEventListener("abort", () => {
+          aborted = true;
+          current?.kill();
+          agg.end();
+        }, { once: true });
+
+        void (async () => {
+          let converted = 0, skipped = 0;
+          try {
+            for (const [i, name] of flacs.entries()) {
+              if (aborted) return;
+
+              const source = join(dir, name);
+              const target = source.slice(0, -extname(source).length) + ".mp3";
+
+              if (await Bun.file(target).exists()) {
+                skipped++;
+                await agg.push({ log: `Skipped ${name} — .mp3 already exists` });
+                // Progress tracks files handled, not audio decoded: per-file percentages
+                // would keep resetting and tell the user nothing about the album.
+                await agg.push({ progress: Math.round(((i + 1) / flacs.length) * 100) });
+                continue;
+              }
+
+              await agg.push({ log: `Converting ${name}…` });
+              const proc = Bun.spawn(
+                [ffmpeg, "-hide_banner", "-nostdin", "-y", "-loglevel", "error",
+                 "-i", source, "-b:a", "320k", "-map_metadata", "0", target],
+                { stdout: "pipe", stderr: "pipe" },
+              );
+              current = proc;
+
+              await Promise.all([
+                drainStream(proc.stdout, data => agg.push(data)),
+                drainStream(proc.stderr, data => agg.push(data)),
+              ]);
+              const code = await proc.exited;
+              current = null;
+
+              if (aborted) return;
+              if (code !== 0) {
+                await agg.push({ error: `ffmpeg failed on ${name} (exit ${code})` });
+                return;
+              }
+
+              converted++;
+              await agg.push({ progress: Math.round(((i + 1) / flacs.length) * 100) });
+            }
+
+            await agg.push({ log: `Done — ${converted} converted, ${skipped} skipped` });
+            await agg.push({ ok: true });
+          } catch (err) {
+            await agg.push({ error: err instanceof Error ? err.message : String(err) });
+          } finally {
+            agg.end();
+          }
+        })();
+
+        for await (const msg of agg) yield sse({ data: msg });
+      },
+      { body: t.Object({ path: t.String() }) },
+    )
+
+    /**
+     * POST /api/files/convert — SSE streaming FLAC → MP3 at 320k CBR.
+     *
+     * `-map_metadata 0` carries the FLAC's Vorbis comments over to ID3, so a converted
+     * track does not arrive untagged. Progress is read from `-progress pipe:1`, which is
+     * newline-delimited key=value; ffmpeg's default stats go to stderr separated by
+     * carriage returns, which a line-oriented reader would buffer into one enormous line.
+     */
+    .post(
+      "/convert",
+      async function*({ body, request }) {
+        let source: string;
+        try { source = guardPath(body.path); } catch {
+          yield sse({ data: { error: "Access denied" } satisfies SSEMsg });
+          return;
+        }
+
+        if (extname(source).toLowerCase() !== ".flac") {
+          yield sse({ data: { error: "Only FLAC files can be converted" } satisfies SSEMsg });
+          return;
+        }
+
+        const ffmpeg = bins.ffmpeg;
+        if (!ffmpeg) {
+          yield sse({ data: { error: "ffmpeg is not installed — see System Doctor" } satisfies SSEMsg });
+          return;
+        }
+
+        const src = Bun.file(source);
+        if (!(await src.exists())) {
+          yield sse({ data: { error: "Source file no longer exists" } satisfies SSEMsg });
+          return;
+        }
+
+        const target = source.slice(0, -extname(source).length) + ".mp3";
+        if (!body.overwrite && await Bun.file(target).exists()) {
+          yield sse({ data: {
+            error:    `${basename(target)} already exists.`,
+            conflict: true,
+          } satisfies SSEMsg });
+          return;
+        }
+
+        const agg = new StreamAggregator();
+        const proc = Bun.spawn(
+          [
+            ffmpeg, "-hide_banner", "-nostdin", "-y",
+            "-i", source,
+            "-b:a", "320k", "-map_metadata", "0",
+            "-nostats", "-progress", "pipe:1",
+            target,
+          ],
+          { stdout: "pipe", stderr: "pipe" },
+        );
+
+        // Without this a client that closes the tab leaves ffmpeg transcoding to completion
+        // with nothing consuming its output — and once the aggregator's buffer fills, the
+        // producers suspend forever and the subprocess is never reaped.
+        request.signal.addEventListener("abort", () => { proc.kill(); agg.end(); }, { once: true });
+
+        void (async () => {
+          let totalUs = 0;
+          let lastPct = -1;
+          try {
+            await Promise.all([
+              // stdout: progress key=value pairs
+              drainStream(proc.stdout, async data => {
+                const line = data.log ?? "";
+                const us = line.match(/^out_time_us=(\d+)/)?.[1];
+                if (us && totalUs > 0) {
+                  const pct = Math.min(99, Math.floor((Number(us) / totalUs) * 100));
+                  // Emit only on change: ffmpeg reports several times a second and every
+                  // duplicate costs a frame the client has to render.
+                  if (pct !== lastPct) {
+                    lastPct = pct;
+                    await agg.push({ progress: pct });
+                  }
+                }
+              }),
+              // stderr: banner, the Duration line, and any real error
+              drainStream(proc.stderr, async data => {
+                const line = data.log ?? "";
+                const d = line.match(/Duration:\s*(\d+):(\d\d):(\d\d)\.(\d+)/);
+                if (d) {
+                  const [, h, m, s, cs] = d;
+                  totalUs = ((Number(h) * 3600 + Number(m) * 60 + Number(s)) * 100 + Number(cs)) * 10_000;
+                }
+                await agg.push({ log: line });
+              }),
+            ]);
+
+            const code = await proc.exited;
+            if (code !== 0) {
+              await agg.push({ error: `ffmpeg exited with code ${code}` });
+            } else {
+              await agg.push({ progress: 100 });
+              await agg.push({ log: `Wrote ${basename(target)}` });
+              await agg.push({ ok: true });
+            }
+          } catch (err) {
+            await agg.push({ error: err instanceof Error ? err.message : String(err) });
+          } finally {
+            agg.end();
+          }
+        })();
+
+        for await (const msg of agg) yield sse({ data: msg });
+      },
+      { body: t.Object({ path: t.String(), overwrite: t.Optional(t.Boolean()) }) },
+    )
 
     // POST /api/files/copy — SSE streaming copy (rsync or cp fallback)
     .post(
