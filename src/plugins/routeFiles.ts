@@ -39,6 +39,24 @@ function guardPath(inputPath: string): string {
   return resolved;
 }
 
+/**
+ * Legacy `x-` media types Bun reports, mapped to their registered equivalents.
+ *
+ * Browsers vary in how forgiving they are: Firefox will not decode `audio/x-flac` at all,
+ * so a perfectly playable file is rejected before the decoder ever sees it. The registered
+ * names (audio/flac is RFC 9639) are understood everywhere.
+ */
+const CANONICAL_MIME: Record<string, string> = {
+  "audio/x-flac": "audio/flac",
+  "audio/x-wav":  "audio/wav",
+  "audio/x-m4a":  "audio/mp4",
+  "audio/x-aac":  "audio/aac",
+};
+
+function canonicalMime(type: string): string {
+  return CANONICAL_MIME[type] ?? type;
+}
+
 function forbidden()   { return Response.json({ error: "Access denied" },     { status: 403 }); }
 function notFound()    { return Response.json({ error: "Not found" },          { status: 404 }); }
 function tooLarge()    { return Response.json({ error: "File too large" },     { status: 413 }); }
@@ -187,18 +205,86 @@ export function filesPlugin(jwtSecret: string) {
     }, { body: t.Object({ from: t.String(), to: t.String() }) })
 
     // GET /api/files/download?path=
-    .get("/download", async ({ query }) => {
+    // Range is served explicitly rather than left to Bun's implicit handling of
+    // file-backed responses. That implicit path works for a route defined in isolation,
+    // but not once the route is inside this plugin: the response arrives without
+    // Content-Length or Accept-Ranges, and a Range request is answered 200 with the whole
+    // body. A media element treats such a resource as non-seekable, so audio and video
+    // previews would play but refuse to scrub.
+    .get("/download", async ({ query, request, set }) => {
       let resolved: string;
       try { resolved = guardPath(query.path); } catch { return forbidden(); }
       const file = Bun.file(resolved);
       if (!(await file.exists())) return notFound();
+
+      const size = file.size;
+      const type = canonicalMime(file.type || "application/octet-stream");
+      // The preview asks for inline; "attachment" tells the browser to save rather than
+      // render, which is right for the Download action and wrong for a <video> or <audio>.
+      // RFC 6266 filename* carries the UTF-8 name, since filename="" is ASCII-only and
+      // these are frequently not ASCII at all.
+      const name = basename(resolved);
+      // filename="" is a header value, so it must stay printable ASCII — a raw name like
+      // "01 ベリーグッド.flac" makes the whole response throw, which surfaced as a 500 on
+      // both preview and download for every non-ASCII filename. The readable name travels
+      // in filename* instead, which is defined as UTF-8 and which every current browser
+      // prefers when both are present.
+      const asciiName = name.replace(/[^\x20-\x7E]/g, "_").replace(/["\\]/g, "_");
+      const disposition =
+        `${query.inline === "1" ? "inline" : "attachment"}; `
+        + `filename="${asciiName}"; `
+        + `filename*=UTF-8''${encodeURIComponent(name)}`;
+      const range = request.headers.get("range");
+
+      // Only "bytes=start-end" is honoured; multi-range requests are rare and no browser
+      // needs them for media playback, so anything else falls through to the full body.
+      const match = range?.match(/^bytes=(\d*)-(\d*)$/);
+      if (match) {
+        const [, rawStart, rawEnd] = match;
+        // "bytes=-500" means the final 500 bytes, not a range starting at zero.
+        const suffix = rawStart === "";
+        const start  = suffix ? Math.max(0, size - Number(rawEnd)) : Number(rawStart);
+        const end    = suffix || rawEnd === "" ? size - 1 : Math.min(Number(rawEnd), size - 1);
+
+        if (!Number.isFinite(start) || start >= size || start > end) {
+          set.status = 416;
+          set.headers["content-range"] = `bytes */${size}`;
+          return "Range Not Satisfiable";
+        }
+
+        // A client may ask for the whole remainder ("bytes=0-"). Serving fewer bytes than
+        // requested is allowed as long as Content-Range describes what was actually sent,
+        // so the chunk is capped to keep an open-ended range off the heap.
+        const MAX_CHUNK = 8 * 1024 * 1024;
+        const cappedEnd = Math.min(end, start + MAX_CHUNK - 1);
+
+        // Read the slice into memory rather than handing back a lazy file slice: passing a
+        // sliced BunFile through this plugin yields a body that honours the start offset
+        // but streams to EOF, so the response would contradict its own Content-Range.
+        const chunk = await file.slice(start, cappedEnd + 1).arrayBuffer();
+
+        return new Response(chunk, {
+          status: 206,
+          headers: {
+            "Content-Range":       `bytes ${start}-${cappedEnd}/${size}`,
+            "Content-Length":      String(chunk.byteLength),
+            "Accept-Ranges":       "bytes",
+            "Content-Disposition": disposition,
+            "Content-Type":        type,
+          },
+        });
+      }
+
       return new Response(file, {
         headers: {
-          "Content-Disposition": `attachment; filename="${basename(resolved)}"`,
-          "Content-Type": file.type || "application/octet-stream",
+          // Advertise range support, or the browser will not offer a seek bar at all.
+          "Accept-Ranges":       "bytes",
+          "Content-Length":      String(size),
+          "Content-Disposition": disposition,
+          "Content-Type":        type,
         },
       });
-    }, { query: t.Object({ path: t.String() }) })
+    }, { query: t.Object({ path: t.String(), inline: t.Optional(t.String()) }) })
 
     // POST /api/files/upload?path=
     .post("/upload", async ({ query, body }) => {

@@ -41,24 +41,33 @@ function ImageViewer({ src, name }: { src: string; name: string }) {
   );
 }
 
-function VideoPlayer({ src }: { src: string }) {
-  const ref = useRef<HTMLVideoElement>(null);
-  useEffect(() => {
-    if (!ref.current) return;
-    const p = new Plyr(ref.current, { controls: ["play","progress","current-time","mute","volume","fullscreen"] });
-    return () => { p.destroy(); };
-  }, [src]);
-  return <video ref={ref} src={src} className="w-full rounded" />;
-}
+const PLYR_CONTROLS = {
+  video: ["play", "progress", "current-time", "mute", "volume", "fullscreen"],
+  audio: ["play", "progress", "current-time", "mute", "volume"],
+} as const;
 
-function AudioPlayer({ src }: { src: string }) {
-  const ref = useRef<HTMLAudioElement>(null);
+/**
+ * Media preview, styled by Plyr.
+ *
+ * Seeking was broken here for a while, which looked like a player fault but was not: the
+ * download route did not advertise Accept-Ranges, so the browser treated the file as
+ * non-seekable and refused to scrub in any player, Plyr or native. That is fixed in
+ * routeFiles; Plyr was never implicated.
+ */
+function MediaPlayer({ src, kind }: { src: string; kind: "audio" | "video" }) {
+  const ref = useRef<HTMLVideoElement & HTMLAudioElement>(null);
+
   useEffect(() => {
     if (!ref.current) return;
-    const p = new Plyr(ref.current, { controls: ["play","progress","current-time","mute","volume"] });
-    return () => { p.destroy(); };
-  }, [src]);
-  return <audio ref={ref} src={src} className="w-full" />;
+    const player = new Plyr(ref.current, { controls: [...PLYR_CONTROLS[kind]] });
+    return () => { player.destroy(); };
+  }, [src, kind]);
+
+  // preload="metadata" so a duration — and therefore a usable seek bar — exists before
+  // the first play rather than only once playback has started.
+  return kind === "video"
+    ? <video ref={ref} src={src} preload="metadata" className="w-full rounded" />
+    : <audio ref={ref} src={src} preload="metadata" className="w-full" />;
 }
 
 // ─── FilePreview ──────────────────────────────────────────────────────────────
@@ -75,10 +84,12 @@ export interface FilePreviewProps {
 
 export function FilePreview({ entry, content, binary, onContentChange, onSave, saving, saveMsg }: FilePreviewProps) {
   const downloadUrl = `/api/files/download?path=${encodeURIComponent(entry.path)}`;
+  // Previewing is not downloading: inline lets the browser render the bytes in place.
+  const inlineUrl   = `${downloadUrl}&inline=1`;
 
-  if (IMAGE_EXTS.has(entry.ext)) return <ImageViewer src={downloadUrl} name={entry.name} />;
-  if (VIDEO_EXTS.has(entry.ext)) return <VideoPlayer src={downloadUrl} />;
-  if (AUDIO_EXTS.has(entry.ext)) return <AudioPlayer src={downloadUrl} />;
+  if (IMAGE_EXTS.has(entry.ext)) return <ImageViewer src={inlineUrl} name={entry.name} />;
+  if (VIDEO_EXTS.has(entry.ext)) return <MediaPlayer src={inlineUrl} kind="video" />;
+  if (AUDIO_EXTS.has(entry.ext)) return <MediaPlayer src={inlineUrl} kind="audio" />;
 
   if (!binary) {
     return (
