@@ -1,5 +1,30 @@
 # Roadmap
 
+## v0.9.0 — 2026-08-11
+
+### Bug fixes
+- **Files with non-ASCII names returned 500** — the download route put the raw filename in `Content-Disposition`, whose value must be printable ASCII, so the response threw before any bytes were sent. Any file whose name was not plain ASCII failed to download *and* failed to preview. The header now carries a sanitised `filename=""` plus RFC 6266 `filename*=UTF-8''…`, so browsers still save under the original name
+- **Audio and video could not be seeked** — dragging the scrub bar either restarted playback or did nothing. The route relied on Bun's implicit range handling for file-backed responses, which does not survive this plugin: the response arrived with no `Content-Length` and no `Accept-Ranges`, and a range request was answered `200` with the entire file. A browser treats that as non-seekable. Range is now served explicitly, including suffix (`bytes=-500`) and open-ended (`bytes=100-`) forms, with `416` for an unsatisfiable range and a plain `200` for a malformed one
+- **Legacy audio MIME types** — Bun reports `audio/x-flac`, which Firefox will not decode. `x-flac`, `x-wav`, `x-m4a` and `x-aac` are mapped to their registered names
+- **Previews were served as attachments** — `Content-Disposition: attachment` asks the browser to save rather than render. Previews now request `inline`; the Download action is unchanged
+
+### New features
+- **Show/hide dotfiles in the file browser** — toolbar toggle, remembered across sessions, with the count of hidden entries in its tooltip. Select-all is scoped to visible entries, and hiding drops any selected dotfile, so a selection can never include a file that is not on screen
+
+### Improvements
+- The Docker image update checker no longer appears in the Files page top bar, where it has nothing to act on
+- Media previews declare `preload="metadata"`, so a duration and a usable seek bar exist before the first play rather than only after playback starts
+
+### Dependencies
+- **TypeScript 7.0.2** — the native compiler. Typechecks the codebase with no changes required; `types: ["bun"]` was already set, which is the notable v6 → v7 break. `typescript` is now consistent across `devDependencies`, `peerDependencies` and `overrides`, which is what actually decides the version `tsc` runs
+- lucide-react 1.28.0 → 1.31.0
+
+### Notes
+- Open-ended ranges are capped at 8 MB per response. Serving fewer bytes than requested is allowed as long as `Content-Range` describes what was sent, and it keeps `bytes=0-` against a multi-gigabyte video off the heap
+- Range responses materialise the requested slice. Handing a lazily sliced `BunFile` to this plugin produced a body that honoured the start offset but streamed to EOF — a `206` contradicting its own `Content-Range`
+
+---
+
 ## v0.8.2 — 2026-08-01
 
 ### New features

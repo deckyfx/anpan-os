@@ -12,6 +12,27 @@ function debounce<T extends unknown[]>(fn: (...args: T) => void, ms: number) {
   };
 }
 
+const SHOW_HIDDEN_KEY = "anpan.files.showHidden";
+
+/** Persisted dotfile preference. Defaults to hiding them, as every file manager does. */
+function readShowHidden(): boolean {
+  try {
+    return localStorage.getItem(SHOW_HIDDEN_KEY) === "1";
+  } catch {
+    return false;   // private mode / storage disabled
+  }
+}
+
+/**
+ * The entries a user can currently see.
+ *
+ * Everything acting on "all files" — select-all above all — has to go through this, or it
+ * would reach dotfiles that are not on screen and cannot be deselected.
+ */
+export function visibleEntries(entries: FileEntry[], showHidden: boolean): FileEntry[] {
+  return showHidden ? entries : entries.filter(e => !e.name.startsWith("."));
+}
+
 interface NavHistory {
   stack: string[];
   idx:   number;
@@ -55,6 +76,8 @@ interface FileState {
 
   // ── View / selection ──────────────────────────────────────────────────────
   viewMode:      ViewMode;
+  /** Show dotfiles. Off by default, and remembered across sessions. */
+  showHidden:    boolean;
   selectedPaths: Set<string>;
 
   // ── Context menu ──────────────────────────────────────────────────────────
@@ -149,6 +172,7 @@ interface FileState {
   // Selection
   toggleSelect:    (path: string) => void;
   toggleSelectAll: () => void;
+  toggleShowHidden: () => void;
 
   // Setters
   setAddressValue:      (v: string) => void;
@@ -202,6 +226,7 @@ export const useFileStore = create<FileState>((set, get) => ({
   newFolderName:  "",
 
   viewMode:      "list",
+  showHidden:    readShowHidden(),
   selectedPaths: new Set<string>(),
 
   ctxMenu: null,
@@ -714,8 +739,24 @@ export const useFileStore = create<FileState>((set, get) => ({
 
   toggleSelectAll: () => {
     set((s) => {
-      const allSelected = s.entries.length > 0 && s.entries.every(e => s.selectedPaths.has(e.path));
-      return { selectedPaths: allSelected ? new Set<string>() : new Set(s.entries.map(e => e.path)) };
+      // Scoped to visible entries: selecting a dotfile the user cannot see would leave
+      // them holding a selection they have no way to inspect or clear.
+      const visible = visibleEntries(s.entries, s.showHidden);
+      const allSelected = visible.length > 0 && visible.every(e => s.selectedPaths.has(e.path));
+      return { selectedPaths: allSelected ? new Set<string>() : new Set(visible.map(e => e.path)) };
+    });
+  },
+
+  toggleShowHidden: () => {
+    set((s) => {
+      const showHidden = !s.showHidden;
+      try { localStorage.setItem(SHOW_HIDDEN_KEY, showHidden ? "1" : "0"); } catch { /* storage disabled */ }
+      // Drop any selected dotfile on the way out, so hiding cannot strand a selection.
+      const keep = new Set(visibleEntries(s.entries, showHidden).map(e => e.path));
+      return {
+        showHidden,
+        selectedPaths: new Set([...s.selectedPaths].filter(p => keep.has(p))),
+      };
     });
   },
 

@@ -43,7 +43,7 @@ const MENU_ITEMS: NavItem[] = [
  * @param currentPath - Current route path used to determine which menu item is active (defaults to "/")
  * @returns The header element containing the top bar and its managed dialogs
  */
-export function TopBar({ username, version, hasPasskey, onLogout, onNavigate, onAddPasskey, currentPath = "/" }: {
+export function TopBar({ username, version, hasPasskey, onLogout, onNavigate, onAddPasskey, currentPath = "/", showUpdates = true }: {
   username: string;
   version: string;
   hasPasskey: boolean | null;
@@ -51,6 +51,8 @@ export function TopBar({ username, version, hasPasskey, onLogout, onNavigate, on
   onNavigate: (path: string) => void;
   onAddPasskey: () => Promise<void>;
   currentPath?: string;
+  /** Docker image update checker. Off on pages that have nothing to do with stacks. */
+  showUpdates?: boolean;
 }) {
   const { isRoot, hasBin } = useSystemStore();
   const canPowerCtl = isRoot && hasBin("systemctl");
@@ -179,6 +181,7 @@ export function TopBar({ username, version, hasPasskey, onLogout, onNavigate, on
       </button>
 
       {/* Check Updates button */}
+      {showUpdates && (
       <div className="ml-3 relative shrink-0">
         <button
           onClick={() => checking ? cancelCheck() : startCheck()}
@@ -206,6 +209,7 @@ export function TopBar({ username, version, hasPasskey, onLogout, onNavigate, on
           </button>
         )}
       </div>
+      )}
 
       {/* Version badge — far right */}
       <button

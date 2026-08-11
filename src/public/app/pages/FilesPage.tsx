@@ -1,5 +1,5 @@
-import { useRef, useEffect, useState } from "react";
-import { useFileStore }  from "../stores/fileStore";
+import { useRef, useEffect, useState, useMemo } from "react";
+import { useFileStore, visibleEntries }  from "../stores/fileStore";
 import { useAuthStore }  from "../stores/authStore";
 import { useStacksStore } from "../stores/stacksStore";
 import { useSystemStore } from "../stores/systemStore";
@@ -8,7 +8,7 @@ import { ChevronLeft, ChevronRight, FolderUp, House, LayoutGrid, List,
          FolderOpen, Pencil, Download, Archive, PackageOpen, ShieldCheck, Info,
          Trash2, FolderPlus, Upload, Network, Share2, FolderMinus,
          Copy, Scissors, ClipboardPaste, PanelRight, FolderSearch, RefreshCw,
-         Bookmark, X, Settings, Settings2, Check } from "lucide-react";
+         Bookmark, X, Settings, Settings2, Check, Eye, EyeOff } from "lucide-react";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { Dialog }        from "../components/Dialog";
 import type { FileEntry } from "./files/types";
@@ -50,6 +50,7 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
     creatingFolder, newFolderName, setCreatingFolder, setNewFolderName, commitNewFolder,
     // View / selection
     viewMode, setViewMode, selectedPaths, toggleSelect, toggleSelectAll,
+    showHidden, toggleShowHidden,
     // Context menu
     ctxMenu, setCtxMenu,
     // Upload
@@ -156,8 +157,16 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
   // Only anpan-managed paths — used to gate "Remove Share" vs "Share…" actions
   const managedSharedPaths = new Set(shares.filter(s => s.source === "anpan").map(s => s.path));
 
+  // Dotfiles are filtered here rather than server-side: the listing is already fetched,
+  // and toggling stays instant instead of costing a round trip.
+  const shownEntries = useMemo(
+    () => visibleEntries(entries, showHidden),
+    [entries, showHidden],
+  );
+  const hiddenCount = entries.length - shownEntries.length;
+
   const sharedRowProps = {
-    entries, creatingFolder, newFolderName, renamingPath, renameValue, selectedPaths,
+    entries: shownEntries, creatingFolder, newFolderName, renamingPath, renameValue, selectedPaths,
     sharedPaths: allSharedPaths, clipboard,
     onRowClick: handleRowClick, onRowCtx: handleRowCtx,
     onRenameChange: setRenameValue, onRenameCommit: commitRename,
@@ -180,6 +189,7 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
         onNavigate={onNavigate}
         onAddPasskey={() => registerPasskey("This device")}
         currentPath="/files"
+        showUpdates={false}
       />
 
       {/* Toolbar */}
@@ -302,6 +312,16 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
           {viewMode === "list" ? <LayoutGrid size={16} /> : <List size={16} />}
         </button>
 
+        <button onClick={toggleShowHidden}
+          title={showHidden
+            ? "Hide dotfiles"
+            : `Show dotfiles${hiddenCount > 0 ? ` (${hiddenCount} hidden here)` : ""}`}
+          aria-pressed={showHidden}
+          aria-label={showHidden ? "Hide hidden files" : "Show hidden files"}
+          className={`p-1.5 rounded-lg transition-colors shrink-0 ${showHidden ? "text-white bg-gray-700" : "text-gray-400 hover:text-white hover:bg-gray-800"}`}>
+          {showHidden ? <Eye size={16} /> : <EyeOff size={16} />}
+        </button>
+
         <button onClick={togglePanel} title={panelOpen ? "Hide info panel" : "Show info panel"}
           className={`p-1.5 rounded-lg transition-colors shrink-0 ${panelOpen ? "text-white bg-gray-700" : "text-gray-400 hover:text-white hover:bg-gray-800"}`}>
           <PanelRight size={16} />
@@ -367,7 +387,7 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
           <aside className="w-72 shrink-0 border-l border-gray-800 overflow-y-auto">
             <FileInfoPanel
               currentPath={currentPath}
-              entries={entries}
+              entries={shownEntries}
               selectedPaths={selectedPaths}
             />
           </aside>
