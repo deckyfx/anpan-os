@@ -1,6 +1,6 @@
 # Roadmap
 
-## v0.9.0 — 2026-08-11
+## v0.9.0 — 2026-08-12
 
 ### Bug fixes
 - **Files with non-ASCII names returned 500** — the download route put the raw filename in `Content-Disposition`, whose value must be printable ASCII, so the response threw before any bytes were sent. Any file whose name was not plain ASCII failed to download *and* failed to preview. The header now carries a sanitised `filename=""` plus RFC 6266 `filename*=UTF-8''…`, so browsers still save under the original name
@@ -10,6 +10,15 @@
 
 ### New features
 - **Show/hide dotfiles in the file browser** — toolbar toggle, remembered across sessions, with the count of hidden entries in its tooltip. Select-all is scoped to visible entries, and hiding drops any selected dotfile, so a selection can never include a file that is not on screen
+- **FLAC → MP3 conversion** — single file or a whole album folder, at 320k CBR with `-map_metadata 0` so tags carry over instead of the track arriving untagged. Live progress; folder conversion skips files whose `.mp3` already exists, so an interrupted run resumes rather than repeating work
+- **Audio metadata panel** — album art, tags and a technical line (`FLAC · 24-bit · 96 kHz · stereo · 3:34 · lossless`) beneath the preview player
+- **ID3 tag editor** — edit title, artist, album, genre, year and track on MP3s. Writes merge into the existing tag, so embedded artwork and frames the form does not expose survive an edit
+- **Online metadata lookup** — iTunes with a MusicBrainz fallback, **off by default** behind `files.metadata_lookup`. It is the only route that sends user data to a third party, so it stays off until explicitly enabled
+- **Copy tags between files** — including artwork; track number is excluded, since it identifies a position within an album
+
+### Security
+- **Embedded artwork is no longer served with the MIME declared inside the file.** That value is attacker-controlled — a crafted track can claim `text/html` — and the route is same-origin and cookie-authenticated, so it would have rendered that markup in the app's own origin. Only recognised image types pass through; anything else is served as binary, with `X-Content-Type-Options: nosniff`
+- **Fixed a deadlock in SSE streaming** affecting compose operations as well as the new audio ones. `StreamAggregator.push()` checked buffer capacity but not whether the stream had ended, so a producer woken by `end()` while the buffer was full re-queued itself onto a queue nothing would drain again — hanging forever and holding its subprocess and pipes open
 
 ### Improvements
 - The Docker image update checker no longer appears in the Files page top bar, where it has nothing to act on
@@ -18,6 +27,8 @@
 ### Dependencies
 - **TypeScript 7.0.2** — the native compiler. Typechecks the codebase with no changes required; `types: ["bun"]` was already set, which is the notable v6 → v7 break. `typescript` is now consistent across `devDependencies`, `peerDependencies` and `overrides`, which is what actually decides the version `tsc` runs
 - lucide-react 1.28.0 → 1.31.0
+- **music-metadata** for reading tags (handles FLAC, so a file can be inspected before conversion) and **node-id3** for writing them. `node-taglib-sharp` was rejected despite being more capable: LGPL-2.1 does not sit well with shipping a single statically-bundled executable
+- **ffmpeg** is now a registered external tool and appears in System Doctor with an install hint
 
 ### Notes
 - Open-ended ranges are capped at 8 MB per response. Serving fewer bytes than requested is allowed as long as `Content-Range` describes what was sent, and it keeps `bytes=0-` against a multi-gigabyte video off the heap
