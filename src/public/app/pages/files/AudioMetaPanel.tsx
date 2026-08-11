@@ -87,7 +87,12 @@ function formFromMeta(m: AudioMeta): EditForm {
     album:       m.album  ?? "",
     genre:       m.genre  ?? "",
     year:        m.year   != null ? String(m.year)  : "",
-    trackNumber: m.track  != null ? String(m.track) : "",
+    // Carries the total through as "3/12". TRCK holds both, so loading only the number
+    // and saving it back would silently drop the total — even when the user came to edit
+    // something else entirely.
+    trackNumber: m.track != null
+      ? (m.trackOf != null ? `${m.track}/${m.trackOf}` : String(m.track))
+      : "",
   };
 }
 
@@ -121,6 +126,11 @@ export function AudioMetaPanel({ path }: { path: string }) {
     setFailed(false);
     setEditing(false);
     setSaveError("");
+    // Editor state belongs to the file that was open. Leaving it behind would offer the
+    // previous track's suggestions — and let them be applied — against the new one.
+    setForm(null);
+    setCandidates(null);
+    setLookupError("");
 
     void (async () => {
       try {

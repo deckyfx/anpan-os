@@ -72,6 +72,11 @@ function rfc5987(value: string): string {
     .replace(/['()*]/g, c => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
 }
 
+/** Image types embedded artwork may be served as. Anything else is not rendered as such. */
+const ART_MIME = new Set([
+  "image/jpeg", "image/png", "image/gif", "image/webp", "image/bmp", "image/avif",
+]);
+
 // ─── Online metadata lookup ───────────────────────────────────────────────────
 
 /** A track suggestion from an external catalogue. */
@@ -571,7 +576,12 @@ export function filesPlugin(jwtSecret: string) {
 
       return new Response(new Uint8Array(pic.data), {
         headers: {
-          "Content-Type":  pic.format || "image/jpeg",
+          // pic.format is data from inside the file, so a crafted track could declare
+          // text/html and — on a same-origin, cookie-authenticated route — have it
+          // rendered as markup in the app's own origin. Anything unrecognised is served
+          // as a generic binary, and nosniff stops the browser second-guessing that.
+          "Content-Type":  ART_MIME.has(pic.format) ? pic.format : "application/octet-stream",
+          "X-Content-Type-Options": "nosniff",
           "Content-Length": String(pic.data.length),
           // Private: this is the user's own library, not something a shared proxy may hold.
           "Cache-Control": "private, max-age=300",

@@ -27,10 +27,17 @@ export class StreamAggregator {
 
   /** Enqueue a message; suspends the caller when the buffer is full. */
   async push(data: SSEMsg): Promise<void> {
+    // Checked before and after the wait, not only on entry. end() wakes every blocked
+    // producer, but a consumer that has stopped leaves the buffer full — so a producer
+    // resumed by end() would re-queue itself onto a queue nothing will ever drain again
+    // and hang forever, keeping its subprocess and pipes alive with it.
+    if (this.done) return;
+
     // Loop so each resumed producer re-checks capacity before pushing,
     // preventing concurrent producers from bypassing MAX_BUFFER.
     while (this.buffer.length >= MAX_BUFFER) {
       await new Promise<void>(r => { this.producerQueue.push(r); });
+      if (this.done) return;
     }
     this.buffer.push(data);
     this.consumerResolver?.();
