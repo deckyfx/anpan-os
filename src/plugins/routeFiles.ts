@@ -964,7 +964,7 @@ export function filesPlugin(jwtSecret: string) {
     // POST /api/files/copy — SSE streaming copy (rsync or cp fallback)
     .post(
       "/copy",
-      async function*({ body }) {
+      async function*({ body, request }) {
         let sources: string[];
         let destination: string;
         try {
@@ -978,18 +978,33 @@ export function filesPlugin(jwtSecret: string) {
         const agg = new StreamAggregator();
         const hasRsync = await commands.isAvailable("rsync");
 
+        // A closed tab used to leave rsync running with nothing consuming its output.
+        // The copy loop spawns one process per source, so the listener kills whichever is
+        // current rather than a single captured handle.
+        let current: Bun.Subprocess | null = null;
+        let aborted = false;
+        request.signal.addEventListener("abort", () => {
+          aborted = true;
+          current?.kill();
+          agg.end();
+        }, { once: true });
+
         void (async () => {
           try {
             for (const src of sources) {
+              if (aborted) return;
               const args = hasRsync && bins.rsync
                 ? [bins.rsync, "-av", src, destination]
                 : [bins.cp ?? "cp", "-rv", src, destination];
               const proc = Bun.spawn(args, { stdout: "pipe", stderr: "pipe" });
+              current = proc;
               await Promise.all([
                 drainStream(proc.stdout, data => agg.push(data)),
                 drainStream(proc.stderr, data => agg.push(data)),
               ]);
               const code = await proc.exited;
+              current = null;
+              if (aborted) return;
               if (code !== 0) {
                 await agg.push({ error: `Copy failed with exit code ${code}` });
                 agg.end();
@@ -1012,7 +1027,7 @@ export function filesPlugin(jwtSecret: string) {
     // POST /api/files/move — SSE streaming move (same-device: mv; cross-device: rsync/cp+rm)
     .post(
       "/move",
-      async function*({ body }) {
+      async function*({ body, request }) {
         let sources: string[];
         let destination: string;
         try {
@@ -1024,6 +1039,17 @@ export function filesPlugin(jwtSecret: string) {
         }
 
         const agg = new StreamAggregator();
+
+        // The move loop spawns up to three different processes per source — mv on the
+        // same device, otherwise rsync or cp followed by a remove — so the listener kills
+        // whichever is current rather than one captured handle.
+        let current: Bun.Subprocess | null = null;
+        let aborted = false;
+        request.signal.addEventListener("abort", () => {
+          aborted = true;
+          current?.kill();
+          agg.end();
+        }, { once: true });
 
         void (async () => {
           try {
@@ -1038,11 +1064,14 @@ export function filesPlugin(jwtSecret: string) {
               if (sameDev && bins.mv) {
                 // Same device — instant atomic move
                 const proc = Bun.spawn([bins.mv, "-v", src, destination], { stdout: "pipe", stderr: "pipe" });
+                current = proc;
                 await Promise.all([
                   drainStream(proc.stdout, data => agg.push(data)),
                   drainStream(proc.stderr, data => agg.push(data)),
                 ]);
                 const code = await proc.exited;
+                current = null;
+                if (aborted) return;
                 if (code !== 0) {
                   await agg.push({ error: `Move failed with exit code ${code}` });
                   agg.end();
@@ -1053,11 +1082,14 @@ export function filesPlugin(jwtSecret: string) {
                 const hasRsync = await commands.isAvailable("rsync");
                 if (hasRsync && bins.rsync) {
                   const proc = Bun.spawn([bins.rsync, "-av", "--remove-source-files", src, destination], { stdout: "pipe", stderr: "pipe" });
+                  current = proc;
                   await Promise.all([
                     drainStream(proc.stdout, data => agg.push(data)),
                     drainStream(proc.stderr, data => agg.push(data)),
                   ]);
                   const code = await proc.exited;
+                current = null;
+                if (aborted) return;
                   if (code !== 0) {
                     await agg.push({ error: `Move failed with exit code ${code}` });
                     agg.end();
@@ -1076,11 +1108,14 @@ export function filesPlugin(jwtSecret: string) {
                   // cp then rm fallback
                   const cpArgs = [bins.cp ?? "cp", "-rv", src, destination];
                   const cpProc = Bun.spawn(cpArgs, { stdout: "pipe", stderr: "pipe" });
+                  current = cpProc;
                   await Promise.all([
                     drainStream(cpProc.stdout, data => agg.push(data)),
                     drainStream(cpProc.stderr, data => agg.push(data)),
                   ]);
                   const cpCode = await cpProc.exited;
+                  current = null;
+                  if (aborted) return;
                   if (cpCode !== 0) {
                     await agg.push({ error: `Copy phase failed with exit code ${cpCode}` });
                     agg.end();
