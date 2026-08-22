@@ -198,7 +198,17 @@ export const useUpdateCheckStore = create<UpdateCheckState>((set, get) => ({
 
     let outcome: StartOutcome | null = null;
     try {
-      const { data } = await uc().start.post(body);
+      const { data, error } = await uc().start.post(body);
+      // Eden reports a non-2xx as an error value with null data rather than throwing, so
+      // without this the request would fail silently on the manual path.
+      if (error) {
+        if (!opts.auto) {
+          const message = (error as { value?: { error?: string } }).value?.error
+            ?? "The server rejected the update check";
+          useToastStore.getState().push(message, "error");
+        }
+        return null;
+      }
       outcome = data as StartOutcome | null;
     } catch (err) {
       // A rejected request used to escape as an unhandled rejection, leaving someone who

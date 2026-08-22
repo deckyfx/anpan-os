@@ -60,25 +60,54 @@ export class Broadcast<T> {
    *
    * Callers send their own snapshot first: a late joiner needs current state before
    * deltas make sense, and only the caller knows what a snapshot looks like.
+   *
+   * Note that an async generator does not run its body until the first `next()`, so this
+   * does not attach on call. When a snapshot has to be read without losing events
+   * published while reading it, use {@link attach} instead.
    */
   async *subscribe(signal?: AbortSignal): AsyncGenerator<T> {
+    yield* this.attach(signal).events;
+  }
+
+  /**
+   * Register a subscriber immediately and return its stream.
+   *
+   * Attaching eagerly closes a gap that {@link subscribe} cannot: a caller that reads a
+   * snapshot and then begins iterating would miss anything published in between, because
+   * registration happens on the first pull. Here the queue exists before the caller does
+   * anything else, so those events are buffered rather than lost.
+   */
+  attach(signal?: AbortSignal): { events: AsyncGenerator<T>; detach: () => void } {
     const sub = { queue: [] as T[], wake: null as (() => void) | null, closed: false };
     this.subscribers.add(sub);
 
     const onAbort = () => { sub.closed = true; sub.wake?.(); };
     signal?.addEventListener("abort", onAbort, { once: true });
 
-    try {
-      while (true) {
-        while (sub.queue.length > 0) {
-          yield sub.queue.shift()!;
+    const self = this;
+    async function* events(): AsyncGenerator<T> {
+      try {
+        while (true) {
+          while (sub.queue.length > 0) {
+            yield sub.queue.shift()!;
+          }
+          if (sub.closed) return;
+          await new Promise<void>(resolve => { sub.wake = resolve; });
         }
-        if (sub.closed) return;
-        await new Promise<void>(resolve => { sub.wake = resolve; });
+      } finally {
+        self.subscribers.delete(sub);
+        signal?.removeEventListener("abort", onAbort);
       }
-    } finally {
-      this.subscribers.delete(sub);
-      signal?.removeEventListener("abort", onAbort);
     }
+
+    return {
+      events: events(),
+      detach: () => {
+        sub.closed = true;
+        sub.wake?.();
+        this.subscribers.delete(sub);
+        signal?.removeEventListener("abort", onAbort);
+      },
+    };
   }
 }

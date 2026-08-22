@@ -86,7 +86,10 @@ export function updateCheckPlugin(jwtSecret: string) {
      * mid-sweep would show nothing until the next image happened to finish.
      */
     .get("/update-check/stream", async function*({ request }) {
-      yield sse({ data: await snapshot() });
+      // Attach before reading the snapshot. Subscribing lazily left a window between the
+      // snapshot query and the first pull in which a published result belonged to
+      // neither, so a client could carry stale state for the life of the stream.
+      const subscription = updateChecker.attach(request.signal);
 
       // The checker only beats while a sweep runs, and between sweeps this stream is
       // silent for hours — long enough for a proxy to close it as idle. A keepalive from
@@ -96,12 +99,14 @@ export function updateCheckPlugin(jwtSecret: string) {
       request.signal.addEventListener("abort", () => { clearInterval(timer); keepalive.closeAll(); }, { once: true });
 
       try {
-        for await (const event of merge(updateChecker.subscribe(request.signal), keepalive.subscribe(request.signal))) {
+        yield sse({ data: await snapshot() });
+        for await (const event of merge(subscription.events, keepalive.subscribe(request.signal))) {
           yield sse({ data: event satisfies CheckerEvent });
         }
       } finally {
         clearInterval(timer);
         keepalive.closeAll();
+        subscription.detach();
       }
     })
 

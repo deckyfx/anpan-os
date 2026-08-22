@@ -89,8 +89,8 @@ describe("GET /api/system/stats — returns plausible metrics", () => {
     });
     const stats = data as SystemStats | null;
     expect(Array.isArray(stats?.disks)).toBe(true);
-    // A host always has at least a root filesystem; an empty list means df was not read.
-    expect(stats!.disks.length).toBeGreaterThan(0);
+    // No non-empty assertion: getDisk() keeps only /dev/-backed mounts, and a container
+    // whose root is an overlay legitimately reports none.
     for (const d of stats!.disks) {
       expect(typeof d.total).toBe("number");
       expect(d.total).toBeGreaterThan(0);

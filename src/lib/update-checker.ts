@@ -81,6 +81,11 @@ class UpdateChecker {
     return this.bus.subscribe(signal);
   }
 
+  /** Register a subscriber now, so a caller can read a snapshot without missing events. */
+  attach(signal?: AbortSignal) {
+    return this.bus.attach(signal);
+  }
+
   /**
    * Begin a sweep.
    *
@@ -132,10 +137,9 @@ class UpdateChecker {
 
     // Deliberately not awaited: start() answers "did a sweep begin", and the caller must
     // not be held open for the minutes the sweep may take.
+    // run() owns finalisation, so no status is written here: a catch at this level ran
+    // after run()'s finally, which had already decided there was nothing to publish.
     void this.run(run.id, targets.data, abort, { scoped: Boolean(stack) })
-      .catch(async err => {
-        await UpdateCheckStore.finishRun(run.id, "failed", err instanceof Error ? err.message : String(err));
-      })
       .finally(() => {
         // Only clear state still belonging to this run. A force-restart cancels the old
         // sweep and starts a new one, and the old promise settles afterwards — clearing
@@ -154,12 +158,14 @@ class UpdateChecker {
   async cancel(): Promise<boolean> {
     if (!this.active) return false;
     const { runId, abort } = this.active;
+    // Record the reason before aborting: run()'s finaliser only supplies a status when
+    // the row is still `running`, so this is what distinguishes a cancellation from a
+    // watchdog timeout. The terminal event is published there, not here — publishing in
+    // both places gave subscribers two `finished` events for one run.
+    await UpdateCheckStore.finishRun(runId, "cancelled");
     abort.abort();
     this.active = null;
     this.stopHeartbeat();
-    await UpdateCheckStore.finishRun(runId, "cancelled");
-    // The terminal event is published by run()'s finally, which the abort above releases.
-    // Publishing here as well gave subscribers two `finished` events for one run.
     return true;
   }
 
@@ -198,8 +204,9 @@ class UpdateChecker {
     const credentials = await loadDockerCredentials();
     // Abort this run's own controller, not whatever happens to be active: after a
     // force-restart those differ, and the old watchdog would kill the new sweep.
+    let timedOut = false;
     const watchdog = setTimeout(() => {
-      if (!signal.aborted) controller.abort();
+      if (!signal.aborted) { timedOut = true; controller.abort(); }
     }, RUN_TIMEOUT_MS);
 
     let completed = 0, updatesFound = 0, getFallbacks = 0, cursor = 0;
@@ -228,18 +235,37 @@ class UpdateChecker {
       }
     };
 
+    // One finalisation path for every ending. Previously a watchdog abort or a thrown
+    // error left the row `running` and published nothing: the sweep looked permanently in
+    // progress, single-flight refused every later run, and subscribers waited forever for
+    // a terminal event that never came.
+    let status: "done" | "failed" | "cancelled" = "done";
+    let error: string | null = null;
+
     try {
       await Promise.all(Array.from({ length: Math.min(CONCURRENCY, targets.length) }, worker));
-      if (signal.aborted) return;
 
-      // Only a full sweep knows the complete set of images; pruning after a scoped check
-      // would delete every other stack's results.
-      if (!opts.scoped) await UpdateCheckStore.retainOnly(targets);
-      await UpdateCheckStore.finishRun(runId, "done");
+      if (signal.aborted) {
+        status = timedOut ? "failed" : "cancelled";
+        if (timedOut) error = `Timed out after ${Math.round(RUN_TIMEOUT_MS / 60_000)} minutes`;
+      } else {
+        // Only a full sweep knows the complete set of images; pruning after a scoped check
+        // would delete every other stack's results.
+        if (!opts.scoped) await UpdateCheckStore.retainOnly(targets);
+      }
+    } catch (err) {
+      status = "failed";
+      error  = err instanceof Error ? err.message : String(err);
     } finally {
       clearTimeout(watchdog);
-      const run = await UpdateCheckStore.findRun(runId);
-      if (run && run.status !== "running") this.bus.publish({ type: "finished", run });
+      // cancel() writes `cancelled` before aborting, so a row already finalised keeps the
+      // reason it recorded; this only settles runs that reached the end still `running`.
+      const current = await UpdateCheckStore.findRun(runId);
+      if (current?.status === "running") {
+        await UpdateCheckStore.finishRun(runId, status, error);
+      }
+      const finalRun = await UpdateCheckStore.findRun(runId);
+      if (finalRun) this.bus.publish({ type: "finished", run: finalRun });
     }
   }
 
@@ -271,6 +297,7 @@ class UpdateChecker {
     const remote = await fetchRemoteDigest(target.image, {
       tokenCache,
       timeoutMs: IMAGE_TIMEOUT_MS,
+      signal,
       ...(credentials ? { credentials } : {}),
     });
     if (remote.error) {

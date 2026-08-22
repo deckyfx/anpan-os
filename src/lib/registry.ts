@@ -73,7 +73,7 @@ async function getToken(
   ref: ImageRef,
   challenge: string,
   cache: TokenCache,
-  timeoutMs: number,
+  signal: AbortSignal,
   credentials: RegistryCredentials | null,
 ): Promise<string | null> {
   const key = `${ref.registry}/${ref.repository}`;
@@ -95,7 +95,7 @@ async function getToken(
   }
 
   try {
-    const res = await fetch(url, { headers, signal: AbortSignal.timeout(timeoutMs) });
+    const res = await fetch(url, { headers, signal });
     if (!res.ok) return null;
     const body = await res.json() as { token?: string; access_token?: string };
     const token = body.token ?? body.access_token ?? null;
@@ -124,9 +124,22 @@ function readRateLimit(res: Response): number | null {
  */
 export async function fetchRemoteDigest(
   image: string,
-  opts: { tokenCache?: TokenCache; timeoutMs?: number; credentials?: CredentialSet } = {},
+  opts: {
+    tokenCache?: TokenCache;
+    timeoutMs?: number;
+    credentials?: CredentialSet;
+    /** Caller's cancellation, combined with the per-request timeout. */
+    signal?: AbortSignal;
+  } = {},
 ): Promise<DigestResult> {
-  const { tokenCache = createTokenCache(), timeoutMs = 20_000, credentials } = opts;
+  const { tokenCache = createTokenCache(), timeoutMs = 20_000, credentials, signal } = opts;
+
+  // Without the caller's signal, cancelling a sweep only takes effect between images: an
+  // in-flight request runs to its own timeout, so a cancelled run can take another 20
+  // seconds to settle and publish its terminal event.
+  const deadline = () => signal
+    ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)])
+    : AbortSignal.timeout(timeoutMs);
   const base: DigestResult = { digest: null, usedGetFallback: false, rateLimitRemaining: null, error: null };
 
   const ref = parseImageRef(image);
@@ -142,7 +155,7 @@ export async function fetchRemoteDigest(
   const request = async (method: "HEAD" | "GET", token: string | null): Promise<Response> => {
     const headers: Record<string, string> = { Accept: ACCEPT };
     if (token) headers.Authorization = `Bearer ${token}`;
-    return fetch(url, { method, headers, signal: AbortSignal.timeout(timeoutMs) });
+    return fetch(url, { method, headers, signal: deadline() });
   };
 
   try {
@@ -153,7 +166,7 @@ export async function fetchRemoteDigest(
     // carries the instructions for getting one.
     if (res.status === 401) {
       const challenge = res.headers.get("www-authenticate") ?? "";
-      token = await getToken(ref, challenge, tokenCache, timeoutMs, credentials?.for(ref.registry) ?? null);
+      token = await getToken(ref, challenge, tokenCache, deadline(), credentials?.for(ref.registry) ?? null);
       if (!token) return { ...base, error: "Authentication failed" };
       res = await request("HEAD", token);
     }
@@ -182,6 +195,7 @@ export async function fetchRemoteDigest(
 
     return { digest, usedGetFallback, rateLimitRemaining, error: null };
   } catch (err) {
+    if (signal?.aborted) return { ...base, error: "Cancelled" };
     const timedOut = err instanceof Error && err.name === "TimeoutError";
     return { ...base, error: timedOut ? `Timed out after ${timeoutMs}ms` : "Registry request failed" };
   }
