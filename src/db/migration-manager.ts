@@ -5,7 +5,8 @@ import { sql } from "drizzle-orm";
 import { config } from "../config";
 import { envConfig } from "../env-config";
 import { embeddedMigrations, embeddedMigrationCount } from "./migrations-embedded";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync } from "node:fs";
+import { readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 
 export interface MigrationConfig {
@@ -36,13 +37,29 @@ export class MigrationManager {
    *
    * Rewritten on every start rather than only when absent: the files must match the binary
    * that is running, not whichever version last wrote them.
+   *
+   * Files this binary does not carry are deleted first. Overwriting alone would leave
+   * behind SQL from a newer build after a rollback, and getPendingCount() counts every
+   * .sql file present — so the older binary would report migrations pending that its own
+   * journal cannot run.
    */
-  private static materialise(): void {
+  private static async materialise(): Promise<void> {
     mkdirSync(join(this.migrationsDir, "meta"), { recursive: true });
-    writeFileSync(join(this.migrationsDir, "meta", "_journal.json"), embeddedMigrations.journal);
-    for (const [name, sql] of Object.entries(embeddedMigrations.files)) {
-      writeFileSync(join(this.migrationsDir, name), sql);
-    }
+
+    const expected = new Set(Object.keys(embeddedMigrations.files));
+    let existing: string[] = [];
+    try { existing = await readdir(this.migrationsDir); } catch { /* first run */ }
+    await Promise.all(
+      existing
+        .filter(f => f.endsWith(".sql") && !expected.has(f))
+        .map(f => rm(join(this.migrationsDir, f), { force: true })),
+    );
+
+    await Bun.write(join(this.migrationsDir, "meta", "_journal.json"), embeddedMigrations.journal);
+    await Promise.all(
+      Object.entries(embeddedMigrations.files)
+        .map(([name, sql]) => Bun.write(join(this.migrationsDir, name), sql)),
+    );
   }
 
   /** Initialize migration system on app startup. */
@@ -58,7 +75,7 @@ export class MigrationManager {
       process.exit(1);
     }
 
-    this.materialise();
+    await this.materialise();
 
     const hasMigrations = await this.hasMigrationFiles();
     if (!hasMigrations) {
@@ -92,6 +109,11 @@ export class MigrationManager {
 
   /** Run all pending migrations (for CLI use). */
   static async runMigrations(): Promise<void> {
+    // Also called directly by `bun run migrate`, which never goes through init(). Without
+    // this the CLI would find an empty migrations directory on a clean runtime dir and
+    // apply nothing while reporting success.
+    await this.materialise();
+
     console.log("🚀 Running migrations...\n");
 
     const sqlite = new Database(config.databasePath);

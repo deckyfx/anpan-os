@@ -29,6 +29,14 @@ interface Journal { version: string; dialect: string; entries: JournalEntry[] }
 const journal = await Bun.file(join(DRIZZLE_DIR, "meta", "_journal.json")).json() as Journal;
 const sqlFiles = (await readdir(DRIZZLE_DIR)).filter(f => f.endsWith(".sql")).sort();
 
+// An empty journal would satisfy both checks below and emit a valid but empty manifest,
+// so the build would succeed and the binary would exit at startup instead. A project with
+// no migrations cannot create its schema, and that is a generation-time fault.
+if (journal.entries.length === 0) {
+  console.error(`✖ ${DRIZZLE_DIR}/meta/_journal.json lists no migrations — run drizzle-kit generate`);
+  process.exit(1);
+}
+
 // Journal and folder must agree in both directions, or the binary ships a manifest
 // describing migrations it cannot run — or silently omits ones it should.
 const missing = journal.entries.map(e => `${e.tag}.sql`).filter(n => !sqlFiles.includes(n));
