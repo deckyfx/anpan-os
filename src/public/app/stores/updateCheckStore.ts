@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { api } from "../lib/api";
+import { useToastStore } from "./toastStore";
 
 /**
  * Client view of the background update checker.
@@ -35,6 +36,11 @@ export interface RunSummary {
   finishedAt: string | null;
 }
 
+export type StartOutcome =
+  | { started: true;  runId: number }
+  | { started: false; reason: "running" | "recent"; run: RunSummary }
+  | { started: false; reason: "no-docker"; error: string };
+
 /** Why a manual check could not start — drives the "cancel the running one?" prompt. */
 export interface BlockedStart {
   reason: "running" | "recent";
@@ -53,7 +59,8 @@ interface UpdateCheckState {
   connect: () => void;
   disconnect: () => void;
   /** Kick off a sweep. `auto` defers to the staleness gate; `force` restarts a running one. */
-  startCheck: (opts?: { auto?: boolean; force?: boolean; stack?: string }) => Promise<void>;
+  /** Resolves with the server's outcome, so callers can tell a started sweep from a refusal. */
+  startCheck: (opts?: { auto?: boolean; force?: boolean; stack?: string }) => Promise<StartOutcome | null>;
   cancelCheck: () => Promise<void>;
   purge: () => Promise<void>;
   dismissBlocked: () => void;
@@ -68,6 +75,8 @@ interface UpdateCheckState {
 
 // Kept outside Zustand so reconnect bookkeeping does not trigger renders.
 let _abort: AbortController | null = null;
+let _retry = 0;
+let _retryTimer: ReturnType<typeof setTimeout> | null = null;
 
 /**
  * The update-check endpoints, named rather than indexed.
@@ -113,8 +122,9 @@ export const useUpdateCheckStore = create<UpdateCheckState>((set, get) => ({
 
   connect: () => {
     if (_abort) return;               // already connected
-    _abort = new AbortController();
-    const { signal } = _abort;
+    const controller = new AbortController();
+    _abort = controller;
+    const { signal } = controller;
 
     void (async () => {
       try {
@@ -122,6 +132,7 @@ export const useUpdateCheckStore = create<UpdateCheckState>((set, get) => ({
         if (error || !data) { set({ connected: false }); return; }
 
         set({ connected: true });
+        _retry = 0;                    // a good connection resets the backoff
 
         for await (const event of data) {
           if (signal.aborted) break;
@@ -155,13 +166,24 @@ export const useUpdateCheckStore = create<UpdateCheckState>((set, get) => ({
       } catch {
         // Navigating away aborts the fetch; that is not an error worth surfacing.
       } finally {
-        if (!signal.aborted) set({ connected: false });
-        _abort = null;
+        // Clear only our own controller: a reconnect may already have installed a newer
+        // one, and nulling that would let a second connect() open a duplicate stream.
+        if (_abort === controller) _abort = null;
+        if (!signal.aborted) {
+          set({ connected: false });
+          // The server sends nothing between sweeps, so an idle drop or a restart is
+          // indistinguishable from silence — without reconnecting, the dashboard would
+          // stay stale until the page is reloaded.
+          _retry = Math.min(_retry ? _retry * 2 : 1_000, 30_000);
+          _retryTimer = setTimeout(() => { _retryTimer = null; get().connect(); }, _retry);
+        }
       }
     })();
   },
 
   disconnect: () => {
+    if (_retryTimer) { clearTimeout(_retryTimer); _retryTimer = null; }
+    _retry = 0;
     _abort?.abort();
     _abort = null;
     set({ connected: false });
@@ -173,34 +195,72 @@ export const useUpdateCheckStore = create<UpdateCheckState>((set, get) => ({
       force: opts.force ?? false,
       ...(opts.stack ? { stack: opts.stack } : {}),
     };
-    const { data } = await uc().start.post(body);
 
-    const outcome = data as
-      | { started: true; runId: number }
-      | { started: false; reason: "running" | "recent"; run: RunSummary }
-      | { started: false; reason: "no-docker"; error: string }
-      | null;
+    let outcome: StartOutcome | null = null;
+    try {
+      const { data } = await uc().start.post(body);
+      outcome = data as StartOutcome | null;
+    } catch (err) {
+      // A rejected request used to escape as an unhandled rejection, leaving someone who
+      // clicked "Check all" with no response of any kind.
+      if (!opts.auto) {
+        useToastStore.getState().push(
+          `Could not start the update check: ${err instanceof Error ? err.message : String(err)}`,
+          "error",
+        );
+      }
+      return null;
+    }
 
-    if (!outcome) return;
-    if (outcome.started) { set({ blocked: null }); return; }
+    if (!outcome) return null;
+    if (outcome.started) { set({ blocked: null }); return outcome; }
+
+    if (outcome.reason === "no-docker") {
+      // Silent on automatic runs — the dashboard should not scold someone for opening it
+      // on a host without Docker — but a deliberate click deserves an answer.
+      if (!opts.auto) useToastStore.getState().push(outcome.error, "error");
+      return outcome;
+    }
 
     // "recent" only blocks automatic runs, so seeing it here means a manual attempt raced
     // one; either way the UI asks rather than silently doing nothing.
-    if (outcome.reason === "running" || outcome.reason === "recent") {
-      set({ blocked: { reason: outcome.reason, run: outcome.run } });
-    }
+    set({ blocked: { reason: outcome.reason, run: outcome.run } });
+    return outcome;
   },
 
   cancelCheck: async () => {
-    await uc().cancel.post({});
+    try {
+      await uc().cancel.post({});
+    } catch (err) {
+      useToastStore.getState().push(
+        `Could not cancel the check: ${err instanceof Error ? err.message : String(err)}`,
+        "error",
+      );
+      return;
+    }
     set({ blocked: null });
   },
 
   purge: async () => {
     set({ purging: true });
     try {
-      await uc().delete({});
+      // The server refuses with 409 while a sweep runs, and Eden reports that as an error
+      // value rather than throwing. Clearing regardless would show an empty report while
+      // the rows are still there.
+      const res = await uc().delete({}) as { error?: { value?: { error?: string } } | null } | null;
+      if (res?.error) {
+        useToastStore.getState().push(
+          res.error.value?.error ?? "Could not clear the results",
+          "error",
+        );
+        return;
+      }
       set({ results: [], run: null });
+    } catch (err) {
+      useToastStore.getState().push(
+        `Could not clear the results: ${err instanceof Error ? err.message : String(err)}`,
+        "error",
+      );
     } finally {
       set({ purging: false });
     }

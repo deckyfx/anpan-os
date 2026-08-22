@@ -1,6 +1,9 @@
 import { test, expect, describe } from "bun:test";
 import { parseImageRef, checkability } from "../src/lib/image-ref";
 
+/** A canonical 64-hex digest; the parser rejects anything shorter. */
+const D = `sha256:${"a".repeat(64)}`;
+
 describe("parseImageRef — Docker Hub shorthand", () => {
   test("bare name gets library/ and :latest", () => {
     expect(parseImageRef("nginx")).toMatchObject({
@@ -62,24 +65,40 @@ describe("parseImageRef — other registries", () => {
 
 describe("parseImageRef — digests", () => {
   test("digest-pinned reference keeps the digest and has no tag", () => {
-    const r = parseImageRef("nginx@sha256:abc123");
-    expect(r).toMatchObject({ repository: "library/nginx", digest: "sha256:abc123", tag: "" });
+    const r = parseImageRef(`nginx@${D}`);
+    expect(r).toMatchObject({ repository: "library/nginx", digest: D, tag: "" });
   });
 
   test("tag plus digest — the digest wins", () => {
-    expect(parseImageRef("nginx:alpine@sha256:abc")).toMatchObject({
-      tag: "alpine", digest: "sha256:abc",
-    });
+    expect(parseImageRef(`nginx:alpine@${D}`)).toMatchObject({ tag: "alpine", digest: D });
   });
 
   test("a non-sha256 digest is rejected rather than guessed at", () => {
     expect(parseImageRef("nginx@md5:abc")).toBeNull();
+  });
+
+  test("a truncated digest is rejected — it must be 64 hex characters", () => {
+    expect(parseImageRef("nginx@sha256:abc")).toBeNull();
+    expect(parseImageRef(`nginx@sha256:${"a".repeat(63)}`)).toBeNull();
+    expect(parseImageRef(`nginx@sha256:${"A".repeat(64)}`)).toBeNull();  // uppercase is not canonical
   });
 });
 
 describe("parseImageRef — rejects", () => {
   test.each(["", "   ", "@sha256:abc"])("%p is null", (input) => {
     expect(parseImageRef(input)).toBeNull();
+  });
+
+  test("names outside Docker's grammar are refused before they reach a URL", () => {
+    // These would otherwise be interpolated into a registry path.
+    expect(parseImageRef("../etc/passwd")).toBeNull();
+    expect(parseImageRef("has space/app")).toBeNull();
+    expect(parseImageRef("UPPER/case")).toBeNull();
+    expect(parseImageRef("ghcr.io/a//b")).toBeNull();
+  });
+
+  test("a tag containing path characters is refused", () => {
+    expect(parseImageRef("nginx:../../x")).toBeNull();
   });
 });
 
@@ -89,7 +108,7 @@ describe("checkability", () => {
   });
 
   test("a digest-pinned image is skipped with a reason, not an error", () => {
-    const r = checkability(parseImageRef("nginx@sha256:abc")!);
+    const r = checkability(parseImageRef(`nginx@${D}`)!);
     expect(r.checkable).toBe(false);
     expect(r.reason).toContain("digest");
   });

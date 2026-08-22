@@ -77,21 +77,33 @@ export function composePlugin(jwtSecret: string) {
       if (!docker) { set.status = 503; return { error: "Docker is not available on this system" }; }
     })
 
+    /**
+     * Rejects a bad stack name with a real status before the stream opens.
+     *
+     * Validating inside the generator meant the response was 200 with an error event in
+     * the body: the UI coped because it reads the stream, but any other client — or a
+     * script — saw a rejected request as success. Headers are not sent until the first
+     * yield, so a guard here can still set a status.
+     */
+    .onBeforeHandle(({ path, body, set }) => {
+      if (path !== "/api/compose/stacks") return;
+      const name = (body as { name?: unknown } | null)?.name;
+      if (typeof name !== "string" || !STACK_NAME_RE.test(name)) {
+        set.status = 422;
+        return { error: "Stack name must be alphanumeric with dashes or underscores only" };
+      }
+      const stackDir = join(config.composeFolder, name);
+      if (!stackDir.startsWith(config.composeFolder)) {
+        set.status = 422;
+        return { error: "Invalid stack name" };
+      }
+    })
+
     .post(
       "/stacks",
       async function*({ body }) {
         const { name, content } = body;
-
-        if (!STACK_NAME_RE.test(name)) {
-          yield sse({ data: { error: "Stack name must be alphanumeric with dashes or underscores only" } satisfies SSEMsg });
-          return;
-        }
-
         const stackDir = join(config.composeFolder, name);
-        if (!stackDir.startsWith(config.composeFolder)) {
-          yield sse({ data: { error: "Invalid stack name" } satisfies SSEMsg });
-          return;
-        }
 
         try {
           mkdirSync(stackDir, { recursive: true });

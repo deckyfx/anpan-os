@@ -391,10 +391,18 @@ export class DockerClient {
       `/images/${encodeURIComponent(image)}/json`,
     );
     if (!result.ok) return null;
-    const first = result.data.RepoDigests?.[0];
-    if (!first) return null;
-    const at = first.indexOf("@");
-    return at >= 0 ? first.slice(at + 1) : null;
+    const digests = result.data.RepoDigests ?? [];
+    if (digests.length === 0) return null;
+
+    // An image tagged from more than one repository — an upstream and a mirror, say —
+    // has several entries. Taking the first would compare a digest from one repository
+    // against the registry answer for another, reporting an update that does not exist.
+    const repository = image.split("@")[0]?.replace(/:[^:/]+$/, "") ?? image;
+    const match = digests.find(d => d.split("@")[0] === repository) ?? digests[0];
+    if (!match) return null;
+
+    const at = match.indexOf("@");
+    return at >= 0 ? match.slice(at + 1) : null;
   }
 
   /** Force-remove a container (stops it first if running). `v=1` removes anonymous volumes. */

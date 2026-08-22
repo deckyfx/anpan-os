@@ -33,6 +33,8 @@ export function UpdatesMenu() {
 
   const onCheckAll = async () => {
     setOpen(false);
+    // startCheck reports its own failures; awaiting keeps the click from resolving before
+    // the outcome is known, so a refusal cannot be mistaken for a started sweep.
     await startCheck({ auto: false });
   };
 

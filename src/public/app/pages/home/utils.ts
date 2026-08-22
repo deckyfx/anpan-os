@@ -53,7 +53,12 @@ function splitAuthority(raw: string): { host: string; port: string | null } {
 
 /** Keep the first numeric group of a port field (`8080`, `8080:80`, `8080/tcp`). */
 function normalizePort(raw: string | null): string | null {
-  return raw?.match(/\d+/)?.[0] ?? null;
+  if (!raw) return null;
+  // Drop an optional bind address first: in "127.0.0.1:8080:80" the first number is part
+  // of the IP, so matching the first digits anywhere would yield 127.
+  const stripped = raw.replace(/^(\[[^\]]+\]|\d{1,3}(?:\.\d{1,3}){3}):/, "");
+  // The host-side port is the leading segment; a range like "8080-8090:80" starts at 8080.
+  return stripped.split(":")[0]?.match(/\d+/)?.[0] ?? null;
 }
 
 export interface LaunchInput {
@@ -106,7 +111,9 @@ export function resolveLaunchUrl(input: LaunchInput): string | null {
     scheme       = url.protocol.replace(/:$/, "");
     host         = url.hostname;
     explicitPort = url.port || null;
-    if (url.pathname && url.pathname !== "/") path = url.pathname + url.search;
+    // Query and fragment are part of where the user is pointing — dropping "?tab=logs"
+    // or "#panel" lands them somewhere else in the app.
+    if (url.pathname !== "/" || url.search || url.hash) path = url.pathname + url.search + url.hash;
   } else if (rawAddress) {
     const parts  = splitAuthority(rawAddress);
     host         = parts.host;

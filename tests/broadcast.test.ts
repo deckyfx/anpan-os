@@ -28,13 +28,27 @@ describe("Broadcast", () => {
 
   test("publish never blocks on a subscriber that stopped reading", async () => {
     const bus = new Broadcast<number>();
-    void bus.subscribe();          // attaches, never iterates
-    await Promise.resolve();
+    const gen = bus.subscribe();
+    // An async generator does not run its body until the first next(), so the subscriber
+    // is not attached by subscribe() alone — the pull has to come first, and the publish
+    // after it, or nothing about a full queue is being tested.
+    const first = gen.next();
+    await new Promise(r => setTimeout(r, 0));
+    expect(bus.size).toBe(1);
+    bus.publish(0);
+    await first;
 
-    // 2000 exceeds the per-subscriber queue cap; this must still return promptly.
+    // Beyond the per-subscriber cap: publish must stay prompt and shed the subscriber
+    // rather than waiting for a consumer that has stopped reading.
     const started = Date.now();
     for (let i = 0; i < 2000; i++) bus.publish(i);
     expect(Date.now() - started).toBeLessThan(1000);
+
+    // The over-full subscriber is closed, so its iteration ends rather than hanging.
+    const rest: number[] = [];
+    for await (const m of gen) rest.push(m);
+    expect(rest.length).toBeLessThan(2000);
+    expect(bus.size).toBe(0);
   });
 
   test("a subscriber that unsubscribes is removed", async () => {

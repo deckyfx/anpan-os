@@ -141,8 +141,12 @@ export const useStacksStore = create<StacksState>((set, get) => ({
       // Scoped to this stack and never automatic, so it runs even if a full sweep
       // completed moments ago — asking about one stack is always deliberate.
       const { useUpdateCheckStore } = await import("./updateCheckStore");
-      await useUpdateCheckStore.getState().startCheck({ stack: stack.name });
-      useToastStore.getState().push(`Checking ${stack.meta?.title ?? stack.name} for updates…`, "info");
+      const outcome = await useUpdateCheckStore.getState().startCheck({ stack: stack.name });
+      // Only announce work that actually began; a refusal reports itself, and claiming
+      // "Checking…" for a request the server declined would simply be untrue.
+      if (outcome?.started) {
+        useToastStore.getState().push(`Checking ${stack.meta?.title ?? stack.name} for updates…`, "info");
+      }
       return;
     }
     if (action === "logs") {

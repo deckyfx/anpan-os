@@ -47,10 +47,13 @@ const TRUSTED_AUTH_HOSTS: Record<string, string[]> = {
 };
 
 function maySendCredentials(registry: string, realm: string): boolean {
-  let realmHost: string;
-  try { realmHost = new URL(realm).host; } catch { return false; }
-  if (realmHost === registry) return true;
-  return (TRUSTED_AUTH_HOSTS[registry] ?? []).includes(realmHost);
+  let url: URL;
+  try { url = new URL(realm); } catch { return false; }
+  // A matching host is not sufficient: an http realm would put the password on the wire
+  // in cleartext, and the realm is chosen by the very host being authenticated to.
+  if (url.protocol !== "https:") return false;
+  if (url.host === registry) return true;
+  return (TRUSTED_AUTH_HOSTS[registry] ?? []).includes(url.host);
 }
 
 /** Tokens are per-repository and short-lived; one cache per sweep avoids re-authenticating. */
@@ -130,7 +133,11 @@ export async function fetchRemoteDigest(
   if (!ref) return { ...base, error: "Unparseable image reference" };
   if (ref.digest)  return { ...base, digest: ref.digest };
 
-  const url = `https://${ref.registry}/v2/${ref.repository}/manifests/${encodeURIComponent(ref.tag)}`;
+  // Encode per segment: the repository is interpolated into a path, so a name containing
+  // "..", a space or a percent would otherwise produce a malformed or traversing URL.
+  // The slashes between segments are structural and must survive encoding.
+  const repoPath = ref.repository.split("/").map(encodeURIComponent).join("/");
+  const url = `https://${ref.registry}/v2/${repoPath}/manifests/${encodeURIComponent(ref.tag)}`;
 
   const request = async (method: "HEAD" | "GET", token: string | null): Promise<Response> => {
     const headers: Record<string, string> = { Accept: ACCEPT };

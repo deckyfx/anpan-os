@@ -47,6 +47,15 @@ class UpdateChecker {
   private readonly bus = new Broadcast<CheckerEvent>();
   private active: { runId: number; abort: AbortController } | null = null;
   private heartbeat: ReturnType<typeof setInterval> | null = null;
+  /**
+   * Serialises start() calls.
+   *
+   * Single-flight cannot be enforced by checking `active` alone: start() awaits the run
+   * lookup, discovery and the insert before assigning it, so two concurrent callers both
+   * observe null and both launch a sweep, with only the second one tracked. Chaining the
+   * calls closes that window without holding a lock across the sweep itself.
+   */
+  private startChain: Promise<unknown> = Promise.resolve();
 
   /** True while a sweep is in flight in this process. */
   get running(): boolean {
@@ -81,6 +90,15 @@ class UpdateChecker {
    * another tab could slip a run in between.
    */
   async start(opts: { auto?: boolean; force?: boolean; stalenessMs?: number; stack?: string } = {}): Promise<StartOutcome> {
+    const result = this.startChain.then(() => this.beginStart(opts));
+    // Swallow on the chain only: the caller still sees the rejection through `result`.
+    this.startChain = result.catch(() => undefined);
+    return result;
+  }
+
+  private async beginStart(
+    opts: { auto?: boolean; force?: boolean; stalenessMs?: number; stack?: string },
+  ): Promise<StartOutcome> {
     const { auto = false, force = false, stalenessMs = DEFAULT_STALENESS_MS, stack } = opts;
 
     if (this.active) {
@@ -114,13 +132,19 @@ class UpdateChecker {
 
     // Deliberately not awaited: start() answers "did a sweep begin", and the caller must
     // not be held open for the minutes the sweep may take.
-    void this.run(run.id, targets.data, abort.signal, { scoped: Boolean(stack) })
+    void this.run(run.id, targets.data, abort, { scoped: Boolean(stack) })
       .catch(async err => {
         await UpdateCheckStore.finishRun(run.id, "failed", err instanceof Error ? err.message : String(err));
       })
       .finally(() => {
-        this.active = null;
-        this.stopHeartbeat();
+        // Only clear state still belonging to this run. A force-restart cancels the old
+        // sweep and starts a new one, and the old promise settles afterwards — clearing
+        // unconditionally would untrack the live run, leaving `running` false while a
+        // sweep continues and making cancel() a no-op.
+        if (this.active?.runId === run.id) {
+          this.active = null;
+          this.stopHeartbeat();
+        }
       });
 
     return { started: true, runId: run.id };
@@ -134,8 +158,8 @@ class UpdateChecker {
     this.active = null;
     this.stopHeartbeat();
     await UpdateCheckStore.finishRun(runId, "cancelled");
-    const run = await UpdateCheckStore.findRun(runId);
-    if (run) this.bus.publish({ type: "finished", run });
+    // The terminal event is published by run()'s finally, which the abort above releases.
+    // Publishing here as well gave subscribers two `finished` events for one run.
     return true;
   }
 
@@ -165,14 +189,17 @@ class UpdateChecker {
   private async run(
     runId: number,
     targets: Target[],
-    signal: AbortSignal,
+    controller: AbortController,
     opts: { scoped: boolean } = { scoped: false },
   ): Promise<void> {
+    const signal = controller.signal;
     const tokenCache = createTokenCache();
     // Read once per sweep: a login during a run should not change its behaviour midway.
     const credentials = await loadDockerCredentials();
+    // Abort this run's own controller, not whatever happens to be active: after a
+    // force-restart those differ, and the old watchdog would kill the new sweep.
     const watchdog = setTimeout(() => {
-      if (!signal.aborted) this.active?.abort.abort();
+      if (!signal.aborted) controller.abort();
     }, RUN_TIMEOUT_MS);
 
     let completed = 0, updatesFound = 0, getFallbacks = 0, cursor = 0;
@@ -189,15 +216,13 @@ class UpdateChecker {
         if (outcome.hasUpdate)      updatesFound++;
         if (outcome.usedGetFallback) getFallbacks++;
 
-        await UpdateCheckStore.putResult(runId, { ...target, ...outcome });
+        // Publishing the stored row rather than the raw outcome means subscribers and a
+        // page reload see byte-identical data.
+        const row = await UpdateCheckStore.putResult(runId, { ...target, ...outcome });
         completed++;
 
         await UpdateCheckStore.recordProgress(runId, completed, updatesFound, getFallbacks);
 
-        const rows = await UpdateCheckStore.allState();
-        const row = rows.find(r => r.stack === target.stack && r.image === target.image);
-        // Publishing the stored row rather than the raw outcome means subscribers and a
-        // page reload see byte-identical data.
         if (row) this.bus.publish({ type: "result", result: row });
         this.bus.publish({ type: "progress", completed, total: targets.length, updatesFound });
       }

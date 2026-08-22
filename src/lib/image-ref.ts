@@ -23,6 +23,25 @@ export interface ImageRef {
 const DOCKER_HUB_REGISTRY = "registry-1.docker.io";
 
 /**
+ * Docker's repository name grammar: lowercase alphanumerics, with separators between
+ * them. Validating here means a malformed name is rejected once, rather than every
+ * consumer having to guard against what it might do to a URL or a filesystem path.
+ */
+const REPOSITORY_RE = /^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$/;
+
+/**
+ * A registry host: dot-separated labels with an optional port, or localhost.
+ *
+ * Needed because {@link isRegistryHost} only asks whether a segment *looks* like a host,
+ * and "." satisfies that — so "../etc/passwd" would otherwise parse as the registry ".."
+ * with a perfectly valid-looking repository after it.
+ */
+const REGISTRY_RE = /^(?:localhost|(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?\.)+[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?)(?::\d{1,5})?$/;
+
+/** Tags allow a wider set than repositories, but not path or query characters. */
+const TAG_RE = /^[\w][\w.-]{0,127}$/;
+
+/**
  * True when `part` is a registry host rather than the first segment of a repository path.
  *
  * Docker's own rule: the first segment is a host only if it contains a dot or a colon, or
@@ -51,7 +70,9 @@ export function parseImageRef(raw: string): ImageRef | null {
   if (atIdx !== -1) {
     digest = remainder.slice(atIdx + 1) || null;
     remainder = remainder.slice(0, atIdx);
-    if (!digest?.startsWith("sha256:")) return null;
+    // A digest is 64 lowercase hex characters; anything else is not one, and letting a
+    // short or malformed value through would put it into a registry URL unchecked.
+    if (!/^sha256:[0-9a-f]{64}$/.test(digest ?? "")) return null;
   }
 
   const slash = remainder.indexOf("/");
@@ -84,15 +105,21 @@ export function parseImageRef(raw: string): ImageRef | null {
 
   if (!tag && !digest) tag = "latest";
 
+  if (!REGISTRY_RE.test(registry))   return null;
+  if (!REPOSITORY_RE.test(path))     return null;
+  if (tag && !TAG_RE.test(tag))  return null;
+
   return { registry, repository: path, tag, digest, raw: input };
 }
 
 /**
- * Whether an update check is meaningful for this reference.
+ * Whether an update check is meaningful for this reference alone.
  *
- * A digest-pinned image is by definition already exactly what it asks for, and a locally
- * built image has no registry to ask. Both are skipped with a reason rather than reported
- * as failures, so the report can distinguish "no update" from "could not tell".
+ * A digest-pinned image is by definition already exactly what it asks for, so it is
+ * skipped with a reason rather than reported as a failure — that lets the report separate
+ * "no update" from "could not tell". Locally built images are also unanswerable, but that
+ * cannot be seen from the reference: it is detected in the checker, from the absence of a
+ * RepoDigests entry.
  */
 export function checkability(ref: ImageRef): { checkable: boolean; reason?: string } {
   if (ref.digest) return { checkable: false, reason: "pinned to a digest" };
