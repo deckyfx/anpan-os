@@ -3,6 +3,10 @@ import { drizzle } from "drizzle-orm/bun-sqlite";
 import { migrate } from "drizzle-orm/bun-sqlite/migrator";
 import { sql } from "drizzle-orm";
 import { config } from "../config";
+import { envConfig } from "../env-config";
+import { embeddedMigrations, embeddedMigrationCount } from "./migrations-embedded";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 
 export interface MigrationConfig {
   /** Terminate if pending migrations detected. Default: false */
@@ -13,16 +17,53 @@ export interface MigrationConfig {
 
 /** Migration manager — workflow layer on top of Drizzle's bun-sqlite migrator. */
 export class MigrationManager {
-  private static readonly migrationsDir = "drizzle";
+  /**
+   * Where the migrator reads SQL from.
+   *
+   * Not the repository's drizzle/ folder: that path is relative to the working directory,
+   * and a compiled binary runs from /var/lib/anpan-os where no such folder exists. The
+   * result was a fresh install creating *no tables at all* while logging "No migration
+   * files found" — a broken state reported as an empty one.
+   *
+   * The migrations are compiled into the binary and written here on startup, so Drizzle's
+   * migrator and its __drizzle_migrations bookkeeping behave exactly as before and an
+   * existing database re-runs nothing.
+   */
+  private static readonly migrationsDir = join(envConfig.RUNTIME_CONFIG_DIR, ".migrations");
+
+  /**
+   * Write the embedded migrations to disk.
+   *
+   * Rewritten on every start rather than only when absent: the files must match the binary
+   * that is running, not whichever version last wrote them.
+   */
+  private static materialise(): void {
+    mkdirSync(join(this.migrationsDir, "meta"), { recursive: true });
+    writeFileSync(join(this.migrationsDir, "meta", "_journal.json"), embeddedMigrations.journal);
+    for (const [name, sql] of Object.entries(embeddedMigrations.files)) {
+      writeFileSync(join(this.migrationsDir, name), sql);
+    }
+  }
 
   /** Initialize migration system on app startup. */
   static async init(migrationConfig: MigrationConfig = {}): Promise<void> {
     const { strict = false, autoMigrate = false } = migrationConfig;
 
+    // A binary with no migrations compiled in cannot create its schema, and continuing
+    // would leave every query failing on a missing table. That is a build fault, not a
+    // configuration the user can be expected to fix, so say so and stop.
+    if (embeddedMigrationCount === 0) {
+      console.error("❌ No migrations were compiled into this build — the database cannot be created.");
+      console.error("💡 This is a packaging fault; please report it.");
+      process.exit(1);
+    }
+
+    this.materialise();
+
     const hasMigrations = await this.hasMigrationFiles();
     if (!hasMigrations) {
-      console.log("ℹ️  No migration files found");
-      return;
+      console.error(`❌ Could not write migrations to ${this.migrationsDir}`);
+      process.exit(1);
     }
 
     const pendingCount = await this.getPendingCount();
