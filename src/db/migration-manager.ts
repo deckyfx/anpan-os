@@ -67,15 +67,6 @@ export class MigrationManager {
   static async init(migrationConfig: MigrationConfig = {}): Promise<void> {
     const { strict = false, autoMigrate = false } = migrationConfig;
 
-    // A binary with no migrations compiled in cannot create its schema, and continuing
-    // would leave every query failing on a missing table. That is a build fault, not a
-    // configuration the user can be expected to fix, so say so and stop.
-    if (embeddedMigrationCount === 0) {
-      console.error("❌ No migrations were compiled into this build — the database cannot be created.");
-      console.error("💡 This is a packaging fault; please report it.");
-      process.exit(1);
-    }
-
     await this.materialise();
 
     const hasMigrations = await this.hasMigrationFiles();
@@ -84,18 +75,7 @@ export class MigrationManager {
       process.exit(1);
     }
 
-    const { pending: pendingCount, unknown } = await this.analyse();
-
-    // The database records migrations this build does not carry: an older binary against
-    // a newer database, or one migrated by a divergent branch. The schema then holds
-    // tables and columns this code does not know about, and letting it write to them is
-    // how a downgrade corrupts data rather than merely failing.
-    if (unknown > 0) {
-      console.error(`❌ The database has ${unknown} migration(s) this build does not contain.`);
-      console.error("💡 This build is older than the database, or from a different branch.");
-      console.error("💡 Restore a matching build, or downgrade the database deliberately.");
-      process.exit(1);
-    }
+    const { pending: pendingCount } = await this.preflight();
 
     if (pendingCount === 0) {
       console.log("✅ Database is up to date");
@@ -123,8 +103,10 @@ export class MigrationManager {
   static async runMigrations(): Promise<void> {
     // Also called directly by `bun run migrate`, which never goes through init(). Without
     // this the CLI would find an empty migrations directory on a clean runtime dir and
-    // apply nothing while reporting success.
+    // apply nothing while reporting success — and would skip the checks that stop a
+    // migration being applied over a schema from another branch.
     await this.materialise();
+    await this.preflight();
 
     console.log("🚀 Running migrations...\n");
 
@@ -168,30 +150,77 @@ export class MigrationManager {
    * about.
    */
   private static async analyse(): Promise<{ pending: number; unknown: number }> {
-    const embeddedHashes = new Set(
-      Object.values(embeddedMigrations.files)
-        .map(sqlText => createHash("sha256").update(sqlText).digest("hex")),
-    );
+    // Counted, not a Set: two migrations can legitimately carry identical SQL, and
+    // deduplicating them would report the second as already applied once the first was
+    // recorded.
+    const embedded = new Map<string, number>();
+    for (const sqlText of Object.values(embeddedMigrations.files)) {
+      const h = createHash("sha256").update(sqlText).digest("hex");
+      embedded.set(h, (embedded.get(h) ?? 0) + 1);
+    }
 
     const sqlite = new Database(config.databasePath);
     const db = drizzle(sqlite);
     try {
-      const rows = await db.all<{ hash: string }>(sql`SELECT hash FROM __drizzle_migrations`);
-      const applied = new Set(rows.map(r => r.hash));
+      // Ask whether the tracking table exists rather than inferring it from a failed
+      // query: corruption, a lock, or an incompatible tracking schema would otherwise be
+      // read as "nothing applied yet" and skip the downgrade guard entirely.
+      const tracking = await db.all<{ name: string }>(
+        sql`SELECT name FROM sqlite_master WHERE type = 'table' AND name = '__drizzle_migrations'`,
+      );
+      if (tracking.length === 0) {
+        return { pending: [...embedded.values()].reduce((a, b) => a + b, 0), unknown: 0 };
+      }
+
+      let rows: Array<{ hash: string }>;
+      try {
+        rows = await db.all<{ hash: string }>(sql`SELECT hash FROM __drizzle_migrations`);
+      } catch (err) {
+        // The table exists but cannot be read: corruption, a lock, or a tracking schema
+        // from an incompatible tool. Refusing is the only safe answer — treating it as an
+        // empty history would re-apply every migration over a populated database.
+        console.error("❌ The migration history exists but could not be read.");
+        console.error(`💡 ${err instanceof Error ? err.message : String(err)}`);
+        console.error("💡 The database may be corrupt or written by an incompatible tool.");
+        process.exit(1);
+      }
+      const applied = new Map<string, number>();
+      for (const r of rows) applied.set(r.hash, (applied.get(r.hash) ?? 0) + 1);
 
       let unknown = 0;
-      for (const h of applied) if (!embeddedHashes.has(h)) unknown++;
+      for (const [h, n] of applied) unknown += Math.max(0, n - (embedded.get(h) ?? 0));
 
       let pending = 0;
-      for (const h of embeddedHashes) if (!applied.has(h)) pending++;
+      for (const [h, n] of embedded) pending += Math.max(0, n - (applied.get(h) ?? 0));
 
       return { pending, unknown };
-    } catch {
-      // No tracking table yet — nothing has been applied, so everything is pending.
-      return { pending: embeddedHashes.size, unknown: 0 };
     } finally {
       sqlite.close();
     }
+  }
+
+  /**
+   * Refuse to proceed when the build and the database cannot work together.
+   *
+   * Shared by init() and runMigrations() because `bun run migrate` calls the latter
+   * directly: without this the CLI would skip both checks and could apply a migration on
+   * top of a schema from another branch.
+   */
+  private static async preflight(): Promise<{ pending: number }> {
+    if (embeddedMigrationCount === 0) {
+      console.error("❌ No migrations were compiled into this build — the database cannot be created.");
+      console.error("💡 This is a packaging fault; please report it.");
+      process.exit(1);
+    }
+
+    const { pending, unknown } = await this.analyse();
+    if (unknown > 0) {
+      console.error(`❌ The database has ${unknown} migration(s) this build does not contain.`);
+      console.error("💡 This build is older than the database, or from a different branch.");
+      console.error("💡 Restore a matching build, or downgrade the database deliberately.");
+      process.exit(1);
+    }
+    return { pending };
   }
 
   private static async getPendingCount(): Promise<number> {
