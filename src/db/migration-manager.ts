@@ -149,51 +149,61 @@ export class MigrationManager {
    * branch that diverged. Either way the schema contains changes this code does not know
    * about.
    */
-  private static async analyse(): Promise<{ pending: number; unknown: number }> {
-    // Counted, not a Set: two migrations can legitimately carry identical SQL, and
-    // deduplicating them would report the second as already applied once the first was
-    // recorded.
-    const embedded = new Map<string, number>();
-    for (const sqlText of Object.values(embeddedMigrations.files)) {
-      const h = createHash("sha256").update(sqlText).digest("hex");
-      embedded.set(h, (embedded.get(h) ?? 0) + 1);
-    }
+  private static async analyse(): Promise<{ pending: number; problem: string | null }> {
+    // Ordered as the journal orders them, with the same timestamp Drizzle records as
+    // created_at, so the build's sequence and the database's are directly comparable.
+    const journal = JSON.parse(embeddedMigrations.journal) as {
+      entries: Array<{ tag: string; when: number }>;
+    };
+    const buildSeq = journal.entries.map(e => ({
+      when: e.when,
+      hash: createHash("sha256")
+        .update(embeddedMigrations.files[`${e.tag}.sql`] ?? "")
+        .digest("hex"),
+      tag: e.tag,
+    }));
 
     const sqlite = new Database(config.databasePath);
     const db = drizzle(sqlite);
     try {
-      // Ask whether the tracking table exists rather than inferring it from a failed
-      // query: corruption, a lock, or an incompatible tracking schema would otherwise be
-      // read as "nothing applied yet" and skip the downgrade guard entirely.
       const tracking = await db.all<{ name: string }>(
         sql`SELECT name FROM sqlite_master WHERE type = 'table' AND name = '__drizzle_migrations'`,
       );
-      if (tracking.length === 0) {
-        return { pending: [...embedded.values()].reduce((a, b) => a + b, 0), unknown: 0 };
-      }
+      if (tracking.length === 0) return { pending: buildSeq.length, problem: null };
 
-      let rows: Array<{ hash: string }>;
+      let rows: Array<{ hash: string; created_at: number }>;
       try {
-        rows = await db.all<{ hash: string }>(sql`SELECT hash FROM __drizzle_migrations`);
+        rows = await db.all<{ hash: string; created_at: number }>(
+          sql`SELECT hash, created_at FROM __drizzle_migrations ORDER BY created_at ASC`,
+        );
       } catch (err) {
-        // The table exists but cannot be read: corruption, a lock, or a tracking schema
-        // from an incompatible tool. Refusing is the only safe answer — treating it as an
-        // empty history would re-apply every migration over a populated database.
         console.error("❌ The migration history exists but could not be read.");
         console.error(`💡 ${err instanceof Error ? err.message : String(err)}`);
         console.error("💡 The database may be corrupt or written by an incompatible tool.");
         process.exit(1);
       }
-      const applied = new Map<string, number>();
-      for (const r of rows) applied.set(r.hash, (applied.get(r.hash) ?? 0) + 1);
 
-      let unknown = 0;
-      for (const [h, n] of applied) unknown += Math.max(0, n - (embedded.get(h) ?? 0));
+      // The applied migrations must be an ordered prefix of this build's sequence.
+      //
+      // A membership test is not enough. Drizzle selects work by comparing each journal
+      // timestamp against the single greatest created_at in the table, and never checks
+      // individual hashes — so a database holding A and C, against a build of A, B, C,
+      // reports one pending migration, skips B because C is already newer, and announces
+      // success with B's schema change absent.
+      if (rows.length > buildSeq.length) {
+        return { pending: 0, problem: `the database has ${rows.length - buildSeq.length} migration(s) beyond this build` };
+      }
+      for (const [i, row] of rows.entries()) {
+        const expected = buildSeq[i];
+        if (!expected || row.hash !== expected.hash) {
+          return {
+            pending: 0,
+            problem: `applied migration ${i + 1} does not match this build (expected ${expected?.tag ?? "nothing"})`,
+          };
+        }
+      }
 
-      let pending = 0;
-      for (const [h, n] of embedded) pending += Math.max(0, n - (applied.get(h) ?? 0));
-
-      return { pending, unknown };
+      return { pending: buildSeq.length - rows.length, problem: null };
     } finally {
       sqlite.close();
     }
@@ -213,9 +223,9 @@ export class MigrationManager {
       process.exit(1);
     }
 
-    const { pending, unknown } = await this.analyse();
-    if (unknown > 0) {
-      console.error(`❌ The database has ${unknown} migration(s) this build does not contain.`);
+    const { pending, problem } = await this.analyse();
+    if (problem) {
+      console.error(`❌ The database does not match this build: ${problem}.`);
       console.error("💡 This build is older than the database, or from a different branch.");
       console.error("💡 Restore a matching build, or downgrade the database deliberately.");
       process.exit(1);
