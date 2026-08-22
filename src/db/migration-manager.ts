@@ -85,6 +85,17 @@ export class MigrationManager {
 
     const pendingCount = await this.getPendingCount();
 
+    // Negative means the database records migrations this build does not carry — an
+    // older binary started against a newer database, typically a rollback. Treating it
+    // as pending work produced "-2 pending migration(s)"; worse, the schema now has
+    // tables and columns this code does not know about, and letting it write to them is
+    // how a downgrade corrupts data rather than merely failing.
+    if (pendingCount < 0) {
+      console.error(`❌ The database has ${-pendingCount} migration(s) this build does not contain.`);
+      console.error("💡 This build is older than the database. Restore a newer build, or downgrade the database deliberately.");
+      process.exit(1);
+    }
+
     if (pendingCount === 0) {
       console.log("✅ Database is up to date");
       return;
