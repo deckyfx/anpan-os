@@ -82,7 +82,15 @@ export class Broadcast<T> {
     this.subscribers.add(sub);
 
     const onAbort = () => { sub.closed = true; sub.wake?.(); };
-    signal?.addEventListener("abort", onAbort, { once: true });
+    // An already-aborted signal never fires the event, so registering alone would leave
+    // `closed` false: the generator would park on its wake promise and never return, and
+    // the subscriber would sit in the set until some publish happened to fill its queue.
+    // A client that disconnects before the route attaches reaches exactly this path.
+    if (signal?.aborted) {
+      sub.closed = true;
+    } else {
+      signal?.addEventListener("abort", onAbort, { once: true });
+    }
 
     const self = this;
     async function* events(): AsyncGenerator<T> {

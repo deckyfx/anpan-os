@@ -81,6 +81,39 @@ describe("Broadcast", () => {
     expect(await collected).toEqual([1]);
   });
 
+  test("an already-aborted signal ends the stream instead of parking forever", async () => {
+    const bus = new Broadcast<number>();
+    const ac = new AbortController();
+    ac.abort();                       // aborted before anyone subscribes
+
+    // addEventListener never fires for an already-aborted signal, so without an explicit
+    // check the generator would wait on its wake promise indefinitely and the subscriber
+    // would never be removed. A client that disconnects before the route attaches hits
+    // this exact path.
+    const out: number[] = [];
+    const collected = (async () => {
+      for await (const m of bus.subscribe(ac.signal)) out.push(m);
+      return "ended";
+    })();
+
+    expect(await Promise.race([
+      collected,
+      new Promise(r => setTimeout(() => r("HUNG"), 500)),
+    ])).toBe("ended");
+    expect(bus.size).toBe(0);
+  });
+
+  test("attach() with an aborted signal leaves no subscriber behind", async () => {
+    const bus = new Broadcast<number>();
+    const ac = new AbortController();
+    ac.abort();
+
+    const sub = bus.attach(ac.signal);
+    const drained = (async () => { for await (const _ of sub.events) { /* drain */ } })();
+    await Promise.race([drained, new Promise(r => setTimeout(r, 500))]);
+    expect(bus.size).toBe(0);
+  });
+
   test("closeAll ends every subscriber", async () => {
     const bus = new Broadcast<number>();
     const a = (async () => { const o: number[] = []; for await (const m of bus.subscribe()) o.push(m); return o; })();
