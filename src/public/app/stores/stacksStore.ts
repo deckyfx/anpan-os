@@ -202,7 +202,10 @@ export const useStacksStore = create<StacksState>((set, get) => ({
     if (action === "download-compose") {
       const { data, error } = await api.api.compose.stacks({ name: stack.name }).file.get();
       if (error) {
-        alert((error.value as { error?: string })?.error ?? "Compose file not found for this stack.");
+        useToastStore.getState().push(
+          (error.value as { error?: string })?.error ?? "Compose file not found for this stack",
+          "error",
+        );
         return;
       }
       const blob = new Blob([data as unknown as string], { type: "text/yaml" });

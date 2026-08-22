@@ -16,8 +16,9 @@ const ICON: Record<ToastType, React.ReactNode> = {
 export function ToastContainer() {
   const { toasts, dismiss } = useToastStore();
 
+  // Anchored below the 48px top bar so toasts never cover it
   return (
-    <div className="fixed bottom-4 right-4 z-[200] flex flex-col gap-2 pointer-events-none" aria-live="polite" aria-atomic="false">
+    <div className="fixed top-16 right-4 z-[200] flex flex-col gap-2 pointer-events-none" aria-live="polite" aria-atomic="false">
       {toasts.map((t) => (
         <div
           key={t.id}

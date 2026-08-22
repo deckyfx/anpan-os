@@ -54,9 +54,23 @@ function validPort(raw: string): string | null {
   return n >= 1 && n <= 65535 ? raw : null;
 }
 
-/** Hex groups and colons only — enough to reject "junk" without reimplementing RFC 4291. */
+/**
+ * Whether `raw` is a usable IPv6 literal.
+ *
+ * The character and group-count check alone was too permissive — ":::" and
+ * "1:2:3:4:5:6:7:8:9" passed it and produced URLs no browser can resolve. Rather than
+ * reimplement RFC 4291, the platform parser decides: it rejects exactly what a browser
+ * would. The character test stays as a cheap guard so obvious junk never reaches it.
+ * Dots are allowed for IPv4-mapped forms such as "::ffff:192.168.1.1".
+ */
 function looksLikeIPv6(raw: string): boolean {
-  return /^[0-9a-fA-F:]+$/.test(raw) && raw.split(":").length <= 9;
+  if (!/^[0-9a-fA-F:.]+$/.test(raw)) return false;
+  try {
+    new URL(`http://[${raw}]/`);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -117,7 +131,10 @@ function normalizePort(raw: string | null): string | null {
   // of the IP, so matching the first digits anywhere would yield 127.
   const stripped = raw.replace(/^(\[[^\]]+\]|\d{1,3}(?:\.\d{1,3}){3}):/, "");
   // The host-side port is the leading segment; a range like "8080-8090:80" starts at 8080.
-  return stripped.split(":")[0]?.match(/\d+/)?.[0] ?? null;
+  const candidate = stripped.split(":")[0]?.match(/\d+/)?.[0] ?? null;
+  // The AppConfig port field is editable, so an out-of-range value reaches here and would
+  // otherwise build "http://nas.local:0/".
+  return candidate ? validPort(candidate) : null;
 }
 
 export interface LaunchInput {
@@ -169,7 +186,9 @@ export function resolveLaunchUrl(input: LaunchInput): string | null {
     selfContained = true;
     scheme       = safeScheme(url.protocol.replace(/:$/, ""));
     host         = url.hostname;
-    explicitPort = url.port || null;
+    // A port inside a full URL is no more trustworthy than one typed into the port field.
+    explicitPort = url.port ? validPort(url.port) : null;
+    if (url.port && !explicitPort) return null;
     // Query and fragment are part of where the user is pointing — dropping "?tab=logs"
     // or "#panel" lands them somewhere else in the app.
     if (url.pathname !== "/" || url.search || url.hash) path = url.pathname + url.search + url.hash;

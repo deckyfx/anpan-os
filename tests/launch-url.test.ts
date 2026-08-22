@@ -96,6 +96,39 @@ describe("authority safety", () => {
     expect(at("good.com:99999")).toBeNull();
   });
 
+  test("invalid IPv6 literals are rejected, not bracketed and shipped", () => {
+    // A character-and-count check passed these; the URL parser does not, and it rejects
+    // exactly what a browser would.
+    expect(at(":::")).toBeNull();
+    expect(at("1:2:3:4:5:6:7:8:9")).toBeNull();
+    expect(at("gg::1")).toBeNull();
+    expect(at("[:::]:8080")).toBeNull();
+  });
+
+  test("valid IPv6 forms, including IPv4-mapped, still resolve", () => {
+    expect(at("fe80::1")).toBe("http://[fe80::1]/");
+    expect(at("2001:db8::1")).toBe("http://[2001:db8::1]/");
+    expect(at("::ffff:192.168.1.1")).toBe("http://[::ffff:192.168.1.1]/");
+  });
+
+  test("an out-of-range metadata port is dropped, keeping the address usable", () => {
+    // The AppConfig port field is editable, so 0 and 99999 reach here.
+    expect(resolveLaunchUrl({ scheme: "http", address: "nas.local", port: "0", indexPath: "/" }))
+      .toBe("http://nas.local/");
+    expect(resolveLaunchUrl({ scheme: "http", address: "nas.local", port: "99999", indexPath: "/" }))
+      .toBe("http://nas.local/");
+  });
+
+  test("an out-of-range port inside a full URL invalidates it", () => {
+    // Unlike a supplementary port, this one is part of the address being described.
+    expect(resolveLaunchUrl({ scheme: null, address: "http://nas.local:0/", port: null, indexPath: "/" }))
+      .toBeNull();
+    expect(resolveLaunchUrl({ scheme: null, address: "http://nas.local:99999/", port: null, indexPath: "/" }))
+      .toBeNull();
+    expect(resolveLaunchUrl({ scheme: null, address: "http://nas.local:8080/", port: null, indexPath: "/" }))
+      .toBe("http://nas.local:8080/");
+  });
+
   test("ordinary authorities still resolve", () => {
     expect(at("good.com")).toBe("http://good.com/");
     expect(at("192.168.1.10:8080")).toBe("http://192.168.1.10:8080/");
