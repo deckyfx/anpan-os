@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Trash2, HardDrive, AlertTriangle, Loader2, RefreshCw } from "lucide-react";
 import { Dialog } from "./Dialog";
 import { api } from "../lib/api";
@@ -37,24 +37,93 @@ function formatBytes(n: number): string {
   return `${(n / 1024 ** i).toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
 }
 
+/**
+ * One category row.
+ *
+ * Defined at module scope, not inside the dialog: a component declared during render is a
+ * new type on every render, so React unmounts and remounts each row whenever any state
+ * changes. A keyboard user pressing "Reclaim" would lose focus the instant the confirm
+ * buttons appeared, because the button that received the press no longer exists.
+ */
+function Row({ c, confirming, busy, onConfirm, onCancel, onRun }: {
+  c: CategoryUsage;
+  confirming: boolean;
+  busy: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+  onRun: () => void;
+}) {
+  const nothing = c.count === 0 && c.reclaimable === 0;
+
+  return (
+    <div className="flex items-start gap-3 py-2.5 border-b border-gray-800/40 last:border-0">
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2">
+          <span className={`text-xs font-medium ${c.risky ? "text-amber-300" : "text-gray-200"}`}>
+            {c.label}
+          </span>
+          <span className="text-[10px] text-gray-600">
+            {c.count} item{c.count === 1 ? "" : "s"}
+          </span>
+          {c.reclaimable > 0 && (
+            <span className="text-[10px] text-gray-400 tabular-nums">{formatBytes(c.reclaimable)}</span>
+          )}
+        </div>
+        <p className="text-[11px] text-gray-600 mt-0.5 leading-relaxed">{c.note}</p>
+      </div>
+
+      {confirming ? (
+        <div className="flex items-center gap-1.5 shrink-0">
+          <button
+            onClick={onRun}
+            className="text-[11px] px-2.5 py-1 rounded-lg bg-red-500/90 text-white hover:bg-red-500 transition-colors"
+          >
+            Delete
+          </button>
+          <button
+            onClick={onCancel}
+            className="text-[11px] px-2 py-1 text-gray-400 hover:text-white transition-colors"
+          >
+            Cancel
+          </button>
+        </div>
+      ) : (
+        <button
+          onClick={onConfirm}
+          disabled={busy || nothing}
+          title={nothing ? "Nothing to reclaim" : undefined}
+          className="shrink-0 flex items-center gap-1.5 text-[11px] px-2.5 py-1 rounded-lg text-gray-400 hover:text-white hover:bg-gray-800 transition-colors disabled:opacity-30 disabled:hover:bg-transparent"
+        >
+          {busy ? <Loader2 size={11} className="animate-spin" /> : <Trash2 size={11} />}
+          Reclaim
+        </button>
+      )}
+    </div>
+  );
+}
+
 export function DiskCleanupDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const [usage, setUsage]     = useState<DiskUsage | null>(null);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy]       = useState<string | null>(null);
   const [confirming, setConfirming] = useState<string | null>(null);
+  // Rescan and reopen can overlap; without this an older response can overwrite a newer.
+  const requestRef = useRef(0);
 
   const load = async () => {
+    const requestId = ++requestRef.current;
     setLoading(true);
     try {
       const { data } = await (api.api.docker as unknown as {
         "disk-usage": { get: () => Promise<{ data: unknown }> };
       })["disk-usage"].get();
+      if (requestId !== requestRef.current) return;   // superseded by a newer load
       const payload = data as DiskUsage | { error: string } | null;
       setUsage(payload && !("error" in payload) ? payload : null);
     } catch {
-      setUsage(null);
+      if (requestId === requestRef.current) setUsage(null);
     } finally {
-      setLoading(false);
+      if (requestId === requestRef.current) setLoading(false);
     }
   };
 
@@ -62,7 +131,7 @@ export function DiskCleanupDialog({ open, onClose }: { open: boolean; onClose: (
     if (open) { setConfirming(null); void load(); }
   }, [open]);
 
-  const runPrune = async (category: string) => {
+  const runPrune = async (category: CategoryUsage["category"]) => {
     setBusy(category);
     setConfirming(null);
     try {
@@ -97,58 +166,6 @@ export function DiskCleanupDialog({ open, onClose }: { open: boolean; onClose: (
 
   const safe   = usage?.categories.filter(c => !c.risky) ?? [];
   const risky  = usage?.categories.filter(c => c.risky)  ?? [];
-
-  const Row = ({ c }: { c: CategoryUsage }) => {
-    const isConfirming = confirming === c.category;
-    const isBusy = busy === c.category;
-    const nothing = c.count === 0 && c.reclaimable === 0;
-
-    return (
-      <div className="flex items-start gap-3 py-2.5 border-b border-gray-800/40 last:border-0">
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2">
-            <span className={`text-xs font-medium ${c.risky ? "text-amber-300" : "text-gray-200"}`}>
-              {c.label}
-            </span>
-            <span className="text-[10px] text-gray-600">
-              {c.count} item{c.count === 1 ? "" : "s"}
-            </span>
-            {c.reclaimable > 0 && (
-              <span className="text-[10px] text-gray-400 tabular-nums">{formatBytes(c.reclaimable)}</span>
-            )}
-          </div>
-          <p className="text-[11px] text-gray-600 mt-0.5 leading-relaxed">{c.note}</p>
-        </div>
-
-        {isConfirming ? (
-          <div className="flex items-center gap-1.5 shrink-0">
-            <button
-              onClick={() => void runPrune(c.category)}
-              className="text-[11px] px-2.5 py-1 rounded-lg bg-red-500/90 text-white hover:bg-red-500 transition-colors"
-            >
-              Delete
-            </button>
-            <button
-              onClick={() => setConfirming(null)}
-              className="text-[11px] px-2 py-1 text-gray-400 hover:text-white transition-colors"
-            >
-              Cancel
-            </button>
-          </div>
-        ) : (
-          <button
-            onClick={() => setConfirming(c.category)}
-            disabled={isBusy || nothing}
-            title={nothing ? "Nothing to reclaim" : undefined}
-            className="shrink-0 flex items-center gap-1.5 text-[11px] px-2.5 py-1 rounded-lg text-gray-400 hover:text-white hover:bg-gray-800 transition-colors disabled:opacity-30 disabled:hover:bg-transparent"
-          >
-            {isBusy ? <Loader2 size={11} className="animate-spin" /> : <Trash2 size={11} />}
-            Reclaim
-          </button>
-        )}
-      </div>
-    );
-  };
 
   return (
     <Dialog open={open} title="Docker disk cleanup" onClose={onClose} size="lg"
@@ -189,7 +206,14 @@ export function DiskCleanupDialog({ open, onClose }: { open: boolean; onClose: (
                 <HardDrive size={11} /> Safe to reclaim
               </p>
               <div className="bg-gray-950 border border-gray-800 rounded-xl px-3">
-                {safe.map(c => <Row key={c.category} c={c} />)}
+                {safe.map(c => (
+                  <Row key={c.category} c={c}
+                    confirming={confirming === c.category}
+                    busy={busy === c.category}
+                    onConfirm={() => setConfirming(c.category)}
+                    onCancel={() => setConfirming(null)}
+                    onRun={() => void runPrune(c.category)} />
+                ))}
               </div>
             </div>
 
@@ -200,7 +224,14 @@ export function DiskCleanupDialog({ open, onClose }: { open: boolean; onClose: (
               {/* Separated rather than merged into one list: these are reclaimable in the
                   same technical sense, and destructive in a way the others are not. */}
               <div className="bg-gray-950 border border-amber-900/30 rounded-xl px-3">
-                {risky.map(c => <Row key={c.category} c={c} />)}
+                {risky.map(c => (
+                  <Row key={c.category} c={c}
+                    confirming={confirming === c.category}
+                    busy={busy === c.category}
+                    onConfirm={() => setConfirming(c.category)}
+                    onCancel={() => setConfirming(null)}
+                    onRun={() => void runPrune(c.category)} />
+                ))}
               </div>
             </div>
           </>

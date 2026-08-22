@@ -992,6 +992,10 @@ export function filesPlugin(jwtSecret: string) {
           agg.end();
         }, { once: true });
 
+        // Already gone before we began: returning here avoids holding the generator open
+        // for an availability probe whose result nothing will use.
+        if (aborted) { agg.end(); return; }
+
         const hasRsync = await commands.isAvailable("rsync");
 
         void (async () => {

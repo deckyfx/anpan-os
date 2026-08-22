@@ -63,7 +63,7 @@ Found during review, and both predate this work — they arrived with the launch
 - Show/hide dotfiles in the file browser
 - Toasts moved below the top bar; a raw `alert()` replaced with a proper toast
 - **TypeScript 7.0.2**
-- Test suite **58 pass / 6 fail → 135 pass / 0 fail**
+- Test suite **58 pass / 6 fail → 150 pass / 0 fail** (`bun test tests/`), 135 of those from the update-checker work and the remainder from the disk-cleanup follow-ups
 
 ### Notes
 
@@ -78,14 +78,17 @@ an error event in the body. A browser coped; a script would have read it as succ
 
 ## Disk and cleanup
 
-- **Images reported by kind** — active, dangling and unused, instead of one number that
-  could not be reconciled with any Docker command. This host read 192, 132 and 113 for
-  what looks like a single question
+- **Images reported by kind** — the summary now reports `total` split into `active`,
+  `dangling` and `unused`, which sum to the total. Previously it reported a single figure
+  taken from `/info`, and the three ways of counting disagree: `/info` gave 192 (image
+  records, including intermediate layers), `docker images` 132 rows, and the distinct-image
+  count 113. Those are *sources*, not categories — the split is what the panel now shows
 - **Disk cleanup panel** — reclaimable space by category, with destructive categories held
   apart from safe ones and the headline total counting only the safe ones. Every prune
   names its category twice, once to select and once to confirm
 - **Bind paths on stack delete** — per-path checkboxes, unchecked by default, refusing
   shared roots, personal libraries, symlink escapes, and any path that contains or sits
   inside another stack's data
-- **`/copy` and `/move` cancellation** — closing the tab now kills rsync rather than
-  leaving it running with nothing reading its output
+- **`/copy` and `/move` cancellation** — closing the tab now terminates whichever copy or
+  move subprocess is running (rsync, its `cp` fallback, or `mv`) rather than leaving it
+  going with nothing reading its output

@@ -35,7 +35,7 @@ disappears with the dialog.
 Opt-in per path, never a blanket checkbox:
 
 - Each path gets its own checkbox, **all unchecked by default**
-- Each row shows its **size** (`du -sh`, computed lazily — a large tree can take seconds)
+- Each row shows its **size** (`du -sb` for every path in one `Promise.all` before the response, so sizes arrive with the list rather than lazily
 - Paths **outside** `config.filesRoot` are shown but not selectable, since the file
   manager's own guard would refuse them anyway
 - A path that is **shared with another stack** is flagged and not selectable — worth a

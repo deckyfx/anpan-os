@@ -121,8 +121,9 @@ accident.
 
 Every prune names its category twice, once to select and once to confirm, and the route
 rejects a mismatch with 422. That guard exists for a concrete reason: while probing which
-prune endpoints the daemon exposed, a `POST /images/prune?filters={"dangling":["false"]}`
-with an invented `dry-run=1` parameter removed roughly 76 unused images from this host.
+prune endpoints the daemon exposed, the request
+`POST /images/prune?filters=%7B%22dangling%22%3A%5B%22false%22%5D%7D&dry-run=1` removed
+roughly 76 unused images from this host.
 Docker has no dry-run for prune and ignored the unknown parameter. An endpoint that acts
 on a bare POST is too easy to reach by accident — including by a tool — so ours does not.
 

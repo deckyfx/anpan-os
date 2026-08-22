@@ -29,10 +29,29 @@ export const INFRA_MOUNTS = new Set([
  * stack mounted it would destroy the rest. Compared canonically, so a symlink to one of
  * them is caught too.
  */
+/**
+ * Directories refused as candidates, though what lies *below* them may be deletable.
+ *
+ * These are containers for data: /DATA/AppData holds every app's directory, so deleting
+ * the parent would take them all, while /DATA/AppData/myapp is exactly the normal case.
+ */
 const PROTECTED = [
-  "/", "/root", "/home", "/etc", "/usr", "/var", "/var/lib", "/opt", "/srv", "/mnt", "/media",
-  "/boot", "/dev", "/dev/shm", "/proc", "/sys", "/tmp", "/DATA", "/DATA/AppData", "/DATA/Media",
+  "/", "/home", "/mnt", "/media", "/srv", "/tmp",
+  "/DATA", "/DATA/AppData", "/DATA/Media",
   homedir(),
+];
+
+/**
+ * Roots whose entire subtree is refused.
+ *
+ * `config.filesRoot` defaults to "/", and the depth rule only requires two segments below
+ * the root — so without this, /etc/nginx, /usr/local and /var/www all qualify and a stack
+ * mounting one would offer to delete it. Nothing a container legitimately owns lives under
+ * these; application data belongs in /DATA, a home directory, or a mounted disk.
+ */
+const SYSTEM_ROOTS = [
+  "/etc", "/usr", "/var", "/opt", "/boot", "/dev", "/proc", "/sys", "/run",
+  "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32", "/root", "/snap",
 ];
 
 /**
@@ -113,9 +132,12 @@ export async function judgeBindPath(
     return { path, deletable: false, reason: `${canonical} is a shared system directory` };
   }
 
-  // /dev/shm and friends are mounted for shared memory, not for storage.
-  if (canonical === "/dev" || canonical.startsWith("/dev" + sep)) {
-    return { path, deletable: false, reason: "System device path, not stack data" };
+  // Anything inside a system root, at any depth. Exact-match protection was not enough:
+  // with the default files root of "/", /etc/nginx sits two segments down and passed.
+  for (const root of SYSTEM_ROOTS) {
+    if (canonical === root || canonical.startsWith(root + sep)) {
+      return { path, deletable: false, reason: `${root} is a system directory` };
+    }
   }
 
   // A top-level directory in someone's home — /home/decky/Music — is a personal library

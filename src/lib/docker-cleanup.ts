@@ -151,7 +151,7 @@ export async function getDiskUsage(): Promise<DiskUsage | null> {
       reclaimable: unusedVolumes.reduce((n, v) => n + (v.UsageData?.Size ?? 0), 0),
       count: unusedVolumes.length,
       risky: true,
-      note: "\"Unused\" means no running container references them — which includes every stopped stack's database. Not recoverable.",
+      note: "Includes named volumes, not just anonymous ones. \"Unused\" means no container references them right now — which covers every stopped stack's database. Not recoverable.",
     },
   ];
 
@@ -185,7 +185,11 @@ function pruneRequest(category: CleanupCategory): { path: string } {
     case "unused-networks":
       return { path: "/networks/prune" };
     case "unused-volumes":
-      return { path: "/volumes/prune" };
+      // /volumes/prune removes only *anonymous* volumes by default. Without all=true it
+      // would delete a fraction of what this category counts and reports as reclaimable —
+      // a user confirming "204 volumes, 4 GB" would get a handful of megabytes and no
+      // explanation. The count and the action have to describe the same set.
+      return { path: `/volumes/prune?filters=${encodeURIComponent(JSON.stringify({ all: ["true"] }))}` };
   }
 }
 
