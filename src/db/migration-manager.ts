@@ -195,10 +195,18 @@ export class MigrationManager {
       }
       for (const [i, row] of rows.entries()) {
         const expected = buildSeq[i];
-        if (!expected || row.hash !== expected.hash) {
+        if (!expected) {
+          return { pending: 0, problem: `applied migration ${i + 1} is beyond this build` };
+        }
+        // Hash alone cannot tell two migrations apart when their SQL is identical: a
+        // database recording only the later one would match positionally, and Drizzle
+        // would then skip the earlier one because the recorded timestamp is already
+        // newer. created_at holds the journal's `when`, which is unique per migration.
+        // Stored as numeric, so it can come back as a string.
+        if (row.hash !== expected.hash || Number(row.created_at) !== expected.when) {
           return {
             pending: 0,
-            problem: `applied migration ${i + 1} does not match this build (expected ${expected?.tag ?? "nothing"})`,
+            problem: `applied migration ${i + 1} does not match this build (expected ${expected.tag})`,
           };
         }
       }
