@@ -997,6 +997,8 @@ export function filesPlugin(jwtSecret: string) {
         if (aborted) { agg.end(); return; }
 
         const hasRsync = await commands.isAvailable("rsync");
+        // The probe is awaited, so the client may have gone during it.
+        if (aborted) { agg.end(); return; }
 
         void (async () => {
           try {
@@ -1020,7 +1022,9 @@ export function filesPlugin(jwtSecret: string) {
                 return;
               }
             }
-            await agg.push({ ok: true });
+            // Checked here as well as in the loop: an empty sources array never enters
+            // the loop, so without this an aborted request would still report success.
+            if (!aborted) await agg.push({ ok: true });
           } catch (err) {
             await agg.push({ error: err instanceof Error ? err.message : String(err) });
           } finally {
@@ -1061,6 +1065,9 @@ export function filesPlugin(jwtSecret: string) {
           current?.kill();
           agg.end();
         }, { once: true });
+
+        // Already gone before the worker starts — matches the copy path.
+        if (aborted) { agg.end(); return; }
 
         void (async () => {
           try {
@@ -1144,7 +1151,9 @@ export function filesPlugin(jwtSecret: string) {
                 }
               }
             }
-            await agg.push({ ok: true });
+            // Checked here as well as in the loop: an empty sources array never enters
+            // the loop, so without this an aborted request would still report success.
+            if (!aborted) await agg.push({ ok: true });
           } catch (err) {
             await agg.push({ error: err instanceof Error ? err.message : String(err) });
           } finally {
