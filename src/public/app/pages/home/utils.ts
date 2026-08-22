@@ -4,17 +4,235 @@ export function toGB(bytes: number): string {
   return (bytes / 1_073_741_824).toFixed(1) + "G";
 }
 
+/**
+ * Hostname suffixes that denote a LAN / mDNS name rather than a public DNS name.
+ * Hosts under these suffixes are reached directly on the container's published
+ * port, so the port must stay in the launch URL.
+ */
+const LOCAL_TLDS = new Set([
+  "local", "lan", "home", "internal", "intranet", "private",
+  "corp", "localdomain", "test", "localhost",
+]);
+
+/** Default port for a scheme — never worth spelling out in a URL. */
+const DEFAULT_PORTS: Record<string, string> = { http: "80", https: "443" };
+
+/** True for IPv4 / bracketed-IPv6 literals (`192.168.1.10`, `[::1]`). */
+function isIpLiteral(host: string): boolean {
+  if (host.startsWith("[")) return true;
+  return /^\d{1,3}(\.\d{1,3}){3}$/.test(host);
+}
+
+/**
+ * True when a host looks like a public DNS name that a reverse proxy fronts —
+ * dotted, not an IP literal, and not under a LAN/mDNS suffix.
+ * Those hosts answer on the scheme's default port, so the stack's published
+ * port must NOT be appended.
+ */
+function isProxiedDomain(host: string): boolean {
+  if (isIpLiteral(host)) return false;
+  const labels = host.split(".");
+  if (labels.length < 2) return false;                       // bare LAN name: "nas"
+  return !LOCAL_TLDS.has(labels[labels.length - 1]!.toLowerCase());
+}
+
+/**
+ * Characters that must never appear in a bare authority.
+ *
+ * The result is concatenated into a URL string, so an authority carrying any of these
+ * changes which URL is produced rather than which host is addressed. "@" is the dangerous
+ * one: "good.com@evil.com" builds "http://good.com@evil.com/", which a browser reads as
+ * userinfo "good.com" at host evil.com — a tile that looks trusted and navigates
+ * elsewhere. The address field is user-editable and also arrives from CasaOS imports.
+ */
+const AUTHORITY_FORBIDDEN = /[@/?#\s\\]/;
+
+/** A port is only a port if it is in range; "0" and "99999" are neither. */
+function validPort(raw: string): string | null {
+  if (!/^\d{1,5}$/.test(raw)) return null;
+  const n = Number(raw);
+  return n >= 1 && n <= 65535 ? raw : null;
+}
+
+/**
+ * Whether `raw` is a usable IPv6 literal.
+ *
+ * The character and group-count check alone was too permissive — ":::" and
+ * "1:2:3:4:5:6:7:8:9" passed it and produced URLs no browser can resolve. Rather than
+ * reimplement RFC 4291, the platform parser decides: it rejects exactly what a browser
+ * would. The character test stays as a cheap guard so obvious junk never reaches it.
+ * Dots are allowed for IPv4-mapped forms such as "::ffff:192.168.1.1".
+ */
+function looksLikeIPv6(raw: string): boolean {
+  if (!/^[0-9a-fA-F:.]+$/.test(raw)) return false;
+  try {
+    new URL(`http://[${raw}]/`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Split `host`, `host:port`, `[::1]:port` or a bare IPv6 into its parts.
+ *
+ * Returns null for anything that is not a plain authority. Being permissive here is not
+ * harmless: the result is concatenated into a URL, so an input the parser merely
+ * *tolerates* becomes a URL that points somewhere the label does not describe, or one no
+ * browser can resolve at all.
+ */
+function splitAuthority(raw: string): { host: string; port: string | null } | null {
+  if (!raw || AUTHORITY_FORBIDDEN.test(raw)) return null;
+
+  if (raw.startsWith("[")) {
+    const end = raw.indexOf("]");
+    if (end <= 0) return null;                       // unmatched bracket
+    const inner  = raw.slice(1, end);
+    const suffix = raw.slice(end + 1);
+    if (!looksLikeIPv6(inner)) return null;
+    // A suffix that is neither empty nor a port used to be discarded, so "[::1]junk"
+    // quietly became "[::1]".
+    if (suffix === "") return { host: `[${inner}]`, port: null };
+    const port = suffix.startsWith(":") ? validPort(suffix.slice(1)) : null;
+    return port ? { host: `[${inner}]`, port } : null;
+  }
+
+  // More than one colon and no brackets → bare IPv6 literal, never host:port
+  if ((raw.match(/:/g)?.length ?? 0) > 1) {
+    return looksLikeIPv6(raw) ? { host: `[${raw}]`, port: null } : null;
+  }
+
+  const m = raw.match(/^(.+):(.*)$/);
+  if (!m) return { host: raw, port: null };
+  // "good.com:http" is not a host:port pair, and building a URL from it yields one no
+  // browser can resolve.
+  const port = validPort(m[2]!);
+  return port ? { host: m[1]!, port } : null;
+}
+
+
+/**
+ * Only http and https may reach a launch URL.
+ *
+ * The result is used as an anchor href and passed to window.open, and the scheme comes
+ * from stack metadata a user can edit or a CasaOS import can supply — so an unrestricted
+ * value lets "javascript" become a clickable javascript: URL on the dashboard. Anything
+ * else falls back to http rather than being rejected, since the rest of the address is
+ * still usable.
+ */
+function safeScheme(raw: string | null | undefined): "http" | "https" {
+  return raw?.trim().toLowerCase() === "https" ? "https" : "http";
+}
+
+/** Keep the first numeric group of a port field (`8080`, `8080:80`, `8080/tcp`). */
+function normalizePort(raw: string | null): string | null {
+  if (!raw) return null;
+  // Drop an optional bind address first: in "127.0.0.1:8080:80" the first number is part
+  // of the IP, so matching the first digits anywhere would yield 127.
+  const stripped = raw.replace(/^(\[[^\]]+\]|\d{1,3}(?:\.\d{1,3}){3}):/, "");
+  // The host-side port is the leading segment; a range like "8080-8090:80" starts at 8080.
+  const candidate = stripped.split(":")[0]?.match(/\d+/)?.[0] ?? null;
+  // The AppConfig port field is editable, so an out-of-range value reaches here and would
+  // otherwise build "http://nas.local:0/".
+  return candidate ? validPort(candidate) : null;
+}
+
+export interface LaunchInput {
+  scheme?:    string | null;
+  /** Host, `host:port`, or a full URL. Blank = the host serving this page. */
+  address?:   string | null;
+  /** Published port from the stack metadata / compose port map. */
+  port?:      string | null;
+  indexPath?: string | null;
+  /** Host to fall back to when `address` is blank. */
+  fallbackHost?: string;
+}
+
+/**
+ * Resolve the URL used to open a stack's web UI.
+ *
+ * The published port is only appended when the target is actually reached on
+ * it. An address pointing at a public domain name is assumed to sit behind a
+ * reverse proxy and is opened as-is; an explicit port typed into the address
+ * always wins, which is the escape hatch for a domain served on a custom port.
+ *
+ * ```
+ * app.example.com  + 8080 -> https://app.example.com/
+ * app.example.com:8080    -> https://app.example.com:8080/
+ * nas.local        + 8080 -> http://nas.local:8080/
+ * 192.168.1.10     + 8080 -> http://192.168.1.10:8080/
+ * (blank)          + 8080 -> http://<current host>:8080/
+ * ```
+ *
+ * @returns the absolute URL, or `null` when there is nothing to open.
+ */
+export function resolveLaunchUrl(input: LaunchInput): string | null {
+  const rawAddress = input.address?.trim() || "";
+  const metaPort   = normalizePort(input.port?.trim() || null);
+  // Need at least an address or a port to point at something
+  if (!rawAddress && !metaPort) return null;
+
+  let scheme      = safeScheme(input.scheme);
+  let path        = input.indexPath?.trim() || "/";
+  let host: string;
+  let explicitPort: string | null = null;
+  /** A full URL in the address field describes the target completely. */
+  let selfContained = false;
+
+  if (rawAddress.includes("://")) {
+    // Full URL in the address field — it describes the target completely
+    let url: URL;
+    try { url = new URL(rawAddress); } catch { return null; }
+    selfContained = true;
+    scheme       = safeScheme(url.protocol.replace(/:$/, ""));
+    host         = url.hostname;
+    // A port inside a full URL is no more trustworthy than one typed into the port field.
+    explicitPort = url.port ? validPort(url.port) : null;
+    if (url.port && !explicitPort) return null;
+    // Query and fragment are part of where the user is pointing — dropping "?tab=logs"
+    // or "#panel" lands them somewhere else in the app.
+    if (url.pathname !== "/" || url.search || url.hash) path = url.pathname + url.search + url.hash;
+  } else if (rawAddress) {
+    const parts = splitAuthority(rawAddress);
+    // No launch URL at all is better than one pointing somewhere the label does not say.
+    if (!parts) return null;
+    host         = parts.host;
+    explicitPort = parts.port;
+  } else {
+    host = input.fallbackHost
+        ?? (typeof window !== "undefined" ? window.location.hostname : "localhost");
+  }
+
+  // An address with its own port always wins; otherwise fall back to the
+  // published port, but only when the host is not a proxied domain.
+  const autoPort = selfContained || isProxiedDomain(host) ? null : metaPort;
+  let port = explicitPort ?? autoPort;
+  if (port === DEFAULT_PORTS[scheme]) port = null;
+
+  if (!path.startsWith("/")) path = `/${path}`;
+  return `${scheme}://${host}${port ? `:${port}` : ""}${path}`;
+}
+
 export function buildLaunchUrl(stack: Stack): string | null {
-  const meta    = stack.meta;
-  const address = meta?.address?.trim() || null;
-  const port    = meta?.portMap?.trim() || null;
-  // Need at least an address or port to build a URL
-  if (!address && !port) return null;
-  const scheme   = meta?.scheme?.trim() || "http";
-  const host     = address ?? (typeof window !== "undefined" ? window.location.hostname : "localhost");
-  const portPart = port ? `:${port}` : "";
-  const index    = meta?.indexPath ?? "/";
-  return `${scheme}://${host}${portPart}${index}`;
+  return resolveLaunchUrl({
+    scheme:    stack.meta?.scheme,
+    address:   stack.meta?.address,
+    port:      stack.meta?.portMap,
+    indexPath: stack.meta?.indexPath,
+  });
+}
+
+/**
+ * Short label for a launch link — `:8080` when a port is part of the URL,
+ * otherwise the hostname, so proxied domains no longer advertise a stale port.
+ */
+export function launchLabel(url: string): string {
+  try {
+    const parsed = new URL(url);
+    return parsed.port ? `:${parsed.port}` : parsed.hostname;
+  } catch {
+    return url;
+  }
 }
 
 export const stackStateColor: Record<Stack["state"], string> = {

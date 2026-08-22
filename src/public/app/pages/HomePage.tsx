@@ -20,6 +20,7 @@ import { DeleteStackDialog } from "./home/DeleteStackDialog";
 import { PullUpdateDialog }     from "./home/PullUpdateDialog";
 import { MigrateCasaosDialog }  from "./home/MigrateCasaosDialog";
 import { UpdatesDialog }        from "./home/UpdatesDialog";
+import { UpdateReportDialog }   from "./home/UpdateReportDialog";
 import { BookmarkDialog }    from "./home/BookmarkDialog";
 import { ContainerLogsDialog }  from "./home/ContainerLogsDialog";
 import { MountPickerDialog }    from "./home/MountPickerDialog";
@@ -71,7 +72,13 @@ export function HomePage({ username, onLogout, onNavigate }: {
   useEffect(() => {
     initialize();
     void loadBookmarks();
-    useUpdateCheckStore.getState().startCheck();
+    // Attach to the checker's stream, then ask for a sweep. The request is marked `auto`,
+    // so the server drops it when a recent run exists — several tabs opening together do
+    // not each trigger work, and the decision stays in one place rather than per client.
+    const checker = useUpdateCheckStore.getState();
+    checker.connect();
+    void checker.startCheck({ auto: true });
+    return () => { useUpdateCheckStore.getState().disconnect(); };
   }, []);
 
   const [filter, setFilter] = useState("");
@@ -79,6 +86,8 @@ export function HomePage({ username, onLogout, onNavigate }: {
     { action: "stop" | "restart"; stack: Stack } | null
   >(null);
   const [pendingDeleteBookmark, setPendingDeleteBookmark] = useState<Bookmark | null>(null);
+  const [massUpdateOpen, setMassUpdateOpen] = useState(false);
+  const reportOpen = useUpdateCheckStore(s => s.dialogOpen);
 
   // ── Sorted + filtered stacks ──────────────────────────────────────────────
 
@@ -227,9 +236,11 @@ export function HomePage({ username, onLogout, onNavigate }: {
 
           <div className="grid grid-cols-[repeat(auto-fill,minmax(160px,1fr))] gap-4 mb-8">
 
-            {/* Files tile */}
-            <div
-              onClick={() => onNavigate("/files")}
+            {/* Files tile — opens in a new tab so the dashboard stays put */}
+            <a
+              href="/files"
+              target="_blank"
+              rel="noopener noreferrer"
               className="bg-gray-900 border border-dashed border-gray-700 rounded-2xl p-5 flex flex-col items-center gap-3 cursor-pointer hover:border-amber-500/50 hover:bg-gray-800/50 hover:scale-[1.02] transition-all select-none"
             >
               <div className="w-16 h-16 rounded-2xl bg-gray-800 border border-gray-700 flex items-center justify-center text-4xl">
@@ -239,7 +250,7 @@ export function HomePage({ username, onLogout, onNavigate }: {
                 <p className="text-sm text-gray-200 font-medium">Files</p>
                 <p className="text-xs text-gray-600 mt-0.5">File manager</p>
               </div>
-            </div>
+            </a>
 
             {/* New Stack tile */}
             <div
@@ -390,9 +401,17 @@ export function HomePage({ username, onLogout, onNavigate }: {
         onClose={() => useStacksStore.setState({ installLogStack: null })}
       />
 
-      <UpdatesDialog
-        open={useUpdateCheckStore(s => s.dialogOpen)}
+      {/* "View report" reads results; the mass-update dialog acts on them. Kept apart so
+          seeing what is outdated never requires starting work. */}
+      <UpdateReportDialog
+        open={reportOpen}
         onClose={() => useUpdateCheckStore.getState().closeDialog()}
+        onUpdateStacks={() => { useUpdateCheckStore.getState().closeDialog(); setMassUpdateOpen(true); }}
+      />
+
+      <UpdatesDialog
+        open={massUpdateOpen}
+        onClose={() => setMassUpdateOpen(false)}
         onUpdated={() => void loadStacks()}
       />
 

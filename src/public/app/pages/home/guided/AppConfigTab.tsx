@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Upload, X } from "lucide-react";
 import type { AppConfigState, OpenMode } from "./types";
+import { resolveLaunchUrl } from "../utils";
 
 const OPEN_MODES: Array<{ value: OpenMode; label: string }> = [
   { value: "new-page",  label: "New Page" },
@@ -26,10 +27,12 @@ export function AppConfigTab({ value, onChange }: Props) {
   const set = (partial: Partial<AppConfigState>) => onChange({ ...value, ...partial });
 
   const hostname = typeof window !== "undefined" ? window.location.hostname : "localhost";
-  const host     = value.address || hostname;
-  const liveUrl  = value.portMap
-    ? `${value.scheme}://${host}:${value.portMap}${value.indexPath || "/"}`
-    : "";
+  const liveUrl  = resolveLaunchUrl({
+    scheme:    value.scheme,
+    address:   value.address,
+    port:      value.portMap,
+    indexPath: value.indexPath,
+  }) ?? "";
 
   // Debounced preview URL — updates 600 ms after the user stops typing
   const [previewSrc, setPreviewSrc] = useState(value.icon);

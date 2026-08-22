@@ -17,12 +17,19 @@ beforeAll(async () => {
   cookie = await loginAs();
 });
 
+interface DiskMount {
+  device: string;
+  mount:  string;
+  used:   number;
+  total:  number;
+}
+
 interface SystemStats {
-  cpu:       number;
-  ramUsed:   number;
-  ramTotal:  number;
-  diskUsed:  number;
-  diskTotal: number;
+  cpu:      number;
+  ramUsed:  number;
+  ramTotal: number;
+  /** Per-mount, since multi-disk support replaced the flat diskUsed/diskTotal pair. */
+  disks:    DiskMount[];
 }
 
 // ─── Auth guard ───────────────────────────────────────────────────────────────
@@ -76,22 +83,30 @@ describe("GET /api/system/stats — returns plausible metrics", () => {
     expect(stats!.ramUsed).toBeLessThanOrEqual(stats!.ramTotal);
   });
 
-  test("diskTotal is greater than 0", async () => {
+  test("disks is a list of mounts, each with a positive total", async () => {
     const { data } = await client.api.system.stats.get({
       headers: { Cookie: cookie },
     });
     const stats = data as SystemStats | null;
-    expect(typeof stats?.diskTotal).toBe("number");
-    expect(stats!.diskTotal).toBeGreaterThan(0);
+    expect(Array.isArray(stats?.disks)).toBe(true);
+    // No non-empty assertion: getDisk() keeps only /dev/-backed mounts, and a container
+    // whose root is an overlay legitimately reports none.
+    for (const d of stats!.disks) {
+      expect(typeof d.total).toBe("number");
+      expect(d.total).toBeGreaterThan(0);
+    }
   });
 
-  test("diskUsed is between 0 and diskTotal", async () => {
+  test("each mount reports used within its own total", async () => {
     const { data } = await client.api.system.stats.get({
       headers: { Cookie: cookie },
     });
     const stats = data as SystemStats | null;
-    expect(stats!.diskUsed).toBeGreaterThanOrEqual(0);
-    expect(stats!.diskUsed).toBeLessThanOrEqual(stats!.diskTotal);
+    for (const d of stats!.disks) {
+      expect(d.used).toBeGreaterThanOrEqual(0);
+      expect(d.used).toBeLessThanOrEqual(d.total);
+      expect(typeof d.mount).toBe("string");
+    }
   });
 
 });

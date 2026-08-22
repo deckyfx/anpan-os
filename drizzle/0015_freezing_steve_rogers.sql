@@ -1,0 +1,1 @@
+ALTER TABLE `update_check_runs` ADD `scope_stack` text;

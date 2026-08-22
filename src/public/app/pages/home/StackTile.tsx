@@ -3,10 +3,9 @@ import {
   Play, Square, RotateCw, ScrollText, StickyNote,
   Settings2, FileDown, PackagePlus, Trash2,
   MoreVertical, GripVertical, ExternalLink,
-  Pencil, RefreshCcw, ArrowRightLeft, HardDrive, ArrowUp,
-} from "lucide-react";
+  Pencil, RefreshCcw, ArrowRightLeft, HardDrive, ArrowUp, RefreshCw } from "lucide-react";
 import type { ComposeOrigin, Stack, StackAction } from "./types";
-import { buildLaunchUrl, stackStateColor } from "./utils";
+import { buildLaunchUrl, launchLabel, stackStateColor } from "./utils";
 import { useSystemStore } from "../../stores/systemStore";
 import { useUpdateCheckStore } from "../../stores/updateCheckStore";
 
@@ -59,6 +58,9 @@ function TileMenu({ stack, onAction, onClose }: TileMenuProps) {
 
       <div className="border-t border-gray-700 my-1 mx-1" />
 
+      <button className={item} onClick={() => act("check-updates")}>
+        <RefreshCw size={14} className="text-sky-400 shrink-0" /> Check for updates
+      </button>
       <button className={item} onClick={() => act("logs")}>
         <ScrollText size={14} className="text-gray-400 shrink-0" /> View Logs
       </button>
@@ -206,7 +208,7 @@ export function StackTile({
               onClick={(e) => e.stopPropagation()}
               className="inline-flex items-center gap-1 text-[10px] text-amber-400 hover:text-amber-300 hover:underline"
             >
-              <ExternalLink size={10} /> Open :{stack.meta?.portMap}
+              <ExternalLink size={10} /> Open {launchLabel(launchUrl)}
             </a>
           )}
           {stack.origin && (

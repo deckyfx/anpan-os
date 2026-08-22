@@ -24,15 +24,15 @@
     "@simplewebauthn/server": "^13.3.2",
     "drizzle-orm": "^0.45.2",
     "elysia": "^1.4.29",
-    "lucide-react": "^1.31.0",
-    "music-metadata": "^11.14.0",
+    "lucide-react": "^1.33.0",
+    "music-metadata": "^11.15.0",
     "node-id3": "^0.2.9",
     "plyr": "^3.8.4",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "viewerjs": "^1.11.8",
     "yaml": "^2.9.0",
-    "zustand": "^5.0.14"
+    "zustand": "^5.0.15"
   },
   "devDependencies": {
     "@types/bun": "latest",

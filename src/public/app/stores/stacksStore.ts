@@ -137,6 +137,18 @@ export const useStacksStore = create<StacksState>((set, get) => ({
   setMountPicker:     (stack, paths = []) => set({ mountPickerStack: stack, mountPickerPaths: paths }),
 
   stackAction: async (stack, action, navigate) => {
+    if (action === "check-updates") {
+      // Scoped to this stack and never automatic, so it runs even if a full sweep
+      // completed moments ago — asking about one stack is always deliberate.
+      const { useUpdateCheckStore } = await import("./updateCheckStore");
+      const outcome = await useUpdateCheckStore.getState().startCheck({ stack: stack.name });
+      // Only announce work that actually began; a refusal reports itself, and claiming
+      // "Checking…" for a request the server declined would simply be untrue.
+      if (outcome?.started) {
+        useToastStore.getState().push(`Checking ${stack.meta?.title ?? stack.name} for updates…`, "info");
+      }
+      return;
+    }
     if (action === "logs") {
       set({ logsFor: stack });
       return;
@@ -190,7 +202,10 @@ export const useStacksStore = create<StacksState>((set, get) => ({
     if (action === "download-compose") {
       const { data, error } = await api.api.compose.stacks({ name: stack.name }).file.get();
       if (error) {
-        alert((error.value as { error?: string })?.error ?? "Compose file not found for this stack.");
+        useToastStore.getState().push(
+          (error.value as { error?: string })?.error ?? "Compose file not found for this stack",
+          "error",
+        );
         return;
       }
       const blob = new Blob([data as unknown as string], { type: "text/yaml" });
