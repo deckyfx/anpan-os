@@ -6,6 +6,9 @@ on a branch off `main` **after** #31 merges.
 
 Ordered by independence — each item can ship alone.
 
+**Status:** item 2 is implemented on `feat/disk-cleanup-followups`. Items 1, 3 and 4 are
+still planned only.
+
 ---
 
 ## 1. Image count reads the wrong number
@@ -33,7 +36,7 @@ made alongside the others in `getSummary()`, so no extra round trip in practice.
 
 ---
 
-## 2. `/copy` and `/move` never kill their subprocess
+## 2. `/copy` and `/move` never kill their subprocess — DONE
 
 **Where:** `src/plugins/routeFiles.ts`, the two SSE endpoints behind copy/paste in the
 file browser.
@@ -44,7 +47,11 @@ producers suspend and the subprocess is never reaped. This is exactly the leak C
 found in `routeCompose` during the compose-repair work, in a place we noticed at the time
 and deliberately left alone as out of scope.
 
-**Fix:** the pattern already used by `/convert` and `routeCompose`:
+**Fix (implemented):** the pattern already used by `/convert` and `routeCompose`, with two
+corrections review caught — the listener must be registered *before* the first `await` and
+seeded from `signal.aborted`, since one added after the client has gone never fires; and
+every spawn point needs its own check, because `current` is null while `stat()` is pending
+and an abort there would otherwise be followed by a process nothing can kill.
 
 ```ts
 request.signal.addEventListener("abort", () => { proc.kill(); agg.end(); }, { once: true });
@@ -77,7 +84,9 @@ deletion after the containers are gone, streamed over the existing SSE channel.
 **Guards — the bulk of the work:**
 - Refuse `/`, `/DATA`, `/DATA/AppData`, home directories, or any path fewer than two
   segments below the files root
-- Refuse paths outside `config.filesRoot`
+- Refuse paths outside `config.filesRoot`, canonicalised with `realpath` — `guardPath()`
+  is a lexical prefix check that does not resolve symlinks, which is fine for read/write
+  but not for delete
 - Refuse paths **shared with another stack** — `/DATA/AppData` is a common parent and
   deleting a sibling's data is unrecoverable; cross-check every other project's binds
 - Re-resolve server-side and re-read the binds from Docker; the client's list is a

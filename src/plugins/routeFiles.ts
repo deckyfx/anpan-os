@@ -976,18 +976,23 @@ export function filesPlugin(jwtSecret: string) {
         }
 
         const agg = new StreamAggregator();
-        const hasRsync = await commands.isAvailable("rsync");
 
         // A closed tab used to leave rsync running with nothing consuming its output.
         // The copy loop spawns one process per source, so the listener kills whichever is
         // current rather than a single captured handle.
+        //
+        // Registered before the first await, and seeded from signal.aborted: a listener
+        // added after the client has already gone never fires, so a disconnect during the
+        // rsync availability check below would otherwise start the copy anyway.
         let current: Bun.Subprocess | null = null;
-        let aborted = false;
+        let aborted = request.signal.aborted;
         request.signal.addEventListener("abort", () => {
           aborted = true;
           current?.kill();
           agg.end();
         }, { once: true });
+
+        const hasRsync = await commands.isAvailable("rsync");
 
         void (async () => {
           try {
@@ -1043,8 +1048,10 @@ export function filesPlugin(jwtSecret: string) {
         // The move loop spawns up to three different processes per source — mv on the
         // same device, otherwise rsync or cp followed by a remove — so the listener kills
         // whichever is current rather than one captured handle.
+        // Seeded from signal.aborted for the same reason as copy: a listener added after
+        // the client has gone never fires.
         let current: Bun.Subprocess | null = null;
-        let aborted = false;
+        let aborted = request.signal.aborted;
         request.signal.addEventListener("abort", () => {
           aborted = true;
           current?.kill();
@@ -1054,12 +1061,17 @@ export function filesPlugin(jwtSecret: string) {
         void (async () => {
           try {
             for (const src of sources) {
+              if (aborted) return;
               const [srcStat, destStat] = await Promise.all([
                 stat(src).catch(() => null),
                 stat(destination).catch(() => null),
               ]);
 
               const sameDev = srcStat && destStat && srcStat.dev === destStat.dev;
+
+              // `current` is null while stat() above is pending, so an abort during it
+              // leaves nothing to kill — the guard has to be here, not only in the listener.
+              if (aborted) return;
 
               if (sameDev && bins.mv) {
                 // Same device — instant atomic move
@@ -1081,6 +1093,7 @@ export function filesPlugin(jwtSecret: string) {
                 // Cross-device — rsync --remove-source-files, or cp + rm fallback
                 const hasRsync = await commands.isAvailable("rsync");
                 if (hasRsync && bins.rsync) {
+                  if (aborted) return;
                   const proc = Bun.spawn([bins.rsync, "-av", "--remove-source-files", src, destination], { stdout: "pipe", stderr: "pipe" });
                   current = proc;
                   await Promise.all([
@@ -1107,6 +1120,7 @@ export function filesPlugin(jwtSecret: string) {
                 } else {
                   // cp then rm fallback
                   const cpArgs = [bins.cp ?? "cp", "-rv", src, destination];
+                  if (aborted) return;
                   const cpProc = Bun.spawn(cpArgs, { stdout: "pipe", stderr: "pipe" });
                   current = cpProc;
                   await Promise.all([
