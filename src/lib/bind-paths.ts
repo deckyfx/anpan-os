@@ -74,6 +74,24 @@ const PERSONAL_DIR_NAMES = new Set([
 /** Minimum depth below the files root, so a stack cannot nominate the root itself. */
 const MIN_SEGMENTS_BELOW_ROOT = 2;
 
+/**
+ * Canonical forms of the protected lists, resolved once.
+ *
+ * The comparisons below run on a canonicalised candidate, so the lists must be
+ * canonical too: on a system where /tmp is a symlink, `PROTECTED.includes(canonical)`
+ * would simply not match and the directory would fall through to the depth check.
+ */
+let canonicalProtected: string[] | null = null;
+let canonicalSystemRoots: string[] | null = null;
+
+async function protectedRoots(): Promise<{ protectedPaths: string[]; systemRoots: string[] }> {
+  if (!canonicalProtected || !canonicalSystemRoots) {
+    canonicalProtected   = await Promise.all(PROTECTED.map(async p => (await canonicalise(p)) ?? p));
+    canonicalSystemRoots = await Promise.all(SYSTEM_ROOTS.map(async p => (await canonicalise(p)) ?? p));
+  }
+  return { protectedPaths: canonicalProtected, systemRoots: canonicalSystemRoots };
+}
+
 export type BindVerdict =
   | { path: string; deletable: true;  canonical: string }
   | { path: string; deletable: false; reason: string };
@@ -128,13 +146,15 @@ export async function judgeBindPath(
     return { path, deletable: false, reason: "Path no longer exists on disk" };
   }
 
-  if (PROTECTED.includes(canonical)) {
+  const { protectedPaths, systemRoots } = await protectedRoots();
+
+  if (protectedPaths.includes(canonical)) {
     return { path, deletable: false, reason: `${canonical} is a shared system directory` };
   }
 
   // Anything inside a system root, at any depth. Exact-match protection was not enough:
   // with the default files root of "/", /etc/nginx sits two segments down and passed.
-  for (const root of SYSTEM_ROOTS) {
+  for (const root of systemRoots) {
     if (canonical === root || canonical.startsWith(root + sep)) {
       return { path, deletable: false, reason: `${root} is a system directory` };
     }
@@ -151,16 +171,24 @@ export async function judgeBindPath(
   }
 
   const root = filesRoot ?? config.filesRoot;
-  if (root !== "/") {
-    const canonicalRoot = await canonicalise(root);
-    if (!canonicalRoot || !(canonical === canonicalRoot || canonical.startsWith(canonicalRoot + sep))) {
-      return { path, deletable: false, reason: "Outside the configured files root" };
-    }
+  const canonicalRoot = root === "/" ? "/" : await canonicalise(root);
+  if (!canonicalRoot) {
+    return { path, deletable: false, reason: "Configured files root does not exist" };
+  }
+  // "/" needs its own case: appending a separator would make "//", which nothing starts
+  // with, so every path would read as outside the root.
+  const insideRoot = canonicalRoot === "/"
+    || canonical === canonicalRoot
+    || canonical.startsWith(canonicalRoot + sep);
+  if (!insideRoot) {
+    return { path, deletable: false, reason: "Outside the configured files root" };
   }
 
   // Depth is measured against the canonical path, so "/DATA/AppData/x/../.." cannot
   // masquerade as something deep.
-  const depth = segmentsBelow(root === "/" ? "/" : root, canonical);
+  // Measured against the canonical root, not the configured spelling: a symlinked or
+  // traversal-containing root would otherwise make every candidate look outside it.
+  const depth = segmentsBelow(canonicalRoot, canonical);
   if (depth < MIN_SEGMENTS_BELOW_ROOT) {
     return {
       path,

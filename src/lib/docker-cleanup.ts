@@ -52,9 +52,16 @@ interface DfResponse {
   BuildCache?: DfCache[] | null;
 }
 
+/** A stalled socket must not hold the whole panel: getDiskUsage awaits four requests. */
+const DAEMON_TIMEOUT_MS = 15_000;
+
 async function api<T>(path: string, method = "GET"): Promise<T | null> {
   try {
-    const res = await fetch(`${BASE}${path}`, { method, unix: SOCKET } as RequestInit);
+    const res = await fetch(`${BASE}${path}`, {
+      method,
+      unix: SOCKET,
+      signal: AbortSignal.timeout(DAEMON_TIMEOUT_MS),
+    } as RequestInit);
     if (!res.ok) return null;
     return await res.json() as T;
   } catch {
@@ -75,7 +82,9 @@ export async function getDiskUsage(): Promise<DiskUsage | null> {
   // include.
   const [df, allImages, allContainers, allNetworks] = await Promise.all([
     api<DfResponse>("/system/df"),
-    api<Array<{ Id: string; RepoTags: string[] | null; Size: number }>>("/images/json"),
+    // all=1: without it the list omits non-final images, and the preview would understate
+    // what a prune removes.
+    api<Array<{ Id: string; RepoTags: string[] | null; Size: number }>>("/images/json?all=1"),
     api<Array<{ ImageID: string; State: string }>>("/containers/json?all=1"),
     // /system/df does not report networks at all, so the count has to come from here or
     // the category can never be enabled in the UI.
@@ -93,14 +102,22 @@ export async function getDiskUsage(): Promise<DiskUsage | null> {
   // Stopped containers count: their image is needed to start them again.
   const inUse = new Set((allContainers ?? []).map(c => c.ImageID));
 
-  // Dangling: no repository tags at all. These are layers left by a rebuild or a retag.
-  const dangling = images.filter(i => !i.RepoTags || i.RepoTags.length === 0 || i.RepoTags[0] === "<none>:<none>");
-  const danglingIds = new Set(dangling.map(i => i.Id));
-  // Unused but tagged: a real image no container references. Removing it means a pull to
-  // get it back, which is inconvenient rather than destructive.
-  const unusedTagged = images.filter(i => !inUse.has(i.Id) && !danglingIds.has(i.Id));
+  // Dangling: no repository tags, *and* unreferenced. A container can run an untagged
+  // image — this host has one — and Docker refuses to remove an image in use, so counting
+  // it here would advertise space that no prune can reclaim.
+  const untagged = (i: { RepoTags: string[] | null }) =>
+    !i.RepoTags || i.RepoTags.length === 0 || i.RepoTags[0] === "<none>:<none>";
+  const dangling = images.filter(i => untagged(i) && !inUse.has(i.Id));
+  // Everything no container references, dangling included. This has to match the prune:
+  // filters={"dangling":["false"]} removes *all* unused images, not only tagged ones, so
+  // a preview that counted just the tagged ones would understate what disappears.
+  const allUnused = images.filter(i => !inUse.has(i.Id));
 
-  const stopped = containers.filter(c => c.State !== "running");
+  // /containers/prune removes containers in a stopped state. "not running" would also
+  // sweep in paused and restarting ones, which it leaves alone — so the count would
+  // promise more than the action delivers.
+  const PRUNABLE_STATES = new Set(["exited", "created", "dead"]);
+  const stopped = containers.filter(c => PRUNABLE_STATES.has(c.State));
   const unusedVolumes = volumes.filter(v => (v.UsageData?.RefCount ?? 0) === 0);
   const idleCache = cache.filter(c => !c.InUse);
 
@@ -140,10 +157,10 @@ export async function getDiskUsage(): Promise<DiskUsage | null> {
     {
       category: "unused-images",
       label: "Unused images",
-      reclaimable: unusedTagged.reduce((n, i) => n + (i.Size ?? 0), 0),
-      count: unusedTagged.length,
+      reclaimable: allUnused.reduce((n, i) => n + (i.Size ?? 0), 0),
+      count: allUnused.length,
       risky: true,
-      note: "Tagged images no container uses. A stopped stack needs its image back to start again.",
+      note: "Every image no container references, dangling ones included. A stopped stack needs its image back before it can start.",
     },
     {
       category: "unused-volumes",
