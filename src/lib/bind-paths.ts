@@ -144,8 +144,14 @@ export async function judgeBindPath(
   if (otherStackPaths.has(canonical)) {
     return { path, deletable: false, reason: "Also mounted by another stack" };
   }
-  // A parent of another stack's path is equally dangerous: deleting it takes the child.
+  // Containment is dangerous in both directions. A parent of another stack's path takes
+  // the child with it; a path *inside* another stack's mount is data that stack is using,
+  // even though the two strings are not equal — /DATA/AppData/shared/db sits inside
+  // /DATA/AppData/shared.
   for (const other of otherStackPaths) {
+    if (canonical.startsWith(other + sep)) {
+      return { path, deletable: false, reason: `Inside another stack's data (${other})` };
+    }
     if (other.startsWith(canonical + sep)) {
       return { path, deletable: false, reason: `Contains another stack's data (${other})` };
     }

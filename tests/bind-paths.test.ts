@@ -64,6 +64,18 @@ describe("judgeBindPath — refusals", () => {
     expect(v.deletable === false && v.reason).toContain("another stack's data");
   });
 
+  test("a path inside another stack's mount is refused", async () => {
+    // The reverse of the parent case, and easy to miss: the strings are not equal and the
+    // candidate does not contain the other, but deleting it still takes that stack's data.
+    const shared = join(base, "AppData", "shared");
+    const child  = join(shared, "db");
+    mkdirSync(child, { recursive: true });
+
+    const v = await judgeBindPath(child, new Set([shared]));
+    expect(v.deletable).toBe(false);
+    expect(v.deletable === false && v.reason).toContain("Inside another stack");
+  });
+
   test("a symlink pointing outside the files root is refused", async () => {
     // The lexical check used elsewhere would pass this: the link sits inside the root.
     const outside = realpathSync(mkdtempSync(join(tmpdir(), "anpan-outside-")));

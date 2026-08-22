@@ -1,10 +1,10 @@
 import { Elysia, t } from "elysia";
 import { join } from "node:path";
-import { rmSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import { authGuard } from "./authGuard";
 import { DockerClient } from "../lib/docker";
 import { StackStore } from "../stores/stack-store";
-import { judgeStackBindPaths } from "../lib/bind-paths";
+import { judgeStackBindPaths, judgeBindPath, otherStacksBindPaths } from "../lib/bind-paths";
 import { getDiskUsage, prune, type CleanupCategory } from "../lib/docker-cleanup";
 import { config } from "../config";
 import { envConfig } from "../env-config";
@@ -268,9 +268,22 @@ export function dockerPlugin(jwtSecret: string) {
             refusedPaths.push({ path: verdict.path, reason: verdict.reason });
             continue;
           }
+
+          // Re-judge immediately before removing. The first verdict was formed before the
+          // containers were removed, and another stack can start mounting a path in the
+          // interval — deleting on the strength of the older answer would take data that
+          // is now in use.
+          const fresh = await judgeBindPath(verdict.path, await otherStacksBindPaths(params.name));
+          if (!fresh.deletable) {
+            refusedPaths.push({ path: verdict.path, reason: fresh.reason });
+            continue;
+          }
+
           try {
-            // Delete the canonical target, not the path as written.
-            rmSync(verdict.canonical, { recursive: true, force: true });
+            // Delete the canonical target, not the path as written. Awaited rather than
+            // synchronous: a large tree would otherwise block every other request and all
+            // SSE traffic for the duration of the walk.
+            await rm(fresh.canonical, { recursive: true, force: true });
             deletedPaths.push(verdict.path);
           } catch (err) {
             refusedPaths.push({
@@ -291,9 +304,9 @@ export function dockerPlugin(jwtSecret: string) {
       // 6. Remove managed compose directory and install log (best-effort)
       const composeDir = join(config.composeFolder, params.name);
       if (composeDir.startsWith(config.composeFolder)) {
-        try { rmSync(composeDir, { recursive: true, force: true }); } catch { /* ignore */ }
+        try { await rm(composeDir, { recursive: true, force: true }); } catch { /* ignore */ }
       }
-      try { rmSync(join(envConfig.RUNTIME_CONFIG_DIR, "logs", `${params.name}.log`), { force: true }); } catch { /* ignore */ }
+      try { await rm(join(envConfig.RUNTIME_CONFIG_DIR, "logs", `${params.name}.log`), { force: true }); } catch { /* ignore */ }
 
       return { ok: true, hostPaths: [...hostPaths].sort(), deletedPaths, refusedPaths };
     }, {

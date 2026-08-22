@@ -73,10 +73,14 @@ export async function getDiskUsage(): Promise<DiskUsage | null> {
   // cannot be derived from it. The full image list and the container list give the same
   // answer `docker system df` prints, without depending on which images df chose to
   // include.
-  const [df, allImages, allContainers] = await Promise.all([
+  const [df, allImages, allContainers, allNetworks] = await Promise.all([
     api<DfResponse>("/system/df"),
     api<Array<{ Id: string; RepoTags: string[] | null; Size: number }>>("/images/json"),
     api<Array<{ ImageID: string; State: string }>>("/containers/json?all=1"),
+    // /system/df does not report networks at all, so the count has to come from here or
+    // the category can never be enabled in the UI.
+    api<Array<{ Name: string; Containers?: Record<string, unknown> | null }>>("/networks?filters=" +
+      encodeURIComponent(JSON.stringify({ dangling: ["true"] }))),
   ]);
   if (!df) return null;
 
@@ -128,10 +132,10 @@ export async function getDiskUsage(): Promise<DiskUsage | null> {
     {
       category: "unused-networks",
       label: "Unused networks",
-      reclaimable: 0,
-      count: 0,          // the df endpoint does not report networks; count is informational
+      reclaimable: 0,   // networks occupy no meaningful disk space
+      count: (allNetworks ?? []).length,
       risky: false,
-      note: "Networks no container is attached to. Frees no disk space, only clutter.",
+      note: "Networks no container is attached to. Frees no disk space — removes clutter only.",
     },
     {
       category: "unused-images",

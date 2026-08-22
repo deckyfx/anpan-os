@@ -1,8 +1,7 @@
 # Draft — v0.10.0 release notes
 
-> Draft. PR #31 merged clean on 2026-08-22; this also needs the disk-cleanup work
-> from `feat/disk-cleanup-followups` folded in before it becomes the ROADMAP entry.
-> Version bump: `package.json` 0.9.0 → 0.10.0.
+> Draft for the ROADMAP entry. Covers PR #31 (merged 2026-08-22) and the disk-cleanup
+> work that followed it. Version bump: `package.json` 0.9.0 → 0.10.0.
 
 ## The bug this release fixes
 
@@ -77,15 +76,16 @@ an error event in the body. A browser coped; a script would have read it as succ
 
 ---
 
-## Still to fold in — disk cleanup work
+## Disk and cleanup
 
-Landing separately on `feat/disk-cleanup-followups`:
-
-- **Images reported by kind** — active, dangling and unused, rather than one number that
-  could not be reconciled with any Docker command
-- **Disk cleanup panel** — reclaimable space by category, safe categories separated from
-  destructive ones, every prune confirmed by naming its category twice
+- **Images reported by kind** — active, dangling and unused, instead of one number that
+  could not be reconciled with any Docker command. This host read 192, 132 and 113 for
+  what looks like a single question
+- **Disk cleanup panel** — reclaimable space by category, with destructive categories held
+  apart from safe ones and the headline total counting only the safe ones. Every prune
+  names its category twice, once to select and once to confirm
 - **Bind paths on stack delete** — per-path checkboxes, unchecked by default, refusing
-  shared roots, personal libraries, symlink escapes and anything another stack also mounts
-- **`/copy` and `/move` cancellation** — closing the tab now kills rsync instead of
-  leaving it running
+  shared roots, personal libraries, symlink escapes, and any path that contains or sits
+  inside another stack's data
+- **`/copy` and `/move` cancellation** — closing the tab now kills rsync rather than
+  leaving it running with nothing reading its output
