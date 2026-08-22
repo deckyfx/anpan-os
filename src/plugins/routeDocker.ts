@@ -4,6 +4,8 @@ import { rmSync } from "node:fs";
 import { authGuard } from "./authGuard";
 import { DockerClient } from "../lib/docker";
 import { StackStore } from "../stores/stack-store";
+import { judgeStackBindPaths } from "../lib/bind-paths";
+import { getDiskUsage, prune, type CleanupCategory } from "../lib/docker-cleanup";
 import { config } from "../config";
 import { envConfig } from "../env-config";
 
@@ -136,29 +138,89 @@ export function dockerPlugin(jwtSecret: string) {
     )
 
     // Paths that are NOT system mounts and should be surfaced to the user before deletion
+    /**
+     * Bind-mounted host paths for a stack, each with a verdict on whether it may be
+     * deleted and its size on disk.
+     *
+     * The verdict is computed here rather than in the browser so the same rules apply to
+     * the delete call, which recomputes them and does not trust what the client sends.
+     */
     .get("/stacks/:name/binds", async ({ params, set }) => {
-      const containers = await DockerClient.listProjectContainers(params.name);
-      if (!containers.ok) { set.status = 502; return { error: containers.error }; }
+      const verdicts = await judgeStackBindPaths(params.name);
+      if (verdicts.length === 0) {
+        const containers = await DockerClient.listProjectContainers(params.name);
+        if (!containers.ok) { set.status = 502; return { error: containers.error }; }
+      }
 
-      const SKIP = new Set(["/var/run/docker.sock", "/etc/localtime", "/etc/timezone", "/etc/hosts", "/etc/hostname"]);
-      const paths = new Set<string>();
-
-      await Promise.all(containers.data.map(async (c) => {
-        const r = await DockerClient.inspectContainer(c.Id);
-        if (!r.ok) return;
-        for (const m of r.data.Mounts) {
-          if (m.Type === "bind" && !SKIP.has(m.Source)) paths.add(m.Source);
-        }
+      // du is best-effort: a size is a courtesy, and an unreadable directory should still
+      // be listed rather than dropped from the dialog.
+      const withSizes = await Promise.all(verdicts.map(async (v) => {
+        let bytes: number | null = null;
+        try {
+          const out = await Bun.$`du -sb ${v.path}`.quiet().nothrow();
+          if (out.exitCode === 0) {
+            const parsed = Number.parseInt(out.stdout.toString().split(/\s/)[0] ?? "", 10);
+            bytes = Number.isFinite(parsed) ? parsed : null;
+          }
+        } catch { /* leave null */ }
+        return { ...v, bytes };
       }));
 
-      return { paths: [...paths].sort() };
+      return {
+        paths: withSizes.map(v => v.path),          // kept for existing callers
+        binds: withSizes,
+      };
     })
 
-    // Destroy a stack: containers → named volumes → networks → DB row.
-    // Bind-mounted host paths are intentionally left untouched.
-    .delete("/stacks/:name", async ({ params, set }) => {
+    /** GET /api/docker/disk-usage — reclaimable space by category. Read-only. */
+    .get("/disk-usage", async ({ set }) => {
+      const usage = await getDiskUsage();
+      if (!usage) { set.status = 502; return { error: "Could not read Docker disk usage" }; }
+      return usage;
+    })
+
+    /**
+     * POST /api/docker/prune — reclaim one category.
+     *
+     * `confirm` is required and must name the same category. Docker's prune endpoints
+     * accept a bare POST and act immediately — there is no dry run, and a stray request
+     * carrying a `dangling:false` filter removes every unused image on the host. Requiring
+     * the category twice means a prune cannot happen by reaching the URL, only by asking
+     * for that specific thing.
+     */
+    .post("/prune", async ({ body, set }) => {
+      if (body.confirm !== body.category) {
+        set.status = 422;
+        return { error: "confirm must repeat the category being pruned" };
+      }
+      const result = await prune(body.category as CleanupCategory);
+      if (result.error) { set.status = 502; return { error: result.error }; }
+      return result;
+    }, {
+      body: t.Object({
+        category: t.Union([
+          t.Literal("dangling-images"), t.Literal("unused-images"), t.Literal("build-cache"),
+          t.Literal("stopped-containers"), t.Literal("unused-networks"), t.Literal("unused-volumes"),
+        ]),
+        confirm: t.String(),
+      }),
+    })
+
+    /**
+     * Destroy a stack: containers, named volumes, networks, DB row, compose directory.
+     *
+     * Bind-mounted host paths are deleted only when explicitly named in `deletePaths`, and
+     * only when they pass the checks in lib/bind-paths. Nothing is removed by default:
+     * a named volume can be recreated from a compose file, while a bind directory usually
+     * holds the only copy of whatever is in it.
+     */
+    .delete("/stacks/:name", async ({ params, body, set }) => {
       const containers = await DockerClient.listProjectContainers(params.name);
       if (!containers.ok) { set.status = 502; return { error: containers.error }; }
+
+      // Judge the bind paths before removing containers — inspecting them afterwards is
+      // impossible, and the verdicts are needed both for the response and for step 5.
+      const bindVerdicts = await judgeStackBindPaths(params.name);
 
       // Collect bind paths before removal so we can return them
       const SKIP = new Set(["/var/run/docker.sock", "/etc/localtime", "/etc/timezone", "/etc/hosts", "/etc/hostname"]);
@@ -190,14 +252,56 @@ export function dockerPlugin(jwtSecret: string) {
       await StackStore.delete(params.name);
       invalidateOriginCache(params.name);
 
-      // 5. Remove managed compose directory and install log (best-effort)
+      // 5. Remove bind paths the caller explicitly asked for, re-judging every one.
+      //    The request names paths; it does not authorise them. The list is recomputed
+      //    from Docker because the client's copy may be minutes stale, and a path that
+      //    has since become shared with another stack must not be deleted on the strength
+      //    of an older verdict.
+      const requested = new Set(body?.deletePaths ?? []);
+      const deletedPaths: string[] = [];
+      const refusedPaths: Array<{ path: string; reason: string }> = [];
+
+      if (requested.size > 0) {
+        for (const verdict of bindVerdicts) {
+          if (!requested.has(verdict.path)) continue;
+          if (!verdict.deletable) {
+            refusedPaths.push({ path: verdict.path, reason: verdict.reason });
+            continue;
+          }
+          try {
+            // Delete the canonical target, not the path as written.
+            rmSync(verdict.canonical, { recursive: true, force: true });
+            deletedPaths.push(verdict.path);
+          } catch (err) {
+            refusedPaths.push({
+              path: verdict.path,
+              reason: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
+        // A path asked for that is no longer a bind of this stack is refused by omission;
+        // report it so the caller is not left believing it was removed.
+        for (const p of requested) {
+          if (!bindVerdicts.some(v => v.path === p)) {
+            refusedPaths.push({ path: p, reason: "No longer a bind mount of this stack" });
+          }
+        }
+      }
+
+      // 6. Remove managed compose directory and install log (best-effort)
       const composeDir = join(config.composeFolder, params.name);
       if (composeDir.startsWith(config.composeFolder)) {
         try { rmSync(composeDir, { recursive: true, force: true }); } catch { /* ignore */ }
       }
       try { rmSync(join(envConfig.RUNTIME_CONFIG_DIR, "logs", `${params.name}.log`), { force: true }); } catch { /* ignore */ }
 
-      return { ok: true, hostPaths: [...hostPaths].sort() };
+      return { ok: true, hostPaths: [...hostPaths].sort(), deletedPaths, refusedPaths };
+    }, {
+      // Optional: a delete with no body removes the stack and leaves every host path,
+      // which is the behaviour every existing caller expects.
+      body: t.Optional(t.Object({
+        deletePaths: t.Optional(t.Array(t.String())),
+      })),
     })
 
     .get("/containers/:id", async ({ params, set }) => {
