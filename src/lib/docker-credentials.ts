@@ -57,11 +57,16 @@ function decodeAuth(entry: { auth?: string; username?: string; password?: string
 /** Normalise a config key to a bare host so lookups match parsed image references. */
 function normaliseKey(key: string): string {
   if (DOCKER_HUB_KEYS.includes(key)) return "registry-1.docker.io";
+
   // Keys are sometimes written as URLs; the host is the part that identifies a registry.
+  let host = key.replace(/\/+$/, "");
   try {
-    if (key.includes("://")) return new URL(key).host;
-  } catch { /* fall through to the raw key */ }
-  return key.replace(/\/+$/, "");
+    if (key.includes("://")) host = new URL(key).host;
+  } catch { /* keep the trimmed raw key */ }
+
+  // Canonicalise again after extraction: "https://docker.io/" reduces to "docker.io",
+  // which is a Hub alias and must map on to registry-1.docker.io like the rest.
+  return DOCKER_HUB_KEYS.includes(host) ? "registry-1.docker.io" : host;
 }
 
 /**

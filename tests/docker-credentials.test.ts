@@ -48,6 +48,14 @@ describe("loadDockerCredentials", () => {
     expect(creds.for("docker.io")).toEqual({ username: "bob", password: "hunter2" });
   });
 
+  test("URL-form Hub aliases canonicalise too, not just the exact key", async () => {
+    const auth = Buffer.from("bob:hunter2").toString("base64");
+    // "https://docker.io/" reduces to the host "docker.io", which is still a Hub alias —
+    // stopping at the host would leave Hub credentials unusable.
+    const creds = await loadDockerCredentials(configWith({ auths: { "https://docker.io/": { auth } } }));
+    expect(creds.for("registry-1.docker.io")).toEqual({ username: "bob", password: "hunter2" });
+  });
+
   test("explicit username/password fields are honoured", async () => {
     const creds = await loadDockerCredentials(configWith({
       auths: { "reg.internal:5000": { username: "u", password: "p" } },

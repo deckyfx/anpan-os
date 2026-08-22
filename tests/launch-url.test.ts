@@ -64,3 +64,28 @@ describe("launchLabel", () => {
     expect(launchLabel("https://app.example.com/")).toBe("app.example.com");
   });
 });
+
+describe("scheme safety", () => {
+  test("a javascript scheme cannot reach the href", () => {
+    // scheme comes from stack metadata a user can edit, and from CasaOS imports; the
+    // result is used as an anchor href, so anything but http/https must not survive.
+    const out = resolveLaunchUrl({ scheme: "javascript", address: "example.com", port: null, indexPath: "/" });
+    expect(out?.startsWith("javascript:")).toBe(false);
+    expect(out).toBe("http://example.com/");
+  });
+
+  test("https is preserved, case-insensitively", () => {
+    expect(resolveLaunchUrl({ scheme: "HTTPS", address: "example.com", port: null, indexPath: "/" }))
+      .toBe("https://example.com/");
+  });
+
+  test("a full URL carrying a hostile scheme is downgraded, not trusted", () => {
+    const out = resolveLaunchUrl({ scheme: null, address: "javascript://evil/%0aalert(1)", port: null, indexPath: "/" });
+    expect(out?.startsWith("javascript:")).toBe(false);
+  });
+
+  test("an unknown scheme falls back to http rather than being dropped", () => {
+    expect(resolveLaunchUrl({ scheme: "ftp", address: "example.com", port: null, indexPath: "/" }))
+      .toBe("http://example.com/");
+  });
+});

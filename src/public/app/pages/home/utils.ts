@@ -51,6 +51,19 @@ function splitAuthority(raw: string): { host: string; port: string | null } {
   return m ? { host: m[1]!, port: m[2]! } : { host: raw, port: null };
 }
 
+/**
+ * Only http and https may reach a launch URL.
+ *
+ * The result is used as an anchor href and passed to window.open, and the scheme comes
+ * from stack metadata a user can edit or a CasaOS import can supply — so an unrestricted
+ * value lets "javascript" become a clickable javascript: URL on the dashboard. Anything
+ * else falls back to http rather than being rejected, since the rest of the address is
+ * still usable.
+ */
+function safeScheme(raw: string | null | undefined): "http" | "https" {
+  return raw?.trim().toLowerCase() === "https" ? "https" : "http";
+}
+
 /** Keep the first numeric group of a port field (`8080`, `8080:80`, `8080/tcp`). */
 function normalizePort(raw: string | null): string | null {
   if (!raw) return null;
@@ -96,7 +109,7 @@ export function resolveLaunchUrl(input: LaunchInput): string | null {
   // Need at least an address or a port to point at something
   if (!rawAddress && !metaPort) return null;
 
-  let scheme      = input.scheme?.trim() || "http";
+  let scheme      = safeScheme(input.scheme);
   let path        = input.indexPath?.trim() || "/";
   let host: string;
   let explicitPort: string | null = null;
@@ -108,7 +121,7 @@ export function resolveLaunchUrl(input: LaunchInput): string | null {
     let url: URL;
     try { url = new URL(rawAddress); } catch { return null; }
     selfContained = true;
-    scheme       = url.protocol.replace(/:$/, "");
+    scheme       = safeScheme(url.protocol.replace(/:$/, ""));
     host         = url.hostname;
     explicitPort = url.port || null;
     // Query and fragment are part of where the user is pointing — dropping "?tab=logs"

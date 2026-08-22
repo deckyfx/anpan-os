@@ -108,8 +108,12 @@ class UpdateChecker {
 
     if (this.active) {
       if (!force) {
+        // A non-force request must never cancel. Falling through when the row could not
+        // be read would do exactly that, killing a live sweep because of a lookup miss.
         const run = await UpdateCheckStore.findRun(this.active.runId);
-        if (run) return { started: false, reason: "running", run };
+        return run
+          ? { started: false, reason: "running", run }
+          : { started: false, reason: "running", run: await this.syntheticRun(this.active.runId) };
       }
       await this.cancel();
     }
@@ -152,6 +156,21 @@ class UpdateChecker {
       });
 
     return { started: true, runId: run.id };
+  }
+
+  /**
+   * A stand-in row for a run whose record cannot be read.
+   *
+   * Only reached if the row vanished under us; the caller needs *something* describing the
+   * run in progress, and reporting "running" with placeholder counts is truer than
+   * reporting that nothing is happening.
+   */
+  private async syntheticRun(runId: number): Promise<UpdateCheckRunRow> {
+    return {
+      id: runId, status: "running", total: 0, completed: 0, updatesFound: 0,
+      getFallbacks: 0, auto: false, scopeStack: null, error: null,
+      startedAt: new Date(), progressAt: new Date(), finishedAt: null,
+    };
   }
 
   /** Cancel the in-flight sweep, if any. Results already written are kept. */
@@ -250,8 +269,10 @@ class UpdateChecker {
         if (timedOut) error = `Timed out after ${Math.round(RUN_TIMEOUT_MS / 60_000)} minutes`;
       } else {
         // Only a full sweep knows the complete set of images; pruning after a scoped check
-        // would delete every other stack's results.
-        if (!opts.scoped) await UpdateCheckStore.retainOnly(targets);
+        // would delete every other stack's results. An empty target list is also not
+        // evidence that the host has no containers — a daemon hiccup returns one — and
+        // treating it as such would wipe every stored result.
+        if (!opts.scoped && targets.length > 0) await UpdateCheckStore.retainOnly(targets);
       }
     } catch (err) {
       status = "failed";
