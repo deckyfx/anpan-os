@@ -82,10 +82,26 @@ describe("authority safety", () => {
     expect(at("good.com\\evil.com")).toBeNull();
   });
 
+  test("malformed bracket suffixes are rejected, not silently trimmed", () => {
+    // "[::1]junk" used to resolve as "[::1]" — the parser tolerated the suffix and
+    // dropped it, producing a URL the address never described.
+    expect(at("[::1]junk")).toBeNull();
+    expect(at("[::1")).toBeNull();
+    expect(at("[not-ipv6]")).toBeNull();
+  });
+
+  test("a non-numeric or out-of-range port is not a port", () => {
+    expect(at("good.com:http")).toBeNull();
+    expect(at("good.com:0")).toBeNull();
+    expect(at("good.com:99999")).toBeNull();
+  });
+
   test("ordinary authorities still resolve", () => {
     expect(at("good.com")).toBe("http://good.com/");
     expect(at("192.168.1.10:8080")).toBe("http://192.168.1.10:8080/");
     expect(at("[::1]:8080")).toBe("http://[::1]:8080/");
+    expect(at("::1")).toBe("http://[::1]/");
+    expect(at("good.com:8080")).toBe("http://good.com:8080/");
   });
 });
 

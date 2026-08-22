@@ -47,25 +47,55 @@ function isProxiedDomain(host: string): boolean {
  */
 const AUTHORITY_FORBIDDEN = /[@/?#\s\\]/;
 
+/** A port is only a port if it is in range; "0" and "99999" are neither. */
+function validPort(raw: string): string | null {
+  if (!/^\d{1,5}$/.test(raw)) return null;
+  const n = Number(raw);
+  return n >= 1 && n <= 65535 ? raw : null;
+}
+
+/** Hex groups and colons only — enough to reject "junk" without reimplementing RFC 4291. */
+function looksLikeIPv6(raw: string): boolean {
+  return /^[0-9a-fA-F:]+$/.test(raw) && raw.split(":").length <= 9;
+}
+
 /**
  * Split `host`, `host:port`, `[::1]:port` or a bare IPv6 into its parts.
- * Returns null when the input is not a plain authority.
+ *
+ * Returns null for anything that is not a plain authority. Being permissive here is not
+ * harmless: the result is concatenated into a URL, so an input the parser merely
+ * *tolerates* becomes a URL that points somewhere the label does not describe, or one no
+ * browser can resolve at all.
  */
 function splitAuthority(raw: string): { host: string; port: string | null } | null {
-  if (AUTHORITY_FORBIDDEN.test(raw)) return null;
+  if (!raw || AUTHORITY_FORBIDDEN.test(raw)) return null;
 
   if (raw.startsWith("[")) {
     const end = raw.indexOf("]");
-    if (end > 0) {
-      const rest = raw.slice(end + 1).match(/^:(\d+)$/);
-      return { host: raw.slice(0, end + 1), port: rest?.[1] ?? null };
-    }
+    if (end <= 0) return null;                       // unmatched bracket
+    const inner  = raw.slice(1, end);
+    const suffix = raw.slice(end + 1);
+    if (!looksLikeIPv6(inner)) return null;
+    // A suffix that is neither empty nor a port used to be discarded, so "[::1]junk"
+    // quietly became "[::1]".
+    if (suffix === "") return { host: `[${inner}]`, port: null };
+    const port = suffix.startsWith(":") ? validPort(suffix.slice(1)) : null;
+    return port ? { host: `[${inner}]`, port } : null;
   }
+
   // More than one colon and no brackets → bare IPv6 literal, never host:port
-  if ((raw.match(/:/g)?.length ?? 0) > 1) return { host: `[${raw}]`, port: null };
-  const m = raw.match(/^(.+):(\d+)$/);
-  return m ? { host: m[1]!, port: m[2]! } : { host: raw, port: null };
+  if ((raw.match(/:/g)?.length ?? 0) > 1) {
+    return looksLikeIPv6(raw) ? { host: `[${raw}]`, port: null } : null;
+  }
+
+  const m = raw.match(/^(.+):(.*)$/);
+  if (!m) return { host: raw, port: null };
+  // "good.com:http" is not a host:port pair, and building a URL from it yields one no
+  // browser can resolve.
+  const port = validPort(m[2]!);
+  return port ? { host: m[1]!, port } : null;
 }
+
 
 /**
  * Only http and https may reach a launch URL.
