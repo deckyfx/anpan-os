@@ -379,6 +379,24 @@ export class DockerClient {
     );
   }
 
+  /**
+   * Digest the local copy of an image was pulled with, e.g. "sha256:abc…".
+   *
+   * This is the *index* digest recorded in RepoDigests — the same thing a registry reports
+   * for a tag — which is what makes the comparison meaningful. Returns null for images
+   * built locally, which have no RepoDigests and therefore nothing to compare against.
+   */
+  static async getLocalDigest(image: string): Promise<string | null> {
+    const result = await dockerFetch<{ RepoDigests?: string[] | null }>(
+      `/images/${encodeURIComponent(image)}/json`,
+    );
+    if (!result.ok) return null;
+    const first = result.data.RepoDigests?.[0];
+    if (!first) return null;
+    const at = first.indexOf("@");
+    return at >= 0 ? first.slice(at + 1) : null;
+  }
+
   /** Force-remove a container (stops it first if running). `v=1` removes anonymous volumes. */
   static removeContainer(id: string): Promise<{ ok: boolean; error?: string }> {
     return dockerAction(`/containers/${id}?force=true&v=1`, "DELETE");

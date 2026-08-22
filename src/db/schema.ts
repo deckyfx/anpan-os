@@ -1,4 +1,4 @@
-import { sqliteTable, integer, text } from "drizzle-orm/sqlite-core";
+import { sqliteTable, integer, text, primaryKey } from "drizzle-orm/sqlite-core";
 import { sql } from "drizzle-orm";
 
 export const users = sqliteTable("users", {
@@ -133,3 +133,60 @@ export const appRepos = sqliteTable("app_repos", {
 
 export type AppRepoRow    = typeof appRepos.$inferSelect;
 export type NewAppRepoRow = typeof appRepos.$inferInsert;
+
+/**
+ * One row per image-update sweep.
+ *
+ * Only a summary is kept — the per-image outcome lives in {@link imageUpdateState}, which
+ * holds current state rather than history. Old runs are pruned to a small number, since
+ * nothing in the product asks a question about a sweep from last month.
+ */
+export const updateCheckRuns = sqliteTable("update_check_runs", {
+  id:         integer("id").primaryKey({ autoIncrement: true }),
+  /** running | done | failed | cancelled | interrupted */
+  status:     text("status").notNull().default("running"),
+  total:      integer("total").notNull().default(0),
+  completed:  integer("completed").notNull().default(0),
+  updatesFound: integer("updates_found").notNull().default(0),
+  /** Manifest GETs used because a registry rejected HEAD — these cost pull budget. */
+  getFallbacks: integer("get_fallbacks").notNull().default(0),
+  /** Whether the sweep was started automatically on dashboard open, or by the user. */
+  auto:       integer("auto", { mode: "boolean" }).notNull().default(false),
+  /** Stack this run was limited to, or null for a full sweep. */
+  scopeStack: text("scope_stack"),
+  error:      text("error"),
+  startedAt:  integer("started_at", { mode: "timestamp" }).notNull().default(sql`(unixepoch())`),
+  /** Last time a result was written — lets the UI say "no progress for 6 minutes". */
+  progressAt: integer("progress_at", { mode: "timestamp" }).notNull().default(sql`(unixepoch())`),
+  finishedAt: integer("finished_at", { mode: "timestamp" }),
+});
+
+export type UpdateCheckRunRow    = typeof updateCheckRuns.$inferSelect;
+export type NewUpdateCheckRunRow = typeof updateCheckRuns.$inferInsert;
+
+/**
+ * Current update state for one image within one stack.
+ *
+ * Keyed by (stack, image) and upserted each sweep, so the table stays the size of the
+ * user's library rather than growing with every check. `firstSeenAt` carries the one
+ * genuinely historical fact worth keeping — how long an update has been waiting — without
+ * a history table behind it.
+ */
+export const imageUpdateState = sqliteTable("image_update_state", {
+  stack:        text("stack").notNull(),
+  image:        text("image").notNull(),
+  localDigest:  text("local_digest"),
+  remoteDigest: text("remote_digest"),
+  hasUpdate:    integer("has_update", { mode: "boolean" }).notNull().default(false),
+  /** Set when the image could not be checked at all (network, auth, unparseable ref). */
+  error:        text("error"),
+  /** Set when a check is not meaningful — digest-pinned, or never pulled from a registry. */
+  skippedReason: text("skipped_reason"),
+  /** When hasUpdate first became true for this pair; cleared once the digests agree again. */
+  firstSeenAt:  integer("first_seen_at", { mode: "timestamp" }),
+  checkedAt:    integer("checked_at", { mode: "timestamp" }).notNull().default(sql`(unixepoch())`),
+  runId:        integer("run_id"),
+}, (t) => [primaryKey({ columns: [t.stack, t.image] })]);
+
+export type ImageUpdateStateRow    = typeof imageUpdateState.$inferSelect;
+export type NewImageUpdateStateRow = typeof imageUpdateState.$inferInsert;

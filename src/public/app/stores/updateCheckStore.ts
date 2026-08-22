@@ -1,125 +1,224 @@
 import { create } from "zustand";
 import { api } from "../lib/api";
-import type { UpdateCheckMsg } from "../../../plugins/routeUpdateCheck";
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+/**
+ * Client view of the background update checker.
+ *
+ * The sweep no longer belongs to this store — it runs on the server and survives page
+ * reloads, so this connects to a stream and reflects state rather than driving it. The
+ * connection stays open for the life of the page: detaching it does not stop anything.
+ */
 
 export interface ImageUpdateResult {
   stack: string;
   image: string;
   hasUpdate: boolean;
+  localDigest: string | null;
+  remoteDigest: string | null;
+  error: string | null;
+  skippedReason: string | null;
+  firstSeenAt: string | null;
+  checkedAt: string | null;
 }
 
-// ─── Store ────────────────────────────────────────────────────────────────────
+export interface RunSummary {
+  id: number;
+  status: "running" | "done" | "failed" | "cancelled" | "interrupted";
+  total: number;
+  completed: number;
+  updatesFound: number;
+  getFallbacks: number;
+  auto: boolean;
+  error: string | null;
+  startedAt: string | null;
+  progressAt: string | null;
+  finishedAt: string | null;
+}
+
+/** Why a manual check could not start — drives the "cancel the running one?" prompt. */
+export interface BlockedStart {
+  reason: "running" | "recent";
+  run: RunSummary;
+}
 
 interface UpdateCheckState {
-  /** True while the SSE stream is running. */
-  checking: boolean;
-  /** Stack name currently being inspected (for progress display). */
-  checkingStack: string | null;
-  /** Image currently being inspected (for progress display). */
-  checkingImage: string | null;
-  /** All results emitted so far in the current (or last) check. */
+  connected: boolean;
+  running: boolean;
+  run: RunSummary | null;
   results: ImageUpdateResult[];
-  /** ISO timestamp of when the last check finished. */
-  lastChecked: string | null;
-  /** Whether the updates dialog is open. */
+  blocked: BlockedStart | null;
   dialogOpen: boolean;
+  purging: boolean;
 
-  startCheck: () => void;
-  cancelCheck: () => void;
+  connect: () => void;
+  disconnect: () => void;
+  /** Kick off a sweep. `auto` defers to the staleness gate; `force` restarts a running one. */
+  startCheck: (opts?: { auto?: boolean; force?: boolean; stack?: string }) => Promise<void>;
+  cancelCheck: () => Promise<void>;
+  purge: () => Promise<void>;
+  dismissBlocked: () => void;
   openDialog: () => void;
   closeDialog: () => void;
 
-  /** True if the named stack has at least one image with an available update. */
   hasUpdateFor: (stackName: string) => boolean;
-  /** Number of stacks that have at least one image with an available update. */
   updatesCount: () => number;
-  /** Unique stack names that have at least one update. */
   stacksWithUpdates: () => string[];
+  progressLabel: () => string | null;
 }
 
-// AbortController lives outside Zustand state so it doesn't trigger re-renders
+// Kept outside Zustand so reconnect bookkeeping does not trigger renders.
 let _abort: AbortController | null = null;
 
-export const useUpdateCheckStore = create<UpdateCheckState>((set, get) => ({
-  checking:      false,
-  checkingStack: null,
-  checkingImage: null,
-  results:       [],
-  lastChecked:   null,
-  dialogOpen:    false,
+/**
+ * The update-check endpoints, named rather than indexed.
+ *
+ * Eden Treaty types a hyphenated path segment awkwardly; naming the shape keeps the calls
+ * checked without every access being possibly-undefined.
+ */
+interface UpdateCheckApi {
+  stream: { get: (o: unknown) => Promise<{ data: AsyncIterable<{ data: StreamEvent }> | null; error: unknown }> };
+  start:  { post: (b: unknown) => Promise<{ data: unknown; error: unknown }> };
+  cancel: { post: (b?: unknown) => Promise<unknown> };
+  delete: (b?: unknown) => Promise<unknown>;
+}
 
-  startCheck: () => {
-    // Cancel any previous check
-    _abort?.abort();
+const uc = (): UpdateCheckApi =>
+  (api.api.docker as unknown as { "update-check": UpdateCheckApi })["update-check"];
+
+type StreamEvent =
+  | { type: "snapshot"; running: boolean; run: RunSummary | null; results: ImageUpdateResult[] }
+  | { type: "started";  run: RunSummary }
+  | { type: "result";   result: ImageUpdateResult }
+  | { type: "progress"; completed: number; total: number; updatesFound: number }
+  | { type: "finished"; run: RunSummary }
+  | { type: "heartbeat" };
+
+/** Replace by (stack, image) so a re-check updates in place instead of appending. */
+function mergeResult(list: ImageUpdateResult[], incoming: ImageUpdateResult): ImageUpdateResult[] {
+  const idx = list.findIndex(r => r.stack === incoming.stack && r.image === incoming.image);
+  if (idx === -1) return [...list, incoming];
+  const next = [...list];
+  next[idx] = incoming;
+  return next;
+}
+
+export const useUpdateCheckStore = create<UpdateCheckState>((set, get) => ({
+  connected:  false,
+  running:    false,
+  run:        null,
+  results:    [],
+  blocked:    null,
+  dialogOpen: false,
+  purging:    false,
+
+  connect: () => {
+    if (_abort) return;               // already connected
     _abort = new AbortController();
     const { signal } = _abort;
 
-    set({ checking: true, checkingStack: null, checkingImage: null, results: [] });
-
     void (async () => {
       try {
-        const { data, error } = await (
-          (api.api.docker["update-check"].get as (opts: unknown) => unknown)({
-            fetch: { signal },
-          }) as Promise<{ data: AsyncIterable<{ data: UpdateCheckMsg }> | null; error: unknown }>
-        );
+        const { data, error } = await uc().stream.get({ fetch: { signal } });
+        if (error || !data) { set({ connected: false }); return; }
 
-        if (error || !data) {
-          set({ checking: false });
-          return;
-        }
+        set({ connected: true });
 
         for await (const event of data) {
           if (signal.aborted) break;
-          const msg = event.data as UpdateCheckMsg;
+          const msg = event.data;
+          if (!msg) continue;
 
-          if (msg.checking) {
-            set({ checkingStack: msg.checking.stack, checkingImage: msg.checking.image });
-          } else if (msg.result) {
-            set(s => ({ results: [...s.results, msg.result!] }));
-          } else if (msg.done !== undefined) {
-            set({ checking: false, checkingStack: null, checkingImage: null, lastChecked: new Date().toISOString() });
-          } else if (msg.error) {
-            set({ checking: false, checkingStack: null, checkingImage: null });
+          switch (msg.type) {
+            case "snapshot":
+              set({ running: msg.running, run: msg.run, results: msg.results ?? [] });
+              break;
+            case "started":
+              // Results are kept rather than cleared: they stay valid until each is
+              // rechecked, so badges do not blink off for the length of a sweep.
+              set({ running: true, run: msg.run, blocked: null });
+              break;
+            case "result":
+              set(s => ({ results: mergeResult(s.results, msg.result) }));
+              break;
+            case "progress":
+              set(s => ({
+                run: s.run ? { ...s.run, completed: msg.completed, total: msg.total, updatesFound: msg.updatesFound } : s.run,
+              }));
+              break;
+            case "finished":
+              set({ running: false, run: msg.run });
+              break;
+            case "heartbeat":
+              break;
           }
         }
-
-        // Stream ended without an explicit done/error message — clean up so spinner doesn't run forever
-        if (!signal.aborted) {
-          set(s => s.checking
-            ? { checking: false, checkingStack: null, checkingImage: null, lastChecked: new Date().toISOString() }
-            : {},
-          );
-        }
       } catch {
-        if (!signal.aborted) {
-          set({ checking: false, checkingStack: null, checkingImage: null });
-        }
+        // Navigating away aborts the fetch; that is not an error worth surfacing.
+      } finally {
+        if (!signal.aborted) set({ connected: false });
+        _abort = null;
       }
     })();
   },
 
-  cancelCheck: () => {
+  disconnect: () => {
     _abort?.abort();
     _abort = null;
-    set({ checking: false, checkingStack: null, checkingImage: null });
+    set({ connected: false });
   },
 
-  openDialog:  () => set({ dialogOpen: true }),
-  closeDialog: () => set({ dialogOpen: false }),
+  startCheck: async (opts = {}) => {
+    const body = {
+      auto: opts.auto ?? false,
+      force: opts.force ?? false,
+      ...(opts.stack ? { stack: opts.stack } : {}),
+    };
+    const { data } = await uc().start.post(body);
 
-  hasUpdateFor: (stackName) =>
-    get().results.some(r => r.stack === stackName && r.hasUpdate),
+    const outcome = data as
+      | { started: true; runId: number }
+      | { started: false; reason: "running" | "recent"; run: RunSummary }
+      | { started: false; reason: "no-docker"; error: string }
+      | null;
 
-  updatesCount: () => {
-    const stacks = new Set(get().results.filter(r => r.hasUpdate).map(r => r.stack));
-    return stacks.size;
+    if (!outcome) return;
+    if (outcome.started) { set({ blocked: null }); return; }
+
+    // "recent" only blocks automatic runs, so seeing it here means a manual attempt raced
+    // one; either way the UI asks rather than silently doing nothing.
+    if (outcome.reason === "running" || outcome.reason === "recent") {
+      set({ blocked: { reason: outcome.reason, run: outcome.run } });
+    }
   },
 
-  stacksWithUpdates: () => {
-    const stacks = new Set(get().results.filter(r => r.hasUpdate).map(r => r.stack));
-    return [...stacks];
+  cancelCheck: async () => {
+    await uc().cancel.post({});
+    set({ blocked: null });
+  },
+
+  purge: async () => {
+    set({ purging: true });
+    try {
+      await uc().delete({});
+      set({ results: [], run: null });
+    } finally {
+      set({ purging: false });
+    }
+  },
+
+  dismissBlocked: () => set({ blocked: null }),
+  openDialog:     () => set({ dialogOpen: true }),
+  closeDialog:    () => set({ dialogOpen: false }),
+
+  hasUpdateFor: (stackName) => get().results.some(r => r.stack === stackName && r.hasUpdate),
+
+  updatesCount: () => new Set(get().results.filter(r => r.hasUpdate).map(r => r.stack)).size,
+
+  stacksWithUpdates: () => [...new Set(get().results.filter(r => r.hasUpdate).map(r => r.stack))],
+
+  progressLabel: () => {
+    const { running, run } = get();
+    if (!running || !run) return null;
+    return `${run.completed}/${run.total}`;
   },
 }));

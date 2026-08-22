@@ -1,228 +1,109 @@
-import { Elysia, sse } from "elysia";
+import { Elysia, t, sse } from "elysia";
 import { authGuard } from "./authGuard";
-import { bins } from "../lib/commands";
-
-// ─── SSE message types ────────────────────────────────────────────────────────
-
-export interface UpdateCheckMsg {
-  /** Image being inspected right now. */
-  checking?: { stack: string; image: string };
-  /** Result for one image. */
-  result?: { stack: string; image: string; hasUpdate: boolean };
-  /** Final summary once all images are processed. */
-  done?: { found: number };
-  error?: string;
-}
-
-// ─── Module-level abort controller — only one check runs at a time ────────────
-
-let globalAbort = new AbortController();
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-interface ImageCheck {
-  stack: string;
-  image: string;
-}
+import { updateChecker } from "../lib/update-checker";
+import { UpdateCheckStore } from "../stores/update-check-store";
+import type { CheckerEvent } from "../lib/update-checker";
 
 /**
- * Returns all unique (stack, image) pairs from running+stopped compose containers.
- * Throws if `docker ps` exits non-zero.
+ * Image update-check routes.
+ *
+ * These are a thin shell over {@link updateChecker}: starting a sweep answers immediately
+ * with whether one began, and the stream only subscribes. The sweep itself belongs to the
+ * checker, so no client can cancel it by navigating away — the defect this replaced.
  */
-async function getComposeImages(docker: string): Promise<ImageCheck[]> {
-  const proc = Bun.spawn([docker, "ps", "-a", "--format", "{{json .}}"], {
-    stdout: "pipe",
-    stderr: "ignore",
-  });
-  const [output, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    proc.exited,
+
+/** What a late-joining subscriber needs before deltas make sense. */
+async function snapshot() {
+  const [run, results] = await Promise.all([
+    UpdateCheckStore.lastRun(),
+    UpdateCheckStore.allState(),
   ]);
-
-  if (exitCode !== 0) {
-    throw new Error(`docker ps exited with code ${exitCode}`);
-  }
-
-  const seen = new Set<string>();
-  const checks: ImageCheck[] = [];
-
-  for (const line of output.trim().split("\n")) {
-    if (!line.trim()) continue;
-    try {
-      const c = JSON.parse(line) as {
-        Labels: string | Record<string, string> | null;
-        Image: string;
-      };
-      // Labels may be a comma-separated "k=v,k=v" string or an object
-      let stack = "";
-      if (typeof c.Labels === "string") {
-        const m = c.Labels.match(/com\.docker\.compose\.project=([^,]+)/);
-        stack = m?.[1]?.trim() ?? "";
-      } else if (c.Labels && typeof c.Labels === "object") {
-        stack = c.Labels["com.docker.compose.project"]?.trim() ?? "";
-      }
-      const image = c.Image?.trim() ?? "";
-      if (!stack || !image) continue;
-      // Skip images referenced by digest only (sha256:...) — can't check updates
-      if (image.startsWith("sha256:")) continue;
-
-      const key = `${stack}::${image}`;
-      if (!seen.has(key)) {
-        seen.add(key);
-        checks.push({ stack, image });
-      }
-    } catch {
-      // malformed line — skip
-    }
-  }
-  return checks;
+  return {
+    type: "snapshot" as const,
+    running: updateChecker.running,
+    run,
+    results,
+  };
 }
-
-/** Local digest for the image, e.g. "sha256:abc…". Returns null if unavailable. */
-async function getLocalDigest(docker: string, image: string, signal: AbortSignal): Promise<string | null> {
-  if (signal.aborted) return null;
-
-  const proc = Bun.spawn(
-    [docker, "image", "inspect", image, "--format", "{{index .RepoDigests 0}}"],
-    { stdout: "pipe", stderr: "ignore" },
-  );
-
-  const onAbort = () => proc.kill();
-  signal.addEventListener("abort", onAbort, { once: true });
-
-  const [out] = await Promise.all([
-    new Response(proc.stdout).text(),
-    proc.exited,
-  ]);
-
-  signal.removeEventListener("abort", onAbort);
-
-  if (signal.aborted) return null;
-
-  // format: "nginx@sha256:abc" → "sha256:abc"
-  const trimmed = out.trim();
-  const at = trimmed.indexOf("@");
-  return at >= 0 ? trimmed.slice(at + 1) : null;
-}
-
-/**
- * Remote manifest digest via `docker manifest inspect --verbose`.
- * Returns null if the command fails (e.g. auth required, network error).
- */
-async function getRemoteDigest(docker: string, image: string, signal: AbortSignal): Promise<string | null> {
-  if (signal.aborted) return null;
-
-  const proc = Bun.spawn([docker, "manifest", "inspect", "--verbose", image], {
-    stdout: "pipe",
-    stderr: "ignore",
-  });
-
-  const onAbort = () => proc.kill();
-  signal.addEventListener("abort", onAbort, { once: true });
-
-  const [out] = await Promise.all([
-    new Response(proc.stdout).text(),
-    proc.exited,
-  ]);
-
-  signal.removeEventListener("abort", onAbort);
-
-  if (signal.aborted) return null;
-
-  const trimmed = out.trim();
-  if (!trimmed) return null;
-
-  try {
-    const json = JSON.parse(trimmed) as unknown;
-    // Single manifest
-    if (json && typeof json === "object" && !Array.isArray(json)) {
-      const j = json as Record<string, unknown>;
-      const desc = j["Descriptor"] as Record<string, unknown> | undefined;
-      return (desc?.["digest"] as string) ?? null;
-    }
-    // Multi-arch manifest list → use first entry
-    if (Array.isArray(json) && json.length > 0) {
-      const first = json[0] as Record<string, unknown>;
-      const desc = first["Descriptor"] as Record<string, unknown> | undefined;
-      return (desc?.["digest"] as string) ?? null;
-    }
-  } catch {
-    // parse failed
-  }
-  return null;
-}
-
-// ─── Route ───────────────────────────────────────────────────────────────────
 
 export function updateCheckPlugin(jwtSecret: string) {
   return new Elysia({ prefix: "/api/docker" })
     .use(authGuard(jwtSecret))
+
     /**
-     * GET /api/docker/update-check
+     * POST /api/docker/update-check/start
      *
-     * SSE stream that checks all compose containers for image updates.
-     * Any in-progress check is cancelled when a new request arrives.
-     *
-     * Message shapes: UpdateCheckMsg (see type above).
+     * Returns at once rather than holding the request open for the sweep. `auto` requests
+     * are dropped when a recent run exists, so several dashboard tabs opening together do
+     * not each trigger work; `force` cancels an in-flight sweep and restarts in one step,
+     * which the UI cannot do safely as two calls.
      */
-    .get("/update-check", async function* () {
-      // Cancel any previous check
-      globalAbort.abort();
-      globalAbort = new AbortController();
-      const { signal } = globalAbort;
+    .post("/update-check/start", async ({ body }) => {
+      const outcome = await updateChecker.start({
+        auto:  body?.auto  ?? false,
+        force: body?.force ?? false,
+        // A named stack narrows the sweep. Scoped runs skip the staleness gate: asking
+        // about one stack is always deliberate, never an automatic dashboard refresh.
+        ...(body?.stack ? { stack: body.stack } : {}),
+      });
+      return outcome;
+    }, { body: t.Optional(t.Object({
+      auto:  t.Optional(t.Boolean()),
+      force: t.Optional(t.Boolean()),
+      stack: t.Optional(t.String()),
+    })) })
 
-      const docker = bins.docker;
-      if (!docker) {
-        yield sse({ data: { error: "Docker is not available on this system" } satisfies UpdateCheckMsg });
-        return;
+    /** POST /api/docker/update-check/cancel — stop the sweep; results so far are kept. */
+    .post("/update-check/cancel", async () => {
+      const cancelled = await updateChecker.cancel();
+      return { cancelled };
+    })
+
+    /**
+     * GET /api/docker/update-check/stream
+     *
+     * Sends a snapshot first, then live events. Without the snapshot a tab opened
+     * mid-sweep would show nothing until the next image happened to finish.
+     */
+    .get("/update-check/stream", async function*({ request }) {
+      yield sse({ data: await snapshot() });
+      for await (const event of updateChecker.subscribe(request.signal)) {
+        yield sse({ data: event satisfies CheckerEvent });
       }
+    })
 
-      let checks: ImageCheck[];
-      try {
-        checks = await getComposeImages(docker);
-      } catch (e) {
-        yield sse({ data: { error: e instanceof Error ? e.message : "Failed to list containers" } satisfies UpdateCheckMsg });
-        return;
+    /** GET /api/docker/update-check/report — last run plus current per-image state. */
+    .get("/update-check/report", async () => {
+      const [run, results, runs] = await Promise.all([
+        UpdateCheckStore.lastRun(),
+        UpdateCheckStore.allState(),
+        UpdateCheckStore.listRuns(),
+      ]);
+      return {
+        running: updateChecker.running,
+        run,
+        runs,
+        results,
+        updatesFound: results.filter(r => r.hasUpdate).length,
+      };
+    })
+
+    /** GET /api/docker/update-check/outdated — just the images with updates, for badges. */
+    .get("/update-check/outdated", async () => {
+      return { results: await UpdateCheckStore.outdated() };
+    })
+
+    /**
+     * DELETE /api/docker/update-check — clear stored results and run history.
+     *
+     * Refused while a sweep is running: the sweep would immediately write rows back, so
+     * the user would see the table repopulate and reasonably conclude it had not worked.
+     */
+    .delete("/update-check", async ({ set }) => {
+      if (updateChecker.running) {
+        set.status = 409;
+        return { error: "A check is running — cancel it before clearing results" };
       }
-
-      if (checks.length === 0) {
-        yield sse({ data: { done: { found: 0 } } satisfies UpdateCheckMsg });
-        return;
-      }
-
-      let found = 0;
-
-      for (const { stack, image } of checks) {
-        if (signal.aborted) return;
-
-        yield sse({ data: { checking: { stack, image } } satisfies UpdateCheckMsg });
-
-        // Run both fetches concurrently; abort-race so we don't hang forever.
-        // getLocalDigest/getRemoteDigest both accept signal and kill their subprocess on abort.
-        const abortPromise = new Promise<null>(resolve =>
-          signal.addEventListener("abort", () => resolve(null), { once: true }),
-        );
-
-        const checkResult = await Promise.race([
-          Promise.all([
-            getLocalDigest(docker, image, signal),
-            getRemoteDigest(docker, image, signal),
-          ]).then(([local, remote]) => ({ local, remote })),
-          abortPromise,
-        ]);
-
-        if (!checkResult || signal.aborted) return;
-
-        const { local, remote } = checkResult;
-        // If we can't get either digest, we report no update rather than false-positive
-        const hasUpdate = !!(local && remote && local !== remote);
-        if (hasUpdate) found++;
-
-        yield sse({ data: { result: { stack, image, hasUpdate } } satisfies UpdateCheckMsg });
-      }
-
-      if (!signal.aborted) {
-        yield sse({ data: { done: { found } } satisfies UpdateCheckMsg });
-      }
+      return await UpdateCheckStore.purge();
     });
 }

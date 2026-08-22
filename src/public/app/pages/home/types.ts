@@ -101,6 +101,7 @@ export interface ContainerDetail {
 }
 
 export type StackAction =
+  | "check-updates"
   | "start"
   | "stop"
   | "restart"

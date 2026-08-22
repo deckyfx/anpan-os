@@ -137,6 +137,14 @@ export const useStacksStore = create<StacksState>((set, get) => ({
   setMountPicker:     (stack, paths = []) => set({ mountPickerStack: stack, mountPickerPaths: paths }),
 
   stackAction: async (stack, action, navigate) => {
+    if (action === "check-updates") {
+      // Scoped to this stack and never automatic, so it runs even if a full sweep
+      // completed moments ago — asking about one stack is always deliberate.
+      const { useUpdateCheckStore } = await import("./updateCheckStore");
+      await useUpdateCheckStore.getState().startCheck({ stack: stack.name });
+      useToastStore.getState().push(`Checking ${stack.meta?.title ?? stack.name} for updates…`, "info");
+      return;
+    }
     if (action === "logs") {
       set({ logsFor: stack });
       return;

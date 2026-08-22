@@ -10,18 +10,20 @@ import { browserSupportsWebAuthn } from "@simplewebauthn/browser";
 import { useSystemStore } from "../../stores/systemStore";
 import { useToastStore } from "../../stores/toastStore";
 import { useAuthStore } from "../../stores/authStore";
-import { useUpdateCheckStore } from "../../stores/updateCheckStore";
+import { UpdatesMenu } from "./UpdatesMenu";
 
 interface NavItem {
   icon: React.ReactNode;
   label: string;
   path: string;
   section?: string;
+  /** Open in a new tab instead of replacing the current page. */
+  newTab?: boolean;
 }
 
 const MENU_ITEMS: NavItem[] = [
   { icon: <LayoutGrid   size={14} />, label: "Home",       path: "/",       section: "Navigation" },
-  { icon: <FolderOpen   size={14} />, label: "Files",      path: "/files",  section: "Navigation" },
+  { icon: <FolderOpen   size={14} />, label: "Files",      path: "/files",  section: "Navigation", newTab: true },
   { icon: <ShoppingBag  size={14} />, label: "App Store",  path: "/store",  section: "Navigation" },
   { icon: <Activity     size={14} />, label: "Doctor",     path: "/doctor", section: "Tools"      },
   { icon: <Network      size={14} />, label: "Port Scan",  path: "/ports",  section: "Tools"      },
@@ -30,7 +32,8 @@ const MENU_ITEMS: NavItem[] = [
 /**
  * Renders the application's top navigation bar with branding, a contextual menu, and session controls.
  *
- * The menu lists navigation items grouped by section, exposes system power actions when allowed,
+ * The menu lists navigation items grouped by section (items flagged `newTab` render as
+ * links that open in a new tab), exposes system power actions when allowed,
  * provides actions for Docker Hub, password change, adding a passkey (when supported), and signing out,
  * and controls several modal dialogs (Doctor, Ports, Change Password, Docker Hub).
  *
@@ -57,10 +60,6 @@ export function TopBar({ username, version, hasPasskey, onLogout, onNavigate, on
   const { isRoot, hasBin } = useSystemStore();
   const canPowerCtl = isRoot && hasBin("systemctl");
   const passkeyEnabled = useAuthStore(s => s.loginMethods.passkey);
-
-  const { checking, checkingStack, startCheck, cancelCheck, openDialog, updatesCount } =
-    useUpdateCheckStore();
-  const updateCount = updatesCount();
 
   const [open, setOpen]                     = useState(false);
   const [pos,  setPos]                      = useState({ left: 0, top: 0 });
@@ -180,36 +179,8 @@ export function TopBar({ username, version, hasPasskey, onLogout, onNavigate, on
         Menu
       </button>
 
-      {/* Check Updates button */}
-      {showUpdates && (
-      <div className="ml-3 relative shrink-0">
-        <button
-          onClick={() => checking ? cancelCheck() : startCheck()}
-          title={checking
-            ? (checkingStack ? `Checking ${checkingStack}… (click to cancel)` : "Checking… (click to cancel)")
-            : "Check docker images for updates"
-          }
-          className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-lg transition-colors text-gray-400 hover:text-white hover:bg-gray-800"
-        >
-          {checking
-            ? <span className="w-3.5 h-3.5 border-2 border-sky-400 border-t-transparent rounded-full animate-spin shrink-0" />
-            : <RefreshCw size={14} />
-          }
-          Updates
-        </button>
-
-        {/* Update count badge — click to open dialog */}
-        {updateCount > 0 && !checking && (
-          <button
-            onClick={openDialog}
-            title={`${updateCount} stack${updateCount !== 1 ? "s" : ""} have image updates available`}
-            className="absolute -top-1 -right-1 min-w-4 h-4 px-1 rounded-full bg-amber-500 text-black text-[9px] font-bold flex items-center justify-center hover:bg-amber-400 transition-colors leading-none"
-          >
-            {updateCount}
-          </button>
-        )}
-      </div>
-      )}
+      {/* Updates menu — Check all / View report */}
+      {showUpdates && <UpdatesMenu />}
 
       {/* Version badge — far right */}
       <button
@@ -233,7 +204,20 @@ export function TopBar({ username, version, hasPasskey, onLogout, onNavigate, on
             <div key={section}>
               {si > 0 && <div className="my-1.5 border-t border-gray-800" />}
               <p className="text-[9px] font-semibold text-gray-600 uppercase tracking-widest px-3 py-1">{section}</p>
-              {items.map(item => (
+              {items.map(item => item.newTab ? (
+                <a
+                  key={item.path}
+                  role="menuitem"
+                  href={item.path}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={() => setOpen(false)}
+                  className="w-full flex items-center gap-3 px-3 py-2 text-sm text-gray-300 hover:text-white hover:bg-gray-800 transition-colors text-left"
+                >
+                  <span className="text-gray-500">{item.icon}</span>
+                  {item.label}
+                </a>
+              ) : (
                 <button
                   key={item.path}
                   role="menuitem"
