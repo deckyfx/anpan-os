@@ -3,6 +3,21 @@ import { Dialog } from "../../components/Dialog";
 import type { Stack } from "./types";
 import { api } from "../../lib/api";
 
+/** One bind mount, with the server's verdict on whether it may be deleted. */
+interface BindInfo {
+  path: string;
+  deletable: boolean;
+  reason?: string;
+  bytes?: number | null;
+}
+
+function formatBytes(n: number): string {
+  if (n <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  const i = Math.min(Math.floor(Math.log(n) / Math.log(1024)), units.length - 1);
+  return `${(n / 1024 ** i).toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
 // Inner component is keyed by stack.name — mounts fresh each time, loads data
 // on first render via lazy useState, no useEffect needed.
 function DeleteStackDialogInner({ stack, onClose, onDeleted }: {
@@ -10,7 +25,8 @@ function DeleteStackDialogInner({ stack, onClose, onDeleted }: {
   onClose: () => void;
   onDeleted: () => void;
 }) {
-  const [hostPaths,    setHostPaths]    = useState<string[]>([]);
+  const [binds,        setBinds]        = useState<BindInfo[]>([]);
+  const [selected,     setSelected]     = useState<Set<string>>(new Set());
   const [pathsLoading, setPathsLoading] = useState(true);
   const [busy,         setBusy]         = useState(false);
   const [error,        setError]        = useState("");
@@ -19,12 +35,17 @@ function DeleteStackDialogInner({ stack, onClose, onDeleted }: {
   useState(() => {
     api.api.docker.stacks({ name: stack.name }).binds.get()
       .then(({ data }) => {
-        if (data && typeof data === "object" && "paths" in data && Array.isArray((data as { paths: unknown }).paths)) {
-          setHostPaths((data as { paths: string[] }).paths);
-        }
+        const payload = data as { binds?: BindInfo[] } | null;
+        if (payload?.binds) setBinds(payload.binds);
       })
       .catch(() => {})
       .finally(() => setPathsLoading(false));
+  });
+
+  const toggle = (path: string) => setSelected(prev => {
+    const next = new Set(prev);
+    if (next.has(path)) next.delete(path); else next.add(path);
+    return next;
   });
 
   const title = stack.meta?.title ?? stack.name;
@@ -33,7 +54,10 @@ function DeleteStackDialogInner({ stack, onClose, onDeleted }: {
     setBusy(true);
     setError("");
     try {
-      const { error: err2 } = await api.api.docker.stacks({ name: stack.name }).delete();
+      // Only paths the user ticked. The server re-judges every one of them, so this list
+      // is a request rather than an authorisation.
+      const { error: err2 } = await api.api.docker.stacks({ name: stack.name })
+        .delete({ deletePaths: [...selected] });
       if (err2) {
         setError((err2.value as { error?: string })?.error ?? "Server error");
         return;
@@ -67,7 +91,11 @@ function DeleteStackDialogInner({ stack, onClose, onDeleted }: {
             disabled={busy}
             className="px-4 py-2 text-sm bg-red-600 hover:bg-red-500 text-white font-semibold rounded-lg transition-colors disabled:opacity-50"
           >
-            {busy ? "Deleting…" : "Delete Stack"}
+            {busy
+              ? "Deleting…"
+              : selected.size > 0
+                ? `Delete Stack + ${selected.size} path${selected.size === 1 ? "" : "s"}`
+                : "Delete Stack"}
           </button>
         </>
       }
@@ -96,27 +124,59 @@ function DeleteStackDialogInner({ stack, onClose, onDeleted }: {
           </div>
         </div>
 
-        {/* Host paths that will remain */}
+        {/* Host bind paths — opt in per path, nothing ticked by default */}
         <div className="text-sm space-y-1.5">
           <p className="text-gray-400 font-medium text-xs uppercase tracking-widest">
-            Host paths — will remain on disk
+            Host paths
           </p>
           {pathsLoading ? (
             <p className="text-gray-600 text-xs italic">Scanning bind mounts…</p>
-          ) : hostPaths.length === 0 ? (
+          ) : binds.length === 0 ? (
             <p className="text-gray-600 text-xs italic">No host bind mounts found.</p>
           ) : (
             <ul className="space-y-1">
-              {hostPaths.map(p => (
-                <li key={p} className="font-mono text-xs text-amber-300/80 bg-gray-800 border border-gray-700 rounded px-2.5 py-1.5 break-all">
-                  {p}
+              {binds.map(b => (
+                <li
+                  key={b.path}
+                  className={`flex items-start gap-2 rounded px-2.5 py-1.5 border text-xs break-all
+                    ${b.deletable
+                      ? "bg-gray-800 border-gray-700"
+                      : "bg-gray-900/60 border-gray-800"}`}
+                >
+                  {b.deletable ? (
+                    <input
+                      type="checkbox"
+                      checked={selected.has(b.path)}
+                      onChange={() => toggle(b.path)}
+                      className="mt-0.5 accent-red-500 shrink-0"
+                      aria-label={`Delete ${b.path}`}
+                    />
+                  ) : (
+                    // No checkbox at all rather than a disabled one: the path cannot be
+                    // deleted here, and offering a control that never works is worse than
+                    // offering none.
+                    <span className="mt-0.5 w-3 shrink-0" aria-hidden="true" />
+                  )}
+                  <span className="flex-1 min-w-0">
+                    <span className={`font-mono ${b.deletable ? "text-amber-300/80" : "text-gray-500"}`}>
+                      {b.path}
+                    </span>
+                    {b.bytes !== null && b.bytes !== undefined && (
+                      <span className="ml-2 text-gray-500 tabular-nums">{formatBytes(b.bytes)}</span>
+                    )}
+                    {!b.deletable && b.reason && (
+                      <span className="block text-[11px] text-gray-600 mt-0.5">{b.reason}</span>
+                    )}
+                  </span>
                 </li>
               ))}
             </ul>
           )}
-          {hostPaths.length > 0 && (
+          {binds.length > 0 && (
             <p className="text-gray-600 text-[11px]">
-              These paths are not deleted — remove them manually if no longer needed.
+              {selected.size === 0
+                ? "Nothing selected — every path stays on disk."
+                : `${selected.size} path${selected.size === 1 ? "" : "s"} will be deleted permanently.`}
             </p>
           )}
         </div>

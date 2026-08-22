@@ -1,7 +1,8 @@
 import { useState, useRef, useEffect } from "react";
-import { Menu, X, LayoutGrid, FolderOpen, Activity, Network, LogOut, KeyRound, RotateCcw, PowerOff, Lock, Container, ShoppingBag, RefreshCw } from "lucide-react";
+import { Menu, X, LayoutGrid, FolderOpen, Activity, Network, LogOut, KeyRound, RotateCcw, PowerOff, Lock, Container, ShoppingBag, RefreshCw, HardDrive } from "lucide-react";
 import { api } from "../../lib/api";
 import { DoctorDialog }   from "../../components/DoctorDialog";
+import { DiskCleanupDialog } from "../../components/DiskCleanupDialog";
 import { VersionDialog }  from "../../components/VersionDialog";
 import { PortsDialog }    from "./PortsDialog";
 import { ChangePasswordDialog } from "./ChangePasswordDialog";
@@ -27,6 +28,7 @@ const MENU_ITEMS: NavItem[] = [
   { icon: <ShoppingBag  size={14} />, label: "App Store",  path: "/store",  section: "Navigation" },
   { icon: <Activity     size={14} />, label: "Doctor",     path: "/doctor", section: "Tools"      },
   { icon: <Network      size={14} />, label: "Port Scan",  path: "/ports",  section: "Tools"      },
+  { icon: <HardDrive    size={14} />, label: "Disk Cleanup", path: "/cleanup", section: "Tools"    },
 ];
 
 /**
@@ -64,6 +66,7 @@ export function TopBar({ username, version, hasPasskey, onLogout, onNavigate, on
   const [open, setOpen]                     = useState(false);
   const [pos,  setPos]                      = useState({ left: 0, top: 0 });
   const [doctorOpen, setDoctorOpen]         = useState(false);
+  const [cleanupOpen, setCleanupOpen]       = useState(false);
   const [portsOpen,  setPortsOpen]          = useState(false);
   const [changePwOpen, setChangePwOpen]     = useState(false);
   const [dockerHubOpen, setDockerHubOpen]   = useState(false);
@@ -124,6 +127,8 @@ export function TopBar({ username, version, hasPasskey, onLogout, onNavigate, on
     setOpen(false);
     if (path === "/doctor") {
       setDoctorOpen(true);
+    } else if (path === "/cleanup") {
+      setCleanupOpen(true);
     } else if (path === "/ports") {
       setPortsOpen(true);
     } else {
@@ -311,6 +316,7 @@ export function TopBar({ username, version, hasPasskey, onLogout, onNavigate, on
     </header>
 
     <DoctorDialog    open={doctorOpen}    onClose={() => setDoctorOpen(false)}    />
+    <DiskCleanupDialog open={cleanupOpen} onClose={() => setCleanupOpen(false)} />
     <PortsDialog     open={portsOpen}     onClose={() => setPortsOpen(false)}     />
     <ChangePasswordDialog open={changePwOpen}   onClose={() => setChangePwOpen(false)}   />
     <DockerHubDialog     open={dockerHubOpen}   onClose={() => setDockerHubOpen(false)}  />

@@ -120,7 +120,9 @@ export const useStacksStore = create<StacksState>((set, get) => ({
       const { data } = await api.api.docker.summary.get();
       // A 502 body carries { error }, not a summary — keep the last good one rather than
       // blanking the bar because one poll hit a busy daemon.
-      if (data && !("error" in (data as object))) set({ summary: data as DockerSummary });
+      // Narrow through unknown: the endpoint's success and error shapes have no fields in
+      // common, so TypeScript rejects a direct assertion between them.
+      if (data && !("error" in (data as object))) set({ summary: data as unknown as DockerSummary });
     } catch { /* network error — keep last known summary */ }
   },
 
