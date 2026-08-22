@@ -7,6 +7,7 @@ import { envConfig } from "../env-config";
 import { embeddedMigrations, embeddedMigrationCount } from "./migrations-embedded";
 import { mkdirSync } from "node:fs";
 import { readdir, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 
 export interface MigrationConfig {
@@ -83,16 +84,16 @@ export class MigrationManager {
       process.exit(1);
     }
 
-    const pendingCount = await this.getPendingCount();
+    const { pending: pendingCount, unknown } = await this.analyse();
 
-    // Negative means the database records migrations this build does not carry — an
-    // older binary started against a newer database, typically a rollback. Treating it
-    // as pending work produced "-2 pending migration(s)"; worse, the schema now has
+    // The database records migrations this build does not carry: an older binary against
+    // a newer database, or one migrated by a divergent branch. The schema then holds
     // tables and columns this code does not know about, and letting it write to them is
     // how a downgrade corrupts data rather than merely failing.
-    if (pendingCount < 0) {
-      console.error(`❌ The database has ${-pendingCount} migration(s) this build does not contain.`);
-      console.error("💡 This build is older than the database. Restore a newer build, or downgrade the database deliberately.");
+    if (unknown > 0) {
+      console.error(`❌ The database has ${unknown} migration(s) this build does not contain.`);
+      console.error("💡 This build is older than the database, or from a different branch.");
+      console.error("💡 Restore a matching build, or downgrade the database deliberately.");
       process.exit(1);
     }
 
@@ -154,6 +155,45 @@ export class MigrationManager {
   }
 
   /** Compare migration files vs Drizzle's __drizzle_migrations tracking table. */
+  /**
+   * Compare the migrations this build carries against those the database records.
+   *
+   * Counting alone cannot tell `[A, C]` from `[A, B]` — both are two — so a database
+   * migrated by a divergent branch passes a count check while carrying a schema this
+   * build never produced. Drizzle stores the SHA-256 of each raw .sql file, verified
+   * against a live database, so the hashes are the reliable comparison.
+   *
+   * `unknown` are hashes the database has and this build does not: a rollback, or a
+   * branch that diverged. Either way the schema contains changes this code does not know
+   * about.
+   */
+  private static async analyse(): Promise<{ pending: number; unknown: number }> {
+    const embeddedHashes = new Set(
+      Object.values(embeddedMigrations.files)
+        .map(sqlText => createHash("sha256").update(sqlText).digest("hex")),
+    );
+
+    const sqlite = new Database(config.databasePath);
+    const db = drizzle(sqlite);
+    try {
+      const rows = await db.all<{ hash: string }>(sql`SELECT hash FROM __drizzle_migrations`);
+      const applied = new Set(rows.map(r => r.hash));
+
+      let unknown = 0;
+      for (const h of applied) if (!embeddedHashes.has(h)) unknown++;
+
+      let pending = 0;
+      for (const h of embeddedHashes) if (!applied.has(h)) pending++;
+
+      return { pending, unknown };
+    } catch {
+      // No tracking table yet — nothing has been applied, so everything is pending.
+      return { pending: embeddedHashes.size, unknown: 0 };
+    } finally {
+      sqlite.close();
+    }
+  }
+
   private static async getPendingCount(): Promise<number> {
     try {
       const glob = new Bun.Glob("*.sql");
