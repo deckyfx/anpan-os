@@ -23,6 +23,7 @@ interface CategoryUsage {
   count: number;
   risky: boolean;
   note: string;
+  approximate?: boolean;
 }
 
 interface DiskUsage {
@@ -69,7 +70,12 @@ function Row({ c, confirming, busy, anyBusy, onConfirm, onCancel, onRun }: {
             {c.count} item{c.count === 1 ? "" : "s"}
           </span>
           {c.reclaimable > 0 && (
-            <span className="text-[10px] text-gray-400 tabular-nums">{formatBytes(c.reclaimable)}</span>
+            <span
+              className="text-[10px] text-gray-400 tabular-nums"
+              title={c.approximate ? "Upper bound — image layers shared between images are counted once per image" : undefined}
+            >
+              {c.approximate ? "~" : ""}{formatBytes(c.reclaimable)}
+            </span>
           )}
         </div>
         <p className="text-[11px] text-gray-600 mt-0.5 leading-relaxed">{c.note}</p>

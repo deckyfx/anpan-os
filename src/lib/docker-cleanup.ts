@@ -32,6 +32,15 @@ export interface CategoryUsage {
   count: number;
   /** True when removal can destroy something the user would want back. */
   risky: boolean;
+  /**
+   * True when `reclaimable` is an upper bound rather than an exact figure.
+   *
+   * Image sizes are summed per image, but layers are shared between them, so the total
+   * counts a shared layer once per image that references it. Docker only reports
+   * SharedSize when asked, and even then the arithmetic depends on which images go
+   * together — so this is presented as an estimate rather than a promise.
+   */
+  approximate?: boolean;
   /** Shown in the UI beneath the label. */
   note: string;
 }
@@ -128,6 +137,7 @@ export async function getDiskUsage(): Promise<DiskUsage | null> {
       reclaimable: dangling.reduce((n, i) => n + (i.Size ?? 0), 0),
       count: dangling.length,
       risky: false,
+      approximate: true,
       note: "Untagged layers left behind by rebuilds. Nothing references them.",
     },
     {
@@ -160,6 +170,7 @@ export async function getDiskUsage(): Promise<DiskUsage | null> {
       reclaimable: allUnused.reduce((n, i) => n + (i.Size ?? 0), 0),
       count: allUnused.length,
       risky: true,
+      approximate: true,
       note: "Every image no container references, dangling ones included. A stopped stack needs its image back before it can start.",
     },
     {
@@ -196,7 +207,10 @@ function pruneRequest(category: CleanupCategory): { path: string } {
     case "unused-images":
       return { path: `/images/prune?filters=${encodeURIComponent(JSON.stringify({ dangling: ["false"] }))}` };
     case "build-cache":
-      return { path: "/build/prune" };
+      // Without all=true the daemon prunes only dangling cache records, a subset of the
+      // idle ones this category counts — the same preview/action mismatch as the volumes
+      // and images categories had.
+      return { path: "/build/prune?all=true" };
     case "stopped-containers":
       return { path: "/containers/prune" };
     case "unused-networks":
