@@ -45,10 +45,13 @@ function formatBytes(n: number): string {
  * changes. A keyboard user pressing "Reclaim" would lose focus the instant the confirm
  * buttons appeared, because the button that received the press no longer exists.
  */
-function Row({ c, confirming, busy, onConfirm, onCancel, onRun }: {
+function Row({ c, confirming, busy, anyBusy, onConfirm, onCancel, onRun }: {
   c: CategoryUsage;
   confirming: boolean;
+  /** This row's prune is running. */
   busy: boolean;
+  /** Some prune is running, possibly another row's. */
+  anyBusy: boolean;
   onConfirm: () => void;
   onCancel: () => void;
   onRun: () => void;
@@ -78,7 +81,7 @@ function Row({ c, confirming, busy, onConfirm, onCancel, onRun }: {
             onClick={onRun}
             className="text-[11px] px-2.5 py-1 rounded-lg bg-red-500/90 text-white hover:bg-red-500 transition-colors"
           >
-            Delete
+            Delete {c.label.toLowerCase()}
           </button>
           <button
             onClick={onCancel}
@@ -90,8 +93,11 @@ function Row({ c, confirming, busy, onConfirm, onCancel, onRun }: {
       ) : (
         <button
           onClick={onConfirm}
-          disabled={busy || nothing}
-          title={nothing ? "Nothing to reclaim" : undefined}
+          // Disabled while *any* prune runs, not just this row's: two concurrent prunes
+          // share one busy flag, so the first to finish would clear it for the second and
+          // leave the UI claiming the second had ended.
+          disabled={anyBusy || nothing}
+          title={nothing ? "Nothing to reclaim" : anyBusy ? "Another cleanup is running" : undefined}
           className="shrink-0 flex items-center gap-1.5 text-[11px] px-2.5 py-1 rounded-lg text-gray-400 hover:text-white hover:bg-gray-800 transition-colors disabled:opacity-30 disabled:hover:bg-transparent"
         >
           {busy ? <Loader2 size={11} className="animate-spin" /> : <Trash2 size={11} />}
@@ -132,6 +138,8 @@ export function DiskCleanupDialog({ open, onClose }: { open: boolean; onClose: (
   }, [open]);
 
   const runPrune = async (category: CategoryUsage["category"]) => {
+    // Guard the entry point too: the disabled button is a hint, not an enforcement.
+    if (busy) return;
     setBusy(category);
     setConfirming(null);
     try {
@@ -210,6 +218,7 @@ export function DiskCleanupDialog({ open, onClose }: { open: boolean; onClose: (
                   <Row key={c.category} c={c}
                     confirming={confirming === c.category}
                     busy={busy === c.category}
+                    anyBusy={busy !== null}
                     onConfirm={() => setConfirming(c.category)}
                     onCancel={() => setConfirming(null)}
                     onRun={() => void runPrune(c.category)} />
@@ -228,6 +237,7 @@ export function DiskCleanupDialog({ open, onClose }: { open: boolean; onClose: (
                   <Row key={c.category} c={c}
                     confirming={confirming === c.category}
                     busy={busy === c.category}
+                    anyBusy={busy !== null}
                     onConfirm={() => setConfirming(c.category)}
                     onCancel={() => setConfirming(null)}
                     onRun={() => void runPrune(c.category)} />
