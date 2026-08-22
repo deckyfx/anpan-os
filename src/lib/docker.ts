@@ -121,7 +121,31 @@ export interface DockerSummary {
   /** Only containers declaring a HEALTHCHECK report health, so these do not sum to `total`. */
   health: { healthy: number; unhealthy: number; starting: number };
   volumes: number;
-  images: number;
+  /**
+   * Images split by what they are, not one aggregate.
+   *
+   * A single number cannot be reconciled against anything: /info counts records including
+   * intermediate layers, `docker images` hides untagged-but-digest-referenced entries, and
+   * `docker system df` counts a third thing. Reporting the split says which of them the
+   * viewer is looking at, and is the same breakdown the cleanup panel acts on.
+   */
+  images: {
+    /**
+     * False when the image list could not be read and `total` came from /info instead.
+     *
+     * The two count different things — /info includes intermediate layers — so a consumer
+     * that renders them identically would show an inflated number with no sign that the
+     * data is degraded.
+     */
+    classified: boolean;
+    total: number;
+    /** Referenced by a container, running or stopped — needed to start it again. */
+    active: number;
+    /** No repository tags: leftovers from a rebuild or retag. Safe to reclaim. */
+    dangling: number;
+    /** Tagged but unreferenced. Reclaimable, at the cost of pulling it again. */
+    unused: number;
+  };
   cpus: number;
   memTotal: number;
 }
@@ -284,10 +308,33 @@ export class DockerClient {
       // /info's Images counts image records, not distinct images, and reads far higher
       // than any figure a user recognises — 192 on a host where `docker images` shows 132
       // rows over 111 unique IDs. Counting distinct Ids here gives the number people mean.
-      dockerFetch<Array<{ Id: string }>>("/images/json"),
+      dockerFetch<Array<{ Id: string; RepoTags: string[] | null }>>("/images/json"),
     ]);
 
     if (!listResult.ok) return listResult;
+
+    // Classify images against the containers that reference them. Distinct Ids, since one
+    // image tagged from two repositories appears twice but is one image on disk.
+    const referenced = new Set(listResult.data.map(c => c.ImageID).filter(Boolean));
+    const imageBreakdown = { classified: false, total: 0, active: 0, dangling: 0, unused: 0 };
+    if (imagesResult.ok) {
+      imageBreakdown.classified = true;
+      const seen = new Set<string>();
+      for (const img of imagesResult.data) {
+        if (seen.has(img.Id)) continue;
+        seen.add(img.Id);
+        imageBreakdown.total++;
+        if (referenced.has(img.Id))                             imageBreakdown.active++;
+        else if (!img.RepoTags || img.RepoTags.length === 0
+                 || img.RepoTags[0] === "<none>:<none>")        imageBreakdown.dangling++;
+        else                                                    imageBreakdown.unused++;
+      }
+    } else if (infoResult.ok) {
+      // Without the list there is nothing to classify. /info's figure is a different
+      // measure, so it is reported with classified:false and the split left at zero —
+      // the consumer decides how to present a number it cannot break down.
+      imageBreakdown.total = infoResult.data.Images;
+    }
 
     const projects = new Set<string>();
     const containers = { total: 0, running: 0, stopped: 0, paused: 0 };
@@ -320,11 +367,7 @@ export class DockerClient {
         containers,
         health,
         volumes: volumesResult.ok ? (volumesResult.data.Volumes?.length ?? 0) : 0,
-        // Distinct Ids rather than row count: one image tagged from two repositories
-        // appears twice in /images/json but is one image on disk.
-        images:  imagesResult.ok
-          ? new Set(imagesResult.data.map(i => i.Id)).size
-          : (infoResult.ok ? infoResult.data.Images : 0),
+        images: imageBreakdown,
         cpus:    infoResult.ok ? infoResult.data.NCPU     : 0,
         memTotal:infoResult.ok ? infoResult.data.MemTotal : 0,
       },

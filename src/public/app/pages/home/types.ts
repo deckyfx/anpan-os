@@ -47,7 +47,8 @@ export interface DockerSummary {
   /** Only containers declaring a HEALTHCHECK report health, so these do not sum to `total`. */
   health: { healthy: number; unhealthy: number; starting: number };
   volumes: number;
-  images: number;
+  /** Split by what each image is; see DockerSummary in src/lib/docker.ts. */
+  images: { classified: boolean; total: number; active: number; dangling: number; unused: number };
   cpus: number;
   memTotal: number;
 }

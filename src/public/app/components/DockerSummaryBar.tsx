@@ -46,6 +46,7 @@ export function DockerSummaryBar({ summary }: { summary: DockerSummary | null })
   if (!summary) return null;
 
   const { containers, health } = summary;
+  const reclaimableImages = summary ? summary.images.dangling + summary.images.unused : 0;
   const iconCls = "shrink-0";
 
   return (
@@ -100,7 +101,27 @@ export function DockerSummaryBar({ summary }: { summary: DockerSummary | null })
       </Metric>
 
       <Metric icon={<List size={14} className={iconCls} />} title="Docker images">
-        {summary.images} {summary.images === 1 ? "image" : "images"}
+        {summary.images.total} {summary.images.total === 1 ? "image" : "images"}
+        {/* The reclaimable count rides alongside the total rather than replacing it: the
+            total answers "how many images", the amber figure answers "how many of those
+            am I keeping for no reason". One number could not say both. */}
+        {/* "reclaimable" rather than "unused": the figure is dangling plus tagged-but-
+            unreferenced, and calling the whole sum "unused" mislabels the dangling half. */}
+        {summary.images.classified && reclaimableImages > 0 && (
+          <span
+            className="ml-1 text-amber-500/90"
+            title={`${summary.images.dangling} dangling, ${summary.images.unused} tagged but unused`}
+          >
+            ({reclaimableImages} reclaimable)
+          </span>
+        )}
+        {/* The total came from /info and counts something else; say so rather than
+            presenting it as the same measure. */}
+        {!summary.images.classified && summary.images.total > 0 && (
+          <span className="ml-1 text-gray-600" title="Image list unavailable — total includes intermediate layers">
+            (approx)
+          </span>
+        )}
       </Metric>
 
       <Metric icon={<Cpu size={14} className={iconCls} />} title="Logical CPUs">
