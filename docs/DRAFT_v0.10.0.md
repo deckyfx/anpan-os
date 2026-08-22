@@ -1,6 +1,7 @@
 # Draft — v0.10.0 release notes
 
-> Draft only. Not committed to ROADMAP.md until PR #31 merges clean.
+> Draft. PR #31 merged clean on 2026-08-22; this also needs the disk-cleanup work
+> from `feat/disk-cleanup-followups` folded in before it becomes the ROADMAP entry.
 > Version bump: `package.json` 0.9.0 → 0.10.0.
 
 ## The bug this release fixes
@@ -72,3 +73,19 @@ canary (now `test.failing`), two stale tests written against a `diskUsed`/`diskT
 that had moved to per-mount `disks[]`, and three that were **right all along** — compose
 name validation lived inside an SSE generator, so a rejected name returned `200 OK` with
 an error event in the body. A browser coped; a script would have read it as success.
+
+
+---
+
+## Still to fold in — disk cleanup work
+
+Landing separately on `feat/disk-cleanup-followups`:
+
+- **Images reported by kind** — active, dangling and unused, rather than one number that
+  could not be reconciled with any Docker command
+- **Disk cleanup panel** — reclaimable space by category, safe categories separated from
+  destructive ones, every prune confirmed by naming its category twice
+- **Bind paths on stack delete** — per-path checkboxes, unchecked by default, refusing
+  shared roots, personal libraries, symlink escapes and anything another stack also mounts
+- **`/copy` and `/move` cancellation** — closing the tab now kills rsync instead of
+  leaving it running

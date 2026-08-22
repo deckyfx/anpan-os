@@ -1,13 +1,11 @@
 # Plan — follow-up fixes after PR #31
 
-Deliberately kept out of PR #31: that branch is the update checker, it is one round away
-from a clean review, and adding fresh code restarts the convergence. Everything here lands
-on a branch off `main` **after** #31 merges.
+PR #31 (the update checker) merged on 2026-08-22; this work followed it on
+`feat/disk-cleanup-followups`.
 
-Ordered by independence — each item can ship alone.
-
-**Status:** items 1 and 2 are implemented on `feat/disk-cleanup-followups`. Items 3 and 4
-are still planned only.
+**Status: all four items implemented.** This file is kept as the record of why each was
+done the way it was — the reasoning is not obvious from the diffs, and two of the four
+changed shape once they met real data.
 
 ---
 
@@ -71,7 +69,7 @@ a leak rather than a wedge. Still worth fixing.
 
 ---
 
-## 3. Offer to delete bind paths when removing a stack
+## 3. Offer to delete bind paths when removing a stack — DONE
 
 The substantial one. Full design in [PLAN_disk_cleanup.md](PLAN_disk_cleanup.md) — summary
 here so this file stands alone.
@@ -87,7 +85,13 @@ and the only hint vanishes with the dialog.
 **Shape:** per-path checkboxes, **all unchecked by default**, each showing its size;
 deletion after the containers are gone, streamed over the existing SSE channel.
 
-**Guards — the bulk of the work:**
+**Guards — the bulk of the work, and two of them came from running it against real
+stacks rather than fixtures.** `/dev/shm` and `/home/decky/Music` were both judged
+deletable on the first pass: a media server mounts them, but one is shared memory and the
+other is a personal library the stack consumes rather than owns. The read-write flag does
+not separate those from app data, since media stacks mount libraries read-write, so the
+directory's identity is the signal.
+
 - Refuse `/`, `/DATA`, `/DATA/AppData`, home directories, or any path fewer than two
   segments below the files root
 - Refuse paths outside `config.filesRoot`, canonicalised with `realpath` — `guardPath()`
@@ -103,7 +107,7 @@ something the user did not explicitly name, it refuses and explains rather than 
 
 ---
 
-## 4. Docker resource cleanup panel
+## 4. Docker resource cleanup panel — DONE
 
 Separate PR of its own — see [PLAN_disk_cleanup.md](PLAN_disk_cleanup.md) Feature B.
 
@@ -111,9 +115,16 @@ Kept apart because volume pruning deserves its own review pass: **204 of the 206
 on this host are "unused", and most of those are stopped stacks' databases, not garbage.
 "Unused" means *not currently referenced*, which is not *not wanted*.
 
-Start with the two low-risk, high-yield categories — dangling images and build cache,
-about **37 GB** here — and add volumes and unused-images only once the confirm patterns
-from item 3 are proven.
+Implemented with all six categories, split into "safe to reclaim" and "needs thought", and
+the headline total counts only the safe ones so it cannot invite reclaiming data by
+accident.
+
+Every prune names its category twice, once to select and once to confirm, and the route
+rejects a mismatch with 422. That guard exists for a concrete reason: while probing which
+prune endpoints the daemon exposed, a `POST /images/prune?filters={"dangling":["false"]}`
+with an invented `dry-run=1` parameter removed roughly 76 unused images from this host.
+Docker has no dry-run for prune and ignored the unknown parameter. An endpoint that acts
+on a bare POST is too easy to reach by accident — including by a tool — so ours does not.
 
 ---
 
