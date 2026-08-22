@@ -6,12 +6,12 @@ on a branch off `main` **after** #31 merges.
 
 Ordered by independence — each item can ship alone.
 
-**Status:** item 2 is implemented on `feat/disk-cleanup-followups`. Items 1, 3 and 4 are
-still planned only.
+**Status:** items 1 and 2 are implemented on `feat/disk-cleanup-followups`. Items 3 and 4
+are still planned only.
 
 ---
 
-## 1. Image count reads the wrong number
+## 1. Image count reads the wrong number — DONE
 
 **Where:** `DockerClient.getSummary()` in `src/lib/docker.ts`, surfaced by the dashboard
 summary bar.
@@ -20,19 +20,25 @@ summary bar.
 *records*. Measured on this host:
 
 ```
-/info Images        192   ← what the bar shows
+/info Images        192   ← what the bar showed; includes intermediate layers
 docker images       132   ← one row per tag
-unique image IDs    111   ← what a person means by "images"
-docker system df    113
+docker images -q    111   ← default listing, hides untagged-but-digest-referenced images
+/images/json        113   ← distinct images on disk; docker system df agrees
 ```
 
-Portainer reports 117, in the same family as the lower figures. The gap is not dangling
-images — there are only **2** of those. It is `/info`'s accounting plus one row per tag.
+Three numbers, three different questions. The gap is not dangling images — there are only
+**2** of those. `/info` counts image records including intermediate layers, and `docker
+images` lists one row per tag while hiding images that have a `RepoDigest` but no
+`RepoTag`. Those last two are real files on disk, e.g.
 
-**Fix:** count distinct `Id` values from `/images/json`. One extra daemon call, already
-made alongside the others in `getSummary()`, so no extra round trip in practice.
+```
+RepoTags:    []
+RepoDigests: [nginx@sha256:5a88c9c4…]
+```
 
-**Test:** unique-ID counting over a fixture with the same image under two tags.
+**Fix (implemented):** count distinct `Id` values from `/images/json` → **113**, which is
+what `docker system df` reports and what a person means by "images on disk". Portainer's
+117 was measured at a different moment and is not directly comparable.
 
 ---
 

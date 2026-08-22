@@ -277,10 +277,14 @@ export class DockerClient {
    * failing the whole summary: a partially populated bar beats an empty one.
    */
   static async getSummary(): Promise<DockerResult<DockerSummary>> {
-    const [listResult, infoResult, volumesResult] = await Promise.all([
+    const [listResult, infoResult, volumesResult, imagesResult] = await Promise.all([
       dockerFetch<DockerContainer[]>("/containers/json?all=1"),
       DockerClient.getInfo(),
       dockerFetch<{ Volumes: Array<unknown> | null }>("/volumes"),
+      // /info's Images counts image records, not distinct images, and reads far higher
+      // than any figure a user recognises — 192 on a host where `docker images` shows 132
+      // rows over 111 unique IDs. Counting distinct Ids here gives the number people mean.
+      dockerFetch<Array<{ Id: string }>>("/images/json"),
     ]);
 
     if (!listResult.ok) return listResult;
@@ -316,7 +320,11 @@ export class DockerClient {
         containers,
         health,
         volumes: volumesResult.ok ? (volumesResult.data.Volumes?.length ?? 0) : 0,
-        images:  infoResult.ok ? infoResult.data.Images   : 0,
+        // Distinct Ids rather than row count: one image tagged from two repositories
+        // appears twice in /images/json but is one image on disk.
+        images:  imagesResult.ok
+          ? new Set(imagesResult.data.map(i => i.Id)).size
+          : (infoResult.ok ? infoResult.data.Images : 0),
         cpus:    infoResult.ok ? infoResult.data.NCPU     : 0,
         memTotal:infoResult.ok ? infoResult.data.MemTotal : 0,
       },
