@@ -109,8 +109,18 @@ describe("Broadcast", () => {
     ac.abort();
 
     const sub = bus.attach(ac.signal);
-    const drained = (async () => { for await (const _ of sub.events) { /* drain */ } })();
-    await Promise.race([drained, new Promise(r => setTimeout(r, 500))]);
+    const drained = (async () => {
+      for await (const _ of sub.events) { /* drain */ }
+      return "ended";
+    })();
+
+    // Assert completion directly rather than inferring it from the subscriber count: the
+    // count would also catch a hang, but only as a side effect of the generator's finally
+    // never running, which is a weaker statement than "the iterator ended".
+    expect(await Promise.race([
+      drained,
+      new Promise(r => setTimeout(() => r("HUNG"), 500)),
+    ])).toBe("ended");
     expect(bus.size).toBe(0);
   });
 
