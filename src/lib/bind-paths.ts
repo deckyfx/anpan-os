@@ -93,6 +93,12 @@ async function canonicalise(path: string): Promise<string | null> {
 export async function judgeBindPath(
   path: string,
   otherStackPaths: Set<string>,
+  /**
+   * Files root to judge against. Defaults to the configured one; overridable so the
+   * escape and depth rules can be tested, which is impossible when the root is "/"
+   * because nothing is outside it and everything is deep enough.
+   */
+  filesRoot?: string,
 ): Promise<BindVerdict> {
   if (INFRA_MOUNTS.has(path)) {
     return { path, deletable: false, reason: "System mount shared by every container" };
@@ -122,7 +128,7 @@ export async function judgeBindPath(
     }
   }
 
-  const root = config.filesRoot === "/" ? "/" : config.filesRoot;
+  const root = filesRoot ?? config.filesRoot;
   if (root !== "/") {
     const canonicalRoot = await canonicalise(root);
     if (!canonicalRoot || !(canonical === canonicalRoot || canonical.startsWith(canonicalRoot + sep))) {

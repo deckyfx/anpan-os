@@ -76,17 +76,17 @@ describe("judgeBindPath — refusals", () => {
     expect(v.deletable === false && v.reason).toContain("Inside another stack");
   });
 
-  test("a symlink pointing outside the files root is refused", async () => {
-    // The lexical check used elsewhere would pass this: the link sits inside the root.
+  test("a symlink escaping the files root is refused", async () => {
+    // A files root is required for this to mean anything: with "/" nothing is outside it.
+    // The link sits inside the root, so the lexical prefix check used elsewhere would
+    // pass it — only canonicalisation catches the escape.
     const outside = realpathSync(mkdtempSync(join(tmpdir(), "anpan-outside-")));
     const link = join(base, "AppData", "escape");
     symlinkSync(outside, link);
     try {
-      const v = await judgeBindPath(link, new Set());
-      // With filesRoot "/" nothing is outside it, so the meaningful assertion is that the
-      // verdict is computed from the *canonical* target, not the link path.
-      if (v.deletable) expect(v.canonical).toBe(outside);
-      else expect(v.reason).toBeTruthy();
+      const v = await judgeBindPath(link, new Set(), base);
+      expect(v.deletable).toBe(false);
+      expect(v.deletable === false && v.reason).toContain("Outside the configured files root");
     } finally {
       rmSync(link, { force: true });
       rmSync(outside, { recursive: true, force: true });
@@ -107,10 +107,18 @@ describe("judgeBindPath — allowed", () => {
   });
 
   test("traversal cannot disguise a shallow path as a deep one", async () => {
-    // Resolves to base's parent chain; the depth check runs on the canonical form.
-    const sneaky = join(deep, "..", "..", "..");
-    const v = await judgeBindPath(sneaky, new Set());
-    // Whatever it resolves to, it must not be judged by the literal string.
-    if (v.deletable) expect(v.canonical).not.toContain("..");
+    // Literally this string is four segments long; canonically it is the root itself,
+    // and the depth rule runs on the canonical form.
+    const sneaky = join(base, "AppData", "myapp", "..", "..");
+    const v = await judgeBindPath(sneaky, new Set(), base);
+    expect(v.deletable).toBe(false);
+    expect(v.deletable === false && v.reason).toContain("Too close to the filesystem root");
+  });
+
+  test("depth is enforced against the configured root", async () => {
+    // One segment below the root is not enough; two is.
+    const shallow = join(base, "AppData");
+    expect((await judgeBindPath(shallow, new Set(), base)).deletable).toBe(false);
+    expect((await judgeBindPath(deep, new Set(), base)).deletable).toBe(true);
   });
 });
