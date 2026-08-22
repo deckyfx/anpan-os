@@ -36,8 +36,24 @@ function isProxiedDomain(host: string): boolean {
   return !LOCAL_TLDS.has(labels[labels.length - 1]!.toLowerCase());
 }
 
-/** Split `host`, `host:port`, `[::1]:port` or a bare IPv6 into its parts. */
-function splitAuthority(raw: string): { host: string; port: string | null } {
+/**
+ * Characters that must never appear in a bare authority.
+ *
+ * The result is concatenated into a URL string, so an authority carrying any of these
+ * changes which URL is produced rather than which host is addressed. "@" is the dangerous
+ * one: "good.com@evil.com" builds "http://good.com@evil.com/", which a browser reads as
+ * userinfo "good.com" at host evil.com — a tile that looks trusted and navigates
+ * elsewhere. The address field is user-editable and also arrives from CasaOS imports.
+ */
+const AUTHORITY_FORBIDDEN = /[@/?#\s\\]/;
+
+/**
+ * Split `host`, `host:port`, `[::1]:port` or a bare IPv6 into its parts.
+ * Returns null when the input is not a plain authority.
+ */
+function splitAuthority(raw: string): { host: string; port: string | null } | null {
+  if (AUTHORITY_FORBIDDEN.test(raw)) return null;
+
   if (raw.startsWith("[")) {
     const end = raw.indexOf("]");
     if (end > 0) {
@@ -128,7 +144,9 @@ export function resolveLaunchUrl(input: LaunchInput): string | null {
     // or "#panel" lands them somewhere else in the app.
     if (url.pathname !== "/" || url.search || url.hash) path = url.pathname + url.search + url.hash;
   } else if (rawAddress) {
-    const parts  = splitAuthority(rawAddress);
+    const parts = splitAuthority(rawAddress);
+    // No launch URL at all is better than one pointing somewhere the label does not say.
+    if (!parts) return null;
     host         = parts.host;
     explicitPort = parts.port;
   } else {

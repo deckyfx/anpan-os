@@ -65,6 +65,30 @@ describe("launchLabel", () => {
   });
 });
 
+describe("authority safety", () => {
+  const at = (address: string) =>
+    resolveLaunchUrl({ scheme: "http", address, port: null, indexPath: "/" });
+
+  test("userinfo cannot smuggle a different host", () => {
+    // "http://good.com@evil.com/" navigates to evil.com — good.com is only userinfo — so
+    // a tile would look trusted and lead elsewhere. The address field is user-editable.
+    expect(at("good.com@evil.com")).toBeNull();
+  });
+
+  test("path, query and fragment characters are rejected in a bare authority", () => {
+    expect(at("good.com/../x")).toBeNull();
+    expect(at("good.com?next=evil")).toBeNull();
+    expect(at("good.com#x")).toBeNull();
+    expect(at("good.com\\evil.com")).toBeNull();
+  });
+
+  test("ordinary authorities still resolve", () => {
+    expect(at("good.com")).toBe("http://good.com/");
+    expect(at("192.168.1.10:8080")).toBe("http://192.168.1.10:8080/");
+    expect(at("[::1]:8080")).toBe("http://[::1]:8080/");
+  });
+});
+
 describe("scheme safety", () => {
   test("a javascript scheme cannot reach the href", () => {
     // scheme comes from stack metadata a user can edit, and from CasaOS imports; the

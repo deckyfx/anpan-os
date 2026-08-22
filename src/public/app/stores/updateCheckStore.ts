@@ -157,7 +157,15 @@ export const useUpdateCheckStore = create<UpdateCheckState>((set, get) => ({
               }));
               break;
             case "finished":
-              set({ running: false, run: msg.run });
+              // Only a terminal event for the run this client believes is current may
+              // clear `running`. A late `finished` from a cancelled run would otherwise
+              // report idle while its replacement is still sweeping. Defence in depth:
+              // the server also orders these, but the client should not depend on it.
+              set(state => (
+                state.run && msg.run.id !== state.run.id
+                  ? {}
+                  : { running: false, run: msg.run }
+              ));
               break;
             case "heartbeat":
               break;

@@ -45,7 +45,7 @@ interface Target { stack: string; image: string }
 
 class UpdateChecker {
   private readonly bus = new Broadcast<CheckerEvent>();
-  private active: { runId: number; abort: AbortController } | null = null;
+  private active: { runId: number; abort: AbortController; done: Promise<void> } | null = null;
   private heartbeat: ReturnType<typeof setInterval> | null = null;
   /**
    * Serialises start() calls.
@@ -134,16 +134,12 @@ class UpdateChecker {
 
     const run = await UpdateCheckStore.createRun(auto, targets.data.length, stack ?? null);
     const abort = new AbortController();
-    this.active = { runId: run.id, abort };
 
-    this.bus.publish({ type: "started", run });
-    this.startHeartbeat();
-
-    // Deliberately not awaited: start() answers "did a sweep begin", and the caller must
-    // not be held open for the minutes the sweep may take.
-    // run() owns finalisation, so no status is written here: a catch at this level ran
-    // after run()'s finally, which had already decided there was nothing to publish.
-    void this.run(run.id, targets.data, abort, { scoped: Boolean(stack) })
+    // Not awaited: start() answers "did a sweep begin", and the caller must not be held
+    // open for the minutes the sweep may take. run() owns finalisation, so no status is
+    // written here — a catch at this level ran after run()'s finally, which had already
+    // decided there was nothing to publish.
+    const done = this.run(run.id, targets.data, abort, { scoped: Boolean(stack) })
       .finally(() => {
         // Only clear state still belonging to this run. A force-restart cancels the old
         // sweep and starts a new one, and the old promise settles afterwards — clearing
@@ -154,6 +150,13 @@ class UpdateChecker {
           this.stopHeartbeat();
         }
       });
+
+    this.active = { runId: run.id, abort, done };
+
+    // Reached only after any previous run has finalised (cancel() awaits it), so a
+    // subscriber cannot see this run's `started` before the old run's `finished`.
+    this.bus.publish({ type: "started", run });
+    this.startHeartbeat();
 
     return { started: true, runId: run.id };
   }
@@ -173,10 +176,17 @@ class UpdateChecker {
     };
   }
 
-  /** Cancel the in-flight sweep, if any. Results already written are kept. */
+  /**
+   * Cancel the in-flight sweep, if any. Results already written are kept.
+   *
+   * Waits for the sweep to actually finish. A force restart calls this and then publishes
+   * `started` for its replacement, so returning early let the old run's `finished` arrive
+   * afterwards — and a client that does not filter terminal events by run id would read
+   * it as "nothing is running" while the new sweep was under way.
+   */
   async cancel(): Promise<boolean> {
     if (!this.active) return false;
-    const { runId, abort } = this.active;
+    const { runId, abort, done } = this.active;
     // Record the reason before aborting: run()'s finaliser only supplies a status when
     // the row is still `running`, so this is what distinguishes a cancellation from a
     // watchdog timeout. The terminal event is published there, not here — publishing in
@@ -185,6 +195,10 @@ class UpdateChecker {
     abort.abort();
     this.active = null;
     this.stopHeartbeat();
+
+    // Bounded: a sweep that will not settle must not wedge the caller. The watchdog and
+    // the abort above make this a formality in practice.
+    await Promise.race([done, new Promise<void>(r => setTimeout(r, 30_000))]);
     return true;
   }
 
