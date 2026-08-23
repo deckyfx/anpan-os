@@ -4,8 +4,11 @@ import { migrate } from "drizzle-orm/bun-sqlite/migrator";
 import { sql } from "drizzle-orm";
 import { config } from "../config";
 import { envConfig } from "../env-config";
-import { embeddedMigrations, embeddedMigrationCount } from "./migrations-embedded";
-import { mkdirSync } from "node:fs";
+import {
+  embeddedMigrations,
+  embeddedMigrationCount,
+} from "./migrations-embedded";
+import { mkdirSync, rmSync, readFileSync, writeFileSync } from "node:fs";
 import { readdir, rm } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
@@ -31,7 +34,93 @@ export class MigrationManager {
    * migrator and its __drizzle_migrations bookkeeping behave exactly as before and an
    * existing database re-runs nothing.
    */
-  private static readonly migrationsDir = join(envConfig.RUNTIME_CONFIG_DIR, ".migrations");
+  private static readonly migrationsDir = join(
+    envConfig.RUNTIME_CONFIG_DIR,
+    ".migrations",
+  );
+
+  /** Lock directory guarding materialise → preflight → migrate. */
+  private static readonly lockDir = join(
+    envConfig.RUNTIME_CONFIG_DIR,
+    ".migrations.lock",
+  );
+
+  /** A lock older than this is assumed abandoned even if its PID check is inconclusive. */
+  private static readonly LOCK_STALE_MS = 5 * 60_000;
+
+  /**
+   * Run `fn` with exclusive access to the migration sequence.
+   *
+   * Two processes can reach this at once — a service restart overlapping its predecessor,
+   * or `bun run migrate` while the service is up. Without a lock they both rewrite the
+   * migrations directory, and an older build can delete the very files a newer one is
+   * midway through applying.
+   *
+   * mkdir is the lock: it is atomic on every platform this runs on, unlike a
+   * check-then-create on a file. The PID recorded inside lets a genuinely abandoned lock
+   * be reclaimed, which matters because preflight() exits the process on a mismatch and
+   * would otherwise leave the directory behind forever.
+   */
+  private static async withLock<T>(fn: () => Promise<T>): Promise<T> {
+    const deadline = Date.now() + 30_000;
+
+    for (;;) {
+      try {
+        mkdirSync(this.lockDir); // throws if it already exists
+        writeFileSync(join(this.lockDir, "pid"), String(process.pid));
+        break;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+
+        if (this.lockIsAbandoned()) {
+          console.warn("⚠️  Reclaiming an abandoned migration lock");
+          rmSync(this.lockDir, { recursive: true, force: true });
+          continue;
+        }
+        if (Date.now() > deadline) {
+          console.error(
+            "❌ Another process is migrating and did not finish within 30s.",
+          );
+          console.error(`💡 If nothing is running, remove ${this.lockDir}`);
+          process.exit(1);
+        }
+        await Bun.sleep(250);
+      }
+    }
+
+    try {
+      return await fn();
+    } finally {
+      rmSync(this.lockDir, { recursive: true, force: true });
+    }
+  }
+
+  /** True when the lock's owner is gone, or it is old enough to be presumed dead. */
+  private static lockIsAbandoned(): boolean {
+    try {
+      const pid = Number.parseInt(
+        readFileSync(join(this.lockDir, "pid"), "utf8").trim(),
+        10,
+      );
+      if (Number.isFinite(pid) && pid > 0) {
+        try {
+          process.kill(pid, 0); // signal 0 only tests existence
+          return false; // owner is alive
+        } catch {
+          return true; // owner is gone
+        }
+      }
+    } catch {
+      /* unreadable pid file — fall through to the age check */
+    }
+
+    try {
+      const age = Date.now() - Bun.file(join(this.lockDir, "pid")).lastModified;
+      return age > this.LOCK_STALE_MS;
+    } catch {
+      return true; // no pid file at all
+    }
+  }
 
   /**
    * Write the embedded migrations to disk.
@@ -49,17 +138,25 @@ export class MigrationManager {
 
     const expected = new Set(Object.keys(embeddedMigrations.files));
     let existing: string[] = [];
-    try { existing = await readdir(this.migrationsDir); } catch { /* first run */ }
+    try {
+      existing = await readdir(this.migrationsDir);
+    } catch {
+      /* first run */
+    }
     await Promise.all(
       existing
-        .filter(f => f.endsWith(".sql") && !expected.has(f))
-        .map(f => rm(join(this.migrationsDir, f), { force: true })),
+        .filter((f) => f.endsWith(".sql") && !expected.has(f))
+        .map((f) => rm(join(this.migrationsDir, f), { force: true })),
     );
 
-    await Bun.write(join(this.migrationsDir, "meta", "_journal.json"), embeddedMigrations.journal);
+    await Bun.write(
+      join(this.migrationsDir, "meta", "_journal.json"),
+      embeddedMigrations.journal,
+    );
     await Promise.all(
-      Object.entries(embeddedMigrations.files)
-        .map(([name, sql]) => Bun.write(join(this.migrationsDir, name), sql)),
+      Object.entries(embeddedMigrations.files).map(([name, sql]) =>
+        Bun.write(join(this.migrationsDir, name), sql),
+      ),
     );
   }
 
@@ -67,50 +164,64 @@ export class MigrationManager {
   static async init(migrationConfig: MigrationConfig = {}): Promise<void> {
     const { strict = false, autoMigrate = false } = migrationConfig;
 
-    await this.materialise();
+    // Held across the whole sequence, not just the write: another process must not be
+    // able to rewrite the directory between our materialise and our migrate.
+    const { pending, migrated } = await this.withLock(async () => {
+      await this.materialise();
 
-    const hasMigrations = await this.hasMigrationFiles();
-    if (!hasMigrations) {
-      console.error(`❌ Could not write migrations to ${this.migrationsDir}`);
-      process.exit(1);
-    }
+      if (!(await this.hasMigrationFiles())) {
+        console.error(`❌ Could not write migrations to ${this.migrationsDir}`);
+        process.exit(1);
+      }
 
-    const { pending: pendingCount } = await this.preflight();
+      const { pending: count } = await this.preflight();
 
-    if (pendingCount === 0) {
+      // Migrating inside the lock, rather than reporting a count and applying it after,
+      // is the point: between the two another process could change what is pending.
+      if (count > 0 && autoMigrate) {
+        console.log(`🔄 Auto-migrating ${count} pending migration(s)...`);
+        await this.applyMigrations();
+        console.log("✅ Auto-migration completed");
+        return { pending: 0, migrated: true };
+      }
+      return { pending: count, migrated: false };
+    });
+
+    if (migrated) return;
+
+    if (pending === 0) {
       console.log("✅ Database is up to date");
       return;
     }
 
     if (strict) {
-      console.error(`❌ ${pendingCount} pending migration(s) detected`);
+      console.error(`❌ ${pending} pending migration(s) detected`);
       console.error("💡 Run 'bun run migrate' to apply migrations");
       process.exit(1);
     }
 
-    if (autoMigrate) {
-      console.log(`🔄 Auto-migrating ${pendingCount} pending migration(s)...`);
-      await this.runMigrations();
-      console.log("✅ Auto-migration completed");
-      return;
-    }
-
-    console.warn(`⚠️  Warning: ${pendingCount} pending migration(s) detected`);
+    console.warn(`⚠️  Warning: ${pending} pending migration(s) detected`);
     console.warn("💡 Run 'bun run migrate' to apply them");
   }
 
   /** Run all pending migrations (for CLI use). */
   static async runMigrations(): Promise<void> {
-    // Also called directly by `bun run migrate`, which never goes through init(). Without
-    // this the CLI would find an empty migrations directory on a clean runtime dir and
-    // apply nothing while reporting success — and would skip the checks that stop a
-    // migration being applied over a schema from another branch.
-    await this.materialise();
-    await this.preflight();
+    // Also called directly by `bun run migrate`, which never goes through init(), so it
+    // needs the same lock, materialisation and checks — otherwise the CLI can race the
+    // service and skip the guards that stop a migration landing on a foreign schema.
+    return this.withLock(async () => {
+      await this.materialise();
+      await this.preflight();
+      await this.applyMigrations();
+    });
+  }
 
+  /** Apply pending migrations. Callers must already hold the lock. */
+  private static async applyMigrations(): Promise<void> {
     console.log("🚀 Running migrations...\n");
 
     const sqlite = new Database(config.databasePath);
+    sqlite.run("PRAGMA busy_timeout = 15000;");
     const db = drizzle(sqlite);
 
     try {
@@ -149,13 +260,16 @@ export class MigrationManager {
    * branch that diverged. Either way the schema contains changes this code does not know
    * about.
    */
-  private static async analyse(): Promise<{ pending: number; problem: string | null }> {
+  private static async analyse(): Promise<{
+    pending: number;
+    problem: string | null;
+  }> {
     // Ordered as the journal orders them, with the same timestamp Drizzle records as
     // created_at, so the build's sequence and the database's are directly comparable.
     const journal = JSON.parse(embeddedMigrations.journal) as {
       entries: Array<{ tag: string; when: number }>;
     };
-    const buildSeq = journal.entries.map(e => ({
+    const buildSeq = journal.entries.map((e) => ({
       when: e.when,
       hash: createHash("sha256")
         .update(embeddedMigrations.files[`${e.tag}.sql`] ?? "")
@@ -164,12 +278,14 @@ export class MigrationManager {
     }));
 
     const sqlite = new Database(config.databasePath);
+    sqlite.run("PRAGMA busy_timeout = 15000;");
     const db = drizzle(sqlite);
     try {
       const tracking = await db.all<{ name: string }>(
         sql`SELECT name FROM sqlite_master WHERE type = 'table' AND name = '__drizzle_migrations'`,
       );
-      if (tracking.length === 0) return { pending: buildSeq.length, problem: null };
+      if (tracking.length === 0)
+        return { pending: buildSeq.length, problem: null };
 
       let rows: Array<{ hash: string; created_at: number }>;
       try {
@@ -179,7 +295,9 @@ export class MigrationManager {
       } catch (err) {
         console.error("❌ The migration history exists but could not be read.");
         console.error(`💡 ${err instanceof Error ? err.message : String(err)}`);
-        console.error("💡 The database may be corrupt or written by an incompatible tool.");
+        console.error(
+          "💡 The database may be corrupt or written by an incompatible tool.",
+        );
         process.exit(1);
       }
 
@@ -191,19 +309,28 @@ export class MigrationManager {
       // reports one pending migration, skips B because C is already newer, and announces
       // success with B's schema change absent.
       if (rows.length > buildSeq.length) {
-        return { pending: 0, problem: `the database has ${rows.length - buildSeq.length} migration(s) beyond this build` };
+        return {
+          pending: 0,
+          problem: `the database has ${rows.length - buildSeq.length} migration(s) beyond this build`,
+        };
       }
       for (const [i, row] of rows.entries()) {
         const expected = buildSeq[i];
         if (!expected) {
-          return { pending: 0, problem: `applied migration ${i + 1} is beyond this build` };
+          return {
+            pending: 0,
+            problem: `applied migration ${i + 1} is beyond this build`,
+          };
         }
         // Hash alone cannot tell two migrations apart when their SQL is identical: a
         // database recording only the later one would match positionally, and Drizzle
         // would then skip the earlier one because the recorded timestamp is already
         // newer. created_at holds the journal's `when`, which is unique per migration.
         // Stored as numeric, so it can come back as a string.
-        if (row.hash !== expected.hash || Number(row.created_at) !== expected.when) {
+        if (
+          row.hash !== expected.hash ||
+          Number(row.created_at) !== expected.when
+        ) {
           return {
             pending: 0,
             problem: `applied migration ${i + 1} does not match this build (expected ${expected.tag})`,
@@ -226,7 +353,9 @@ export class MigrationManager {
    */
   private static async preflight(): Promise<{ pending: number }> {
     if (embeddedMigrationCount === 0) {
-      console.error("❌ No migrations were compiled into this build — the database cannot be created.");
+      console.error(
+        "❌ No migrations were compiled into this build — the database cannot be created.",
+      );
       console.error("💡 This is a packaging fault; please report it.");
       process.exit(1);
     }
@@ -234,8 +363,12 @@ export class MigrationManager {
     const { pending, problem } = await this.analyse();
     if (problem) {
       console.error(`❌ The database does not match this build: ${problem}.`);
-      console.error("💡 This build is older than the database, or from a different branch.");
-      console.error("💡 Restore a matching build, or downgrade the database deliberately.");
+      console.error(
+        "💡 This build is older than the database, or from a different branch.",
+      );
+      console.error(
+        "💡 Restore a matching build, or downgrade the database deliberately.",
+      );
       process.exit(1);
     }
     return { pending };
@@ -251,11 +384,13 @@ export class MigrationManager {
       if (migrationFiles.length === 0) return 0;
 
       const sqlite = new Database(config.databasePath);
+      sqlite.run("PRAGMA busy_timeout = 15000;");
+      sqlite.run("PRAGMA busy_timeout = 15000;");
       const db = drizzle(sqlite);
 
       try {
         const result = await db.all<{ count: number }>(
-          sql`SELECT COUNT(*) as count FROM __drizzle_migrations`
+          sql`SELECT COUNT(*) as count FROM __drizzle_migrations`,
         );
         const applied = result[0]?.count ?? 0;
         return migrationFiles.length - applied;
