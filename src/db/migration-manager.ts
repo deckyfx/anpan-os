@@ -67,7 +67,7 @@ export class MigrationManager {
     for (;;) {
       try {
         mkdirSync(this.lockDir); // throws if it already exists
-        writeFileSync(join(this.lockDir, "pid"), String(process.pid));
+        writeFileSync(join(this.lockDir, "pid"), this.ownerToken());
         break;
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
@@ -96,22 +96,54 @@ export class MigrationManager {
   }
 
   /** True when the lock's owner is gone, or it is old enough to be presumed dead. */
-  private static lockIsAbandoned(): boolean {
+  /**
+   * Identify the lock owner as more than a PID.
+   *
+   * A PID alone is ambiguous: the owner can die and the number be reused, after which a
+   * liveness check reports "held" forever and every start fails until someone deletes a
+   * directory they do not know exists. Linux exposes a process start time in field 22 of
+   * /proc/<pid>/stat, and the pair is unique for as long as the machine is up.
+   */
+  private static ownerToken(): string {
+    return `${process.pid}:${this.startTimeOf(process.pid) ?? "?"}`;
+  }
+
+  /** Process start time in clock ticks, or null where /proc is unavailable. */
+  private static startTimeOf(pid: number): string | null {
     try {
-      const pid = Number.parseInt(
-        readFileSync(join(this.lockDir, "pid"), "utf8").trim(),
-        10,
-      );
-      if (Number.isFinite(pid) && pid > 0) {
-        try {
-          process.kill(pid, 0); // signal 0 only tests existence
-          return false; // owner is alive
-        } catch {
-          return true; // owner is gone
-        }
-      }
+      // comm can contain spaces and parentheses, so parse after the last ')'.
+      const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+      return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19] ?? null;
     } catch {
-      /* unreadable pid file — fall through to the age check */
+      return null;
+    }
+  }
+
+  /** True when the lock's owner is gone, or it is old enough to be presumed dead. */
+  private static lockIsAbandoned(): boolean {
+    let recordedPid: number | null = null;
+    let recordedStart: string | null = null;
+    try {
+      const [pidPart, startPart] = readFileSync(join(this.lockDir, "pid"), "utf8").trim().split(":");
+      const parsed = Number.parseInt(pidPart ?? "", 10);
+      if (Number.isFinite(parsed) && parsed > 0) recordedPid = parsed;
+      recordedStart = startPart && startPart !== "?" ? startPart : null;
+    } catch {
+      /* unreadable — fall through to the age check */
+    }
+
+    if (recordedPid !== null) {
+      let alive = true;
+      try { process.kill(recordedPid, 0); } catch { alive = false; }
+      if (!alive) return true;
+
+      // Alive, but the same process? A start time that does not match means the number
+      // was recycled and the real owner is long gone.
+      const currentStart = this.startTimeOf(recordedPid);
+      if (recordedStart && currentStart && recordedStart !== currentStart) return true;
+
+      // Same process, or start times unavailable — fall through to the age check rather
+      // than declaring the lock held indefinitely.
     }
 
     try {
