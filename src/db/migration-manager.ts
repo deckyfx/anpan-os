@@ -88,10 +88,31 @@ export class MigrationManager {
       }
     }
 
+    const pidFile = join(this.lockDir, "pid");
+    const token = this.ownerToken();
+
+    // Refresh the token while the work runs. The age check measures time since
+    // acquisition, so a migration slower than LOCK_STALE_MS would otherwise look
+    // abandoned: another process would reclaim the lock mid-run, and the original would
+    // then delete *its* lock on the way out — losing mutual exclusion in exactly the slow
+    // case the lock exists to protect.
+    const heartbeat = setInterval(() => {
+      try {
+        writeFileSync(pidFile, token);
+      } catch {
+        /* reclaimed or removed — the ownership check below handles it */
+      }
+    }, Math.floor(this.LOCK_STALE_MS / 4));
+
     try {
       return await fn();
     } finally {
-      rmSync(this.lockDir, { recursive: true, force: true });
+      clearInterval(heartbeat);
+      // Release only a lock still recorded as ours. If it was reclaimed despite the
+      // heartbeat, removing it here would evict whoever holds it now.
+      let stillOurs = false;
+      try { stillOurs = readFileSync(pidFile, "utf8").trim() === token; } catch { /* gone */ }
+      if (stillOurs) rmSync(this.lockDir, { recursive: true, force: true });
     }
   }
 
@@ -416,7 +437,6 @@ export class MigrationManager {
       if (migrationFiles.length === 0) return 0;
 
       const sqlite = new Database(config.databasePath);
-      sqlite.run("PRAGMA busy_timeout = 15000;");
       sqlite.run("PRAGMA busy_timeout = 15000;");
       const db = drizzle(sqlite);
 
