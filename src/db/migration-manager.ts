@@ -45,8 +45,28 @@ export class MigrationManager {
     ".migrations.lock",
   );
 
+  /**
+   * Mutex serialising reclamation of {@link lockDir}.
+   *
+   * Deciding correctly that a lock is abandoned is not enough: two waiters can reach that
+   * conclusion together, the first deletes and re-creates the lock, and the second then
+   * deletes the *replacement* — a live one. Deletion therefore happens only while holding
+   * this second lock, so at most one process is ever between the delete and the re-create.
+   */
+  private static readonly reclaimDir = join(
+    envConfig.RUNTIME_CONFIG_DIR,
+    ".migrations.reclaim",
+  );
+
   /** A lock older than this is assumed abandoned even if its PID check is inconclusive. */
   private static readonly LOCK_STALE_MS = 5 * 60_000;
+
+  /**
+   * Staleness bound for the reclaim mutex. Far shorter than LOCK_STALE_MS because it is
+   * held across a few filesystem calls and never across migration work, so anything older
+   * is a crashed reclaimer rather than a slow one.
+   */
+  private static readonly RECLAIM_STALE_MS = 30_000;
 
   /**
    * Run `fn` with exclusive access to the migration sequence.
@@ -73,8 +93,7 @@ export class MigrationManager {
         if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
 
         if (this.lockIsAbandoned()) {
-          console.warn("⚠️  Reclaiming an abandoned migration lock");
-          rmSync(this.lockDir, { recursive: true, force: true });
+          this.reclaim();
           continue;
         }
         if (Date.now() > deadline) {
@@ -96,8 +115,15 @@ export class MigrationManager {
     // abandoned: another process would reclaim the lock mid-run, and the original would
     // then delete *its* lock on the way out — losing mutual exclusion in exactly the slow
     // case the lock exists to protect.
-    const heartbeat = setInterval(() => {
+    const heartbeat: Timer = setInterval(() => {
       try {
+        // Refresh only a lock still recorded as ours. Writing unconditionally would let a
+        // displaced owner stamp its token over the current one, and the real holder would
+        // then fail its own release check while we deleted a lock we no longer hold.
+        if (readFileSync(pidFile, "utf8").trim() !== token) {
+          clearInterval(heartbeat);
+          return;
+        }
         writeFileSync(pidFile, token);
       } catch {
         /* reclaimed or removed — the ownership check below handles it */
@@ -113,6 +139,38 @@ export class MigrationManager {
       let stillOurs = false;
       try { stillOurs = readFileSync(pidFile, "utf8").trim() === token; } catch { /* gone */ }
       if (stillOurs) rmSync(this.lockDir, { recursive: true, force: true });
+    }
+  }
+
+  /**
+   * Remove an abandoned lock, serialised so no waiter can delete another's live lock.
+   *
+   * The abandonment test is re-run while holding the mutex, because the observation that
+   * sent us here was made outside it and the lock may since have been replaced by a live
+   * owner. Deletion is followed immediately by our own creation attempt: if a waiter on the
+   * fast path wins that race, its mkdir succeeds and ours fails, which is a correct outcome
+   * — exactly one owner either way.
+   */
+  private static reclaim(): void {
+    try {
+      mkdirSync(this.reclaimDir);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      // Another process is reclaiming. Let it finish; only clear a mutex left by a crash.
+      try {
+        if (Date.now() - statSync(this.reclaimDir).mtimeMs > this.RECLAIM_STALE_MS) {
+          rmSync(this.reclaimDir, { recursive: true, force: true });
+        }
+      } catch { /* vanished under us — nothing to clear */ }
+      return;
+    }
+
+    try {
+      if (!this.lockIsAbandoned()) return;   // replaced by a live owner since we looked
+      console.warn("⚠️  Reclaiming an abandoned migration lock");
+      rmSync(this.lockDir, { recursive: true, force: true });
+    } finally {
+      rmSync(this.reclaimDir, { recursive: true, force: true });
     }
   }
 
