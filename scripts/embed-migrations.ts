@@ -50,6 +50,18 @@ if (orphans.length > 0) {
   process.exit(1);
 }
 
+// Drizzle resumes by comparing against the newest recorded timestamp, so equal or
+// decreasing `when` values make it skip a migration silently. Catch that here, where the
+// fix is to regenerate, rather than at a user's first boot.
+for (let i = 1; i < journal.entries.length; i++) {
+  const prev = journal.entries[i - 1]!;
+  const curr = journal.entries[i]!;
+  if (curr.when <= prev.when) {
+    console.error(`✖ ${curr.tag} (${curr.when}) is not after ${prev.tag} (${prev.when}) — Drizzle would skip a migration`);
+    process.exit(1);
+  }
+}
+
 /** `0014_redundant_whizzer` → `m0014RedundantWhizzer`, a valid identifier. */
 const ident = (tag: string) =>
   "m" + tag.replace(/[^a-zA-Z0-9]+(.)?/g, (_, c: string | undefined) => (c ? c.toUpperCase() : ""));

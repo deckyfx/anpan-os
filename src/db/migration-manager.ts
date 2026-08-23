@@ -111,6 +111,12 @@ export class MigrationManager {
     const pidFile = join(this.lockDir, "pid");
     const token = this.ownerToken();
 
+    // Deliberately synchronous I/O here and in the release below, against the usual
+    // preference for Bun.file/Bun.write: the ownership check and the write that follows it
+    // must not be separated by an await. An async heartbeat can also overlap itself, and
+    // the release runs in a finally block where an await point risks the process exiting
+    // between deciding the lock is ours and removing it.
+    //
     // Refresh the token while the work runs. The age check measures time since
     // acquisition, so a migration slower than LOCK_STALE_MS would otherwise look
     // abandoned: another process would reclaim the lock mid-run, and the original would
@@ -421,6 +427,24 @@ export class MigrationManager {
         .digest("hex"),
       tag: e.tag,
     }));
+
+    // Drizzle picks up where it left off by taking the newest created_at and applying
+    // everything whose folderMillis exceeds it. Two entries sharing a timestamp, or one
+    // going backwards, therefore make it skip a migration without reporting anything —
+    // the same silent-missing-table failure this whole check exists to catch, reached from
+    // the journal side. Refuse rather than migrate through an ordering we cannot trust.
+    for (let i = 1; i < buildSeq.length; i++) {
+      const prev = buildSeq[i - 1]!;
+      const curr = buildSeq[i]!;
+      if (curr.when <= prev.when) {
+        return {
+          pending: 0,
+          problem:
+            `migration ${curr.tag} is timestamped ${curr.when}, not after ` +
+            `${prev.tag} (${prev.when}) — Drizzle would skip a migration`,
+        };
+      }
+    }
 
     const sqlite = new Database(config.databasePath);
     sqlite.run("PRAGMA busy_timeout = 15000;");
