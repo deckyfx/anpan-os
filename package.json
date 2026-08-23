@@ -6,13 +6,14 @@
   "private": true,
   "scripts": {
     "dev": "bun run src/index.ts",
-    "build": "bun run typecheck && bun run build.ts",
+    "build": "bun run scripts/embed-migrations.ts && bun run typecheck && bun run build.ts",
     "deploy": "bun run build && ARCH=$(uname -m); [ \"$ARCH\" = \"aarch64\" ] && ARCH=arm64 || ARCH=x64; sudo systemctl stop anpan-os; sudo cp binaries/anpan-os-linux-$ARCH /usr/local/bin/anpan-os && sudo systemctl restart anpan-os && sudo journalctl -u anpan-os -n 20 --no-pager",
     "typecheck": "tsc --noEmit",
     "migrate": "bun run src/db/migrate.ts",
-    "db:generate": "drizzle-kit generate",
+    "db:generate": "drizzle-kit generate && bun run scripts/embed-migrations.ts",
     "db:studio": "drizzle-kit studio",
-    "test": "bun test --bail tests/"
+    "test": "bun test --bail tests/",
+    "embed-migrations": "bun run scripts/embed-migrations.ts"
   },
   "dependencies": {
     "@elysiajs/eden": "^1.4.9",
