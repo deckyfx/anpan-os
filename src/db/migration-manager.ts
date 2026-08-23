@@ -92,10 +92,11 @@ export class MigrationManager {
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
 
-        if (this.lockIsAbandoned()) {
-          this.reclaim();
-          continue;
-        }
+        // No `continue` here: reclaim() returns without acting when another process holds
+        // the reclaim mutex or the lock turned out to be live, and skipping the deadline
+        // and backoff below would spin hot and never time out.
+        if (this.lockIsAbandoned()) this.reclaim();
+
         if (Date.now() > deadline) {
           console.error(
             "❌ Another process is migrating and did not finish within 30s.",
@@ -166,6 +167,9 @@ export class MigrationManager {
     }
 
     try {
+      // Already gone — another reclaimer got here first. Without this, lockIsAbandoned()
+      // reports a missing directory as abandoned and we warn about reclaiming nothing.
+      try { statSync(this.lockDir); } catch { return; }
       if (!this.lockIsAbandoned()) return;   // replaced by a live owner since we looked
       console.warn("⚠️  Reclaiming an abandoned migration lock");
       rmSync(this.lockDir, { recursive: true, force: true });
