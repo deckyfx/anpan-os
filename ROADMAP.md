@@ -1,5 +1,40 @@
 # Roadmap
 
+## v0.10.0 — 2026-08-23
+
+### Bug fixes
+- **A fresh install created no tables at all.** The migrator read its SQL from a `drizzle/` folder beside the working directory. That folder exists in a source checkout and never in a deployment: the binary is a single file in `/usr/local/bin` run with `WorkingDirectory=/var/lib/anpan-os`. Every migration was therefore skipped, and the empty directory was reported as "No migration files found" — indistinguishable from healthy. The first query then failed with `no such table`. Migrations are now imported as text and compiled into the binary, from a manifest generated out of `drizzle/` at build time so it cannot drift from the folder it mirrors. Verified by deleting the `.sql` files and running the binary from an unrelated directory
+- **The Docker image update checker reported no updates, and would have been wrong if it had ever finished.** Two independent faults, both measured on a real host. It was *too slow to complete* — `docker manifest inspect --verbose` takes 18–49 s per image, so a 46-image sweep never reached the end before the SSE stream died. And it *compared incomparable digests*, reading a per-platform manifest digest against the index digest Docker records locally; for any multi-arch image those can never be equal, so a completed sweep would have flagged everything as outdated. Replaced with the registry HTTP API — token via `WWW-Authenticate` discovery, then `HEAD` the manifest and read `Docker-Content-Digest`, which is the index digest and therefore comparable. **45 images now take 8 seconds**
+- **Image counts disagreed with every other tool.** The summary reported a single figure from `/info` — 192 image records including intermediate layers, against `docker images`' 132 rows and 113 distinct images. Those are *sources*, not categories. The panel now reports `total` split into `active`, `dangling` and `unused`, which sum to the total
+- **Closing the tab left copies running.** `/copy` and `/move` now terminate whichever subprocess is in flight (rsync, its `cp` fallback, or `mv`) rather than leaving it going with nothing reading its output
+
+### New features
+- **The update checker is a background job.** The sweep used to belong to an HTTP request, so closing the tab cancelled it. It now belongs to the server: results are written to SQLite as each lands, routes only subscribe, and a reload shows real progress. Single-flight with an atomic force-restart; opportunistic scheduling where the dashboard asks on mount and the *server* decides on staleness, so several tabs cannot each trigger work; per-stack checks from the stack tile menu; 20 s per image, a 10-minute run watchdog, and runs left `running` by a killed process marked interrupted on boot
+- **Updates menu** — Check all / View report / Cancel, with live `12/45` progress, and a report showing what a bare badge could not: skipped digest-pinned images, registries that refused, and how long each update has been waiting. Stored results can be purged, refused server-side with 409 while a check runs
+- **Disk cleanup panel** — reclaimable space by category, with destructive categories held apart from safe ones and the headline total counting only the safe ones. Every prune names its category twice, once to select and once to confirm
+- **Bind paths on stack delete** — per-path checkboxes, unchecked by default, refusing shared roots, personal libraries, symlink escapes, and any path that contains or sits inside another stack's data
+- **Private registries** reuse `~/.docker/config.json`; credentials travel only to the registry's own host over HTTPS
+
+### Security
+Both predate this work — they arrived with the launch-URL code:
+- **`javascript:` URLs could reach the dashboard.** `scheme` was taken verbatim from stack metadata, which is user-editable and also populated by CasaOS imports, and the result is used as an anchor `href`. Restricted to http/https
+- **Addresses could smuggle a different host.** `good.com@evil.com` built `http://good.com@evil.com/`, which browsers resolve to **evil.com** — a tile that looks trusted and navigates elsewhere. Authorities containing `@ / ? #` are now rejected, as are malformed IPv6 literals and out-of-range ports
+
+### Improvements
+- **The migrator refuses rather than guessing.** It exits if the binary carries no migrations, if the database has more applied than the build knows about, or if an applied migration does not match the build at its position — compared by both content hash and journal timestamp, since either alone can collide. A journal whose timestamps are not strictly increasing is rejected at generation *and* before migrating, because Drizzle resumes from the newest timestamp and would silently skip an entry
+- **Concurrent starts are safe.** Materialise, preflight and migrate are held under one cross-process lock keyed by PID *and* process start time, so a recycled PID cannot deadlock every future start. Reclaiming an abandoned lock is itself serialised, since two waiters agreeing a lock is dead could otherwise delete each other's replacement. `PRAGMA journal_mode = WAL` is retried: it needs exclusive access and SQLite does not run the busy handler for it, so a `busy_timeout` does not cover it and simultaneous first starts died there. Eight processes racing one abandoned lock now give one migrator, 16 applied migrations and no crashes
+- Show/hide dotfiles in the file browser
+- Toasts moved below the top bar; a raw `alert()` replaced with a proper toast
+
+### Dependencies
+- **TypeScript 7.0.2**
+
+### Notes
+- Test suite **58 pass / 6 fail → 150 pass / 0 fail**. The six long-standing failures were three different situations: one intentional canary (now `test.failing`), two stale tests written against a `diskUsed`/`diskTotal` API that had moved to per-mount `disks[]`, and three that were **right all along** — compose name validation lived inside an SSE generator, so a rejected name returned `200 OK` with an error event in the body. A browser coped; a script would have read it as success
+- `HEAD` is deliberate in the update checker: Docker Hub charges a manifest `GET` against the pull limit but not a `HEAD` — measured, with remaining held at 100 across repeated HEADs and dropping by one on a GET — so a full sweep costs nothing against the quota. The `GET` fallback for registries that reject `HEAD` is counted and surfaced, because that path does cost budget
+
+---
+
 ## v0.9.0 — 2026-08-12
 
 ### Bug fixes
