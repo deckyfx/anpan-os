@@ -8,7 +8,7 @@ import {
   embeddedMigrations,
   embeddedMigrationCount,
 } from "./migrations-embedded";
-import { mkdirSync, rmSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, readFileSync, writeFileSync, statSync } from "node:fs";
 import { readdir, rm } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
@@ -116,14 +116,13 @@ export class MigrationManager {
     }
   }
 
-  /** True when the lock's owner is gone, or it is old enough to be presumed dead. */
   /**
    * Identify the lock owner as more than a PID.
    *
    * A PID alone is ambiguous: the owner can die and the number be reused, after which a
    * liveness check reports "held" forever and every start fails until someone deletes a
-   * directory they do not know exists. Linux exposes a process start time in field 22 of
-   * /proc/<pid>/stat, and the pair is unique for as long as the machine is up.
+   * directory they have no reason to know about. Linux exposes a process start time in
+   * field 22 of /proc/<pid>/stat, and the pair is unique for as long as the machine is up.
    */
   private static ownerToken(): string {
     return `${process.pid}:${this.startTimeOf(process.pid) ?? "?"}`;
@@ -140,39 +139,70 @@ export class MigrationManager {
     }
   }
 
-  /** True when the lock's owner is gone, or it is old enough to be presumed dead. */
+  /**
+   * Grace period for a lock directory that exists but carries no token yet.
+   *
+   * mkdir and the token write cannot be one operation, so there is a window in which a
+   * competing process sees the directory and no owner. Treating that as abandoned would
+   * let it delete a lock another process is in the middle of publishing, and both would
+   * then migrate.
+   */
+  private static readonly LOCK_PUBLISH_GRACE_MS = 15_000;
+
+  /**
+   * True when the lock's owner is gone.
+   *
+   * A live owner is never reclaimed on age alone. The heartbeat can be delayed by
+   * synchronous migration work, and reclaiming on that basis would evict a process that
+   * is still applying migrations. Age is the fallback only where ownership genuinely
+   * cannot be established.
+   */
   private static lockIsAbandoned(): boolean {
-    let recordedPid: number | null = null;
-    let recordedStart: string | null = null;
+    let raw: string | null = null;
     try {
-      const [pidPart, startPart] = readFileSync(join(this.lockDir, "pid"), "utf8").trim().split(":");
-      const parsed = Number.parseInt(pidPart ?? "", 10);
-      if (Number.isFinite(parsed) && parsed > 0) recordedPid = parsed;
-      recordedStart = startPart && startPart !== "?" ? startPart : null;
+      raw = readFileSync(join(this.lockDir, "pid"), "utf8").trim();
     } catch {
-      /* unreadable — fall through to the age check */
+      // Being published right now, or left behind empty. Only the second is reclaimable,
+      // and only once the publish window has passed.
+      return this.lockOlderThan(this.LOCK_PUBLISH_GRACE_MS);
     }
 
-    if (recordedPid !== null) {
-      let alive = true;
-      try { process.kill(recordedPid, 0); } catch { alive = false; }
-      if (!alive) return true;
+    const [pidPart, startPart] = raw.split(":");
+    const pid = Number.parseInt(pidPart ?? "", 10);
+    if (!Number.isFinite(pid) || pid <= 0) return this.lockOlderThan(this.LOCK_STALE_MS);
 
-      // Alive, but the same process? A start time that does not match means the number
-      // was recycled and the real owner is long gone.
-      const currentStart = this.startTimeOf(recordedPid);
-      if (recordedStart && currentStart && recordedStart !== currentStart) return true;
+    let alive = true;
+    try { process.kill(pid, 0); } catch { alive = false; }
+    if (!alive) return true;                       // owner is gone: reclaimable
 
-      // Same process, or start times unavailable — fall through to the age check rather
-      // than declaring the lock held indefinitely.
+    const recordedStart = startPart && startPart !== "?" ? startPart : null;
+    const currentStart  = this.startTimeOf(pid);
+
+    // Same PID and same start time: definitively the live owner. Never reclaim, however
+    // old the token looks — a slow migration must not be interrupted.
+    if (recordedStart && currentStart) return recordedStart !== currentStart;
+
+    // Start times unavailable, so a recycled PID cannot be ruled out. Age decides.
+    return this.lockOlderThan(this.LOCK_STALE_MS);
+  }
+
+  /**
+   * Whether the lock was last touched longer ago than `ms`.
+   *
+   * Uses statSync rather than Bun.file().lastModified: the latter does not throw for a
+   * missing file, and the value it returns makes every comparison here false, which turned
+   * an abandoned empty lock into one that could never be reclaimed.
+   */
+  private static lockOlderThan(ms: number): boolean {
+    // Token file if it exists (the heartbeat keeps it fresh), else the directory itself.
+    for (const path of [join(this.lockDir, "pid"), this.lockDir]) {
+      try {
+        return Date.now() - statSync(path).mtimeMs > ms;
+      } catch {
+        continue;
+      }
     }
-
-    try {
-      const age = Date.now() - Bun.file(join(this.lockDir, "pid")).lastModified;
-      return age > this.LOCK_STALE_MS;
-    } catch {
-      return true; // no pid file at all
-    }
+    return true;                                   // lock vanished from under us
   }
 
   /**
