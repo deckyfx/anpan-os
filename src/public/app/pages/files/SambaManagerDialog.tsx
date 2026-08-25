@@ -24,7 +24,7 @@ interface Props {
 
 function SambaManagerDialogInner({ onClose }: Omit<Props, "open">) {
   const {
-    shares, sambaSetupPresent, sambaError,
+    shares, sambaSetupPresent, sambaError, sambaBackend,
     loadShares, checkSambaSetup, doSambaSetup, doSambaUnpatch, doSambaRebuild,
     reloadSmbd, reloadingSmbd,
     setSambaError, setRemoveShareTarget, removeShare, takeOverShare,
@@ -90,7 +90,27 @@ function SambaManagerDialogInner({ onClose }: Omit<Props, "open">) {
     >
       <div className="space-y-5 py-1">
 
-        {/* ── smb.conf integration ───────────────────────────────────────── */}
+        {/* ── Backend status ─────────────────────────────────────────────────
+            Which server publishes these shares, and whether it is ready to. Named
+            explicitly because the answer changes what the rest of this dialog can do —
+            and because "my shares do not appear" is almost always answered here. */}
+        <section>
+          <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">
+            {sambaBackend?.providerName ?? "Share Backend"}
+          </h3>
+          {sambaBackend?.detail && (
+            <div className="rounded-lg bg-gray-800/60 border border-gray-700 px-4 py-3 mb-3">
+              <p className={`text-xs ${sambaBackend.ready ? "text-gray-400" : "text-amber-400"}`}>
+                {sambaBackend.detail}
+              </p>
+            </div>
+          )}
+        </section>
+
+        {/* ── smb.conf integration ─────────────────────────────────────────────
+            Samba-only. Apple's server has no config file to patch, so offering a
+            "Patch smb.conf" button there would be a control that cannot do anything. */}
+        {sambaBackend?.capabilities?.requiresSetup !== false && (
         <section>
           <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">smb.conf Integration</h3>
           <div className="rounded-lg bg-gray-800/60 border border-gray-700 divide-y divide-gray-700">
@@ -121,6 +141,7 @@ function SambaManagerDialogInner({ onClose }: Omit<Props, "open">) {
             </div>
           </div>
         </section>
+        )}
 
         {/* ── Config file ────────────────────────────────────────────────── */}
         <section>

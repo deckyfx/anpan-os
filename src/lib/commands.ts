@@ -107,6 +107,16 @@ const TOOLS = {
       darwin: "Built-in",
     },
   },
+  sharing: {
+    name:        "sharing",
+    description: "macOS sharepoint manager",
+    feature:     "samba — native share management (macOS)",
+    binary:      { darwin: "sharing" }, // Linux publishes shares through smb.conf instead
+    installHint: {
+      linux:  "Not applicable — shares are defined in smb.conf on Linux",
+      darwin: "Built-in (/usr/sbin/sharing)",
+    },
+  },
   launchctl: {
     name:        "launchctl",
     description: "launchd service manager",

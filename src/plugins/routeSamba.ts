@@ -1,433 +1,171 @@
+/**
+ * Share management routes.
+ *
+ * SQLite stays the source of truth for the shares anpan-os owns; the active provider is
+ * how they reach an SMB server. Which provider that is depends on the host — Samba where
+ * it is installed, macOS native sharing otherwise — and these routes do not know or care
+ * which, beyond reporting its capabilities to the browser.
+ *
+ * Every mutation writes the database first and publishes second, rolling the database back
+ * if publishing fails. The alternative ordering leaves a share visible on the network that
+ * anpan-os has no record of.
+ */
+
 import { Elysia, t } from "elysia";
-import { mkdirSync } from "node:fs";
-import { stat, realpath } from "node:fs/promises";
+import { stat }      from "node:fs/promises";
 import { authGuard } from "./authGuard";
-import { config } from "../config";
-import { envConfig } from "../env-config";
-import { commands } from "../lib/commands";
-import { IS_LINUX, IS_MACOS, detectSamba } from "../lib/platform";
 import { SambaShareStore } from "../stores/samba-share-store";
+import {
+  ShareError, requireShareProvider, shareProvider, statusFor,
+  type DiscoveredShare, type ShareDefinition, type ShareProvider,
+} from "../lib/shares";
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+/** Re-exported for callers that still speak in this shape. */
+export type SambaShare = DiscoveredShare;
 
-export interface SambaShare {
-  name:       string;
-  path:       string;
-  comment:    string;
-  readOnly:   boolean;
-  browseable: boolean;
-  /** Allow unauthenticated (guest) access from Windows. */
-  guestOk:    boolean;
-  /** "anpan" = managed by anpan-os | "external" = from another config (casaos, etc.) */
-  source:     "anpan" | "external";
-  /** Absolute path to the conf file this share was read from (external shares only). */
-  sourceFile?: string;
-}
+// ─── Helpers ─────────────────────────────────────────────────────────────────
 
-// ─── Share-section parser ─────────────────────────────────────────────────────
+interface Settable { status?: number | string }
 
-/** Parse a conf file that contains only [ShareName] sections (no [global]). */
-function parseShares(raw: string, source: SambaShare["source"] = "anpan"): SambaShare[] {
-  const shares: SambaShare[]         = [];
-  let current:  Partial<Omit<SambaShare, "source">> | null = null;
-
-  function flush() {
-    if (current?.name) {
-      shares.push({
-        name:       current.name,
-        path:       current.path       ?? "",
-        comment:    current.comment    ?? "",
-        readOnly:   current.readOnly   ?? false,
-        browseable: current.browseable ?? true,
-        guestOk:    current.guestOk    ?? false,
-        source,
-      });
+/**
+ * Run an operation against the active provider, turning ShareError into a status code.
+ *
+ * The alternative — every route catching and classifying for itself — is how the previous
+ * version ended up answering 500 to a duplicate name and to a missing SMB server alike.
+ */
+async function withProvider<T>(
+  set: Settable,
+  fn: (provider: ShareProvider) => Promise<T>,
+): Promise<T | { error: string }> {
+  try {
+    return await fn(await requireShareProvider());
+  } catch (e) {
+    if (e instanceof ShareError) {
+      set.status = statusFor(e.kind);
+      return { error: e.message };
     }
-    current = null;
+    set.status = 500;
+    return { error: e instanceof Error ? e.message : "Share operation failed" };
   }
-
-  for (const line of raw.split("\n")) {
-    const trimmed    = line.trim();
-    const sectionMatch = trimmed.match(/^\[(.+)\]$/);
-
-    if (sectionMatch) {
-      const sectionName = sectionMatch[1]!;
-      flush();
-      if (sectionName.toLowerCase() !== "global") {
-        current = { name: sectionName };
-      }
-      continue;
-    }
-
-    if (current) {
-      const kv = trimmed.match(/^([^=]+?)\s*=\s*(.*)$/);
-      if (kv) {
-        const key = kv[1]!.trim().toLowerCase().replace(/\s+/g, " ");
-        const val = kv[2]!.trim();
-        switch (key) {
-          case "path":       current.path       = val; break;
-          case "comment":    current.comment    = val; break;
-          case "read only":  current.readOnly   = val.toLowerCase() === "yes"; break;
-          case "browseable": current.browseable = val.toLowerCase() !== "no";  break;
-          case "guest ok":   current.guestOk    = val.toLowerCase() === "yes"; break;
-        }
-      }
-    }
-  }
-  flush();
-  return shares;
 }
 
-/** Serialise an array of shares to conf-file text (no [global]). */
-function sharesToConf(shares: SambaShare[]): string {
-  return shares.map((s) => [
-    `[${s.name}]`,
-    `   comment = ${s.comment}`,
-    `   path = ${s.path}`,
-    `   browseable = ${s.browseable ? "Yes" : "No"}`,
-    `   read only = ${s.readOnly ? "Yes" : "No"}`,
-    `   guest ok = ${s.guestOk ? "Yes" : "No"}`,
-    `   create mask = 0644`,
-    `   directory mask = 0755`,
-  ].join("\n")).join("\n\n");
-}
-
-// ─── Our managed config (RUNTIME_CONFIG_DIR/samba.conf) ──────────────────────
-
-async function writeAnpanShares(shares: SambaShare[]): Promise<void> {
-  mkdirSync(envConfig.RUNTIME_CONFIG_DIR, { recursive: true });
-  const text = sharesToConf(shares);
-  await Bun.write(config.sambaSharesPath, text ? text + "\n" : "");
-}
-
-/** Rebuild the conf file from SQLite — source of truth. */
-async function rebuildConfFromDb(): Promise<void> {
+/** The shares anpan-os owns, straight from SQLite. */
+async function managedShares(): Promise<ShareDefinition[]> {
   const rows = await SambaShareStore.findAll();
-  const shares: SambaShare[] = rows.map((r) => ({
+  return rows.map(r => ({
     name:       r.name,
     path:       r.path,
     comment:    r.comment,
     readOnly:   r.readOnly,
     browseable: r.browseable,
     guestOk:    r.guestOk,
-    source:     "anpan",
   }));
-  await writeAnpanShares(shares);
 }
 
-// ─── System smb.conf include management ──────────────────────────────────────
-
-// Written as a comment line above the include so the path has no inline comment —
-// samba's include parser does not strip inline # comments from the path value.
-const INCLUDE_MARKER = "# managed by anpan-os";
-
-/** The two-line block we inject into smb.conf (inside an explicit [global] for scope). */
-function includeBlock(): string {
-  return `[global]\n   ${INCLUDE_MARKER}\n   include = ${config.sambaSharesPath}`;
+/** Publish the current database state through the provider. */
+async function publish(provider: ShareProvider): Promise<void> {
+  await provider.sync(await managedShares());
 }
-
-async function readSystemConf(): Promise<string | null> {
-  const file = Bun.file(config.smbConfPath);
-  if (!(await file.exists())) return null;
-  return file.text();
-}
-
-/** True if our managed block is already present in smb.conf (detects any path, not just current). */
-async function isIncludePresent(): Promise<boolean> {
-  const raw = await readSystemConf();
-  if (!raw) return false;
-  return raw.includes(INCLUDE_MARKER);
-}
-
-/**
- * Remove any injected anpan-os block from smb.conf text.
- * Matches the exact 3-line structure that includeBlock() produces:
- *   [global]
- *      # managed by anpan-os
- *      include = <sambaSharesPath>
- * Only those three consecutive lines are removed; unrelated content is untouched.
- */
-function stripAnpanBlock(raw: string): string {
-  const lines = raw.split("\n");
-  const result: string[] = [];
-  let i = 0;
-  while (i < lines.length) {
-    if (
-      lines[i]?.trim() === "[global]" &&
-      lines[i + 1]?.includes(INCLUDE_MARKER) &&
-      lines[i + 2]?.trim().startsWith("include =")
-    ) {
-      i += 3; // skip the entire injected block
-      continue;
-    }
-    result.push(lines[i]!);
-    i++;
-  }
-  return result.join("\n");
-}
-
-/**
- * Inject our include block into smb.conf (or update a stale one).
- * Requires root write permission.
- */
-async function addIncludeToSystemConf(): Promise<void> {
-  const raw = await readSystemConf();
-  if (!raw) throw new Error(`${config.smbConfPath} not found`);
-  if (await isIncludePresent()) return;
-  const cleaned = stripAnpanBlock(raw);
-  await Bun.write(config.smbConfPath, cleaned.trimEnd() + "\n" + includeBlock() + "\n");
-}
-
-/**
- * Remove our include block from smb.conf.
- * Requires root write permission.
- */
-async function removeIncludeFromSystemConf(): Promise<void> {
-  const raw = await readSystemConf();
-  if (!raw) throw new Error(`${config.smbConfPath} not found`);
-  if (!raw.includes(INCLUDE_MARKER)) return;
-  await Bun.write(config.smbConfPath, stripAnpanBlock(raw).trimEnd() + "\n");
-}
-
-// ─── Reload smbd ─────────────────────────────────────────────────────────────
-
-/**
- * Rethrows unless the error looks like "smbd not running / not loaded".
- * exit 1 = service inactive; exit 5 = unit not loaded (systemd).
- * Passed as a .catch() handler so other failures (permission, bad path, etc.)
- * still propagate and surface as API errors.
- */
-function rethrowUnlessNotRunning(e: unknown): void {
-  const msg = e instanceof Error ? e.message : String(e);
-  if (/exited [15]$/.test(msg)) return;
-  throw e;
-}
-
-/**
- * Ask a running smbd to re-read its configuration.
- *
- * Ordered by how little they disturb existing connections. smbcontrol is the right tool
- * and works identically on both platforms — but it ships with samba, and samba is not
- * installed by default on either, so it cannot be assumed. The fallbacks are the service
- * manager, which differs: systemd can reload in place, while launchd has no reload verb
- * at all and a restart is the only option.
- *
- * Doing nothing is a legitimate outcome. The share file on disk is already correct; a
- * host with no samba installed has nothing to tell, and returning an error there would
- * report a failure for an operation that fully succeeded.
- */
-async function reloadSmbd(): Promise<void> {
-  const smbcontrol = await commands.which("smbcontrol");
-  if (smbcontrol) {
-    const proc = Bun.spawn([smbcontrol, "smbd", "reload-config"], { stdout: "pipe", stderr: "pipe" });
-    const code = await proc.exited;
-    if (code !== 0) throw new Error(`smbcontrol exited ${code}`);
-    return;
-  }
-
-  if (IS_LINUX) {
-    const systemctl = await commands.which("systemctl");
-    if (!systemctl) return;
-    const proc = Bun.spawn([systemctl, "reload", "smbd"], { stdout: "pipe", stderr: "pipe" });
-    const code = await proc.exited;
-    if (code !== 0) throw new Error(`systemctl reload smbd exited ${code}`);
-    return;
-  }
-
-  if (IS_MACOS) {
-    // Homebrew's samba first: if the user installed it, that is the smbd serving our
-    // shares, and `brew services` owns its plist.
-    const brew = await commands.which("brew");
-    if (brew) {
-      const proc = Bun.spawn([brew, "services", "restart", "samba"], { stdout: "pipe", stderr: "pipe" });
-      if (await proc.exited === 0) return;
-      // Not installed under brew — fall through to Apple's daemon.
-    }
-
-    // Apple's own sharing daemon. kickstart -k restarts it if it is loaded and reports a
-    // clean failure if it is not, which is exactly the distinction we want.
-    const launchctl = await commands.which("launchctl");
-    if (!launchctl) return;
-    const proc = Bun.spawn([launchctl, "kickstart", "-k", "system/com.apple.smbd"], { stdout: "pipe", stderr: "pipe" });
-    const code = await proc.exited;
-    // 3 = "no such service" — Apple's file sharing is simply switched off, which is not
-    // an error in a request that only rewrote a config file.
-    if (code !== 0 && code !== 3) throw new Error(`launchctl kickstart smbd exited ${code}`);
-  }
-}
-
-// ─── Aggregate all shares from all included config files ─────────────────────
-
-async function readAllShares(): Promise<SambaShare[]> {
-  const rows = await SambaShareStore.findAll();
-  const anpan: SambaShare[] = rows.map((r) => ({
-    name:       r.name,
-    path:       r.path,
-    comment:    r.comment,
-    readOnly:   r.readOnly,
-    browseable: r.browseable,
-    guestOk:    r.guestOk,
-    source:     "anpan",
-  }));
-
-  // Resolve our own conf path to its canonical (symlink-free) form so
-  // the string comparison below works even when smb.conf contains a
-  // different spelling (e.g. a symlink alias).
-  const ownConfReal = await realpath(config.sambaSharesPath).catch(() => config.sambaSharesPath);
-
-  const rawConf = await readSystemConf();
-  const external: SambaShare[] = [];
-
-  if (rawConf) {
-    const includePattern = /^[ \t]*include\s*=\s*(.+?)(?:\s*#.*)?$/gm;
-    let match: RegExpExecArray | null;
-    while ((match = includePattern.exec(rawConf)) !== null) {
-      const includePath = match[1]!.trim();
-      const includeReal = await realpath(includePath).catch(() => includePath);
-      if (includeReal === ownConfReal) continue;
-      try {
-        const file = Bun.file(includePath);
-        if (await file.exists()) {
-          const shares = parseShares(await file.text(), "external");
-          external.push(...shares.map((s) => ({ ...s, sourceFile: includePath })));
-        }
-      } catch { /* unreadable — skip */ }
-    }
-  }
-
-  const anpanNames = new Set(anpan.map((s) => s.name));
-  return [...anpan, ...external.filter((s) => !anpanNames.has(s.name))];
-}
-
-// ─── Helpers for take-over ────────────────────────────────────────────────────
-
-/**
- * Remove the [shareName] section from a samba conf file's text.
- * A section spans from its [header] line up to (but not including) the next
- * [header] line or end-of-file.  Blank lines between sections are preserved.
- */
-function removeShareSection(raw: string, shareName: string): string {
-  const lines  = raw.split("\n");
-  const result: string[] = [];
-  let   skip   = false;
-
-  for (const line of lines) {
-    const trimmed      = line.trim();
-    const sectionMatch = trimmed.match(/^\[(.+)\]$/);
-    if (sectionMatch) {
-      skip = sectionMatch[1] === shareName;
-    }
-    if (!skip) result.push(line);
-  }
-
-  return result.join("\n");
-}
-
-// ─── Plugin ───────────────────────────────────────────────────────────────────
 
 export function sambaPlugin(jwtSecret: string) {
   return new Elysia({ prefix: "/api/samba" })
     .use(authGuard(jwtSecret))
 
     /**
-     * Refuse every write when no server would read the result.
+     * Refuse writes when nothing would read the result.
      *
-     * On a stock Mac /usr/sbin/smbd exists and is running, so a naive check passes and the
-     * share is written to a file Apple's SMBX never opens. The user is then told the share
-     * was created, sees it listed, and finds nothing on the network — with no way to tell
-     * that anpan-os was never in a position to make it work. Failing the request is the
-     * only honest answer.
-     *
-     * Reads are left alone: listing what is configured stays useful, and the UI uses it to
-     * explain the situation.
+     * Reads stay available so the UI can explain the situation; only mutations are
+     * blocked. Without this, a host with no usable SMB server accepts a share, stores it,
+     * reports success, and serves nothing — the failure mode that is hardest to diagnose
+     * because every screen says it worked.
      */
     .onBeforeHandle(async ({ set, request }) => {
       if (request.method === "GET") return;
-      const smb = await detectSamba();
-      if (!smb.manageable) {
-        set.status = 501;
-        return { error: smb.reason ?? "Samba is not available on this system" };
+      if (await shareProvider()) return;
+      try {
+        await requireShareProvider();
+      } catch (e) {
+        set.status = e instanceof ShareError ? statusFor(e.kind) : 501;
+        return { error: e instanceof Error ? e.message : "No SMB server available" };
       }
     })
 
     // GET /api/samba/shares — our managed shares (from SQLite)
-    .get("/shares", async () => {
+    .get("/shares", async ({ set }) => {
       try {
-        const rows = await SambaShareStore.findAll();
-        return rows.map((r) => ({
-          name:       r.name,
-          path:       r.path,
-          comment:    r.comment,
-          readOnly:   r.readOnly,
-          browseable: r.browseable,
-          guestOk:    r.guestOk,
-          source:     "anpan" as const,
-        }));
+        return (await managedShares()).map(s => ({ ...s, source: "anpan" as const }));
       } catch {
-        return Response.json({ error: "Failed to read samba shares" }, { status: 500 });
+        set.status = 500;
+        return { error: "Failed to read shares" };
       }
     })
 
-    // GET /api/samba/all-shares — all shares from all sources
-    .get("/all-shares", async () => {
+    /**
+     * GET /api/samba/all-shares — everything this host publishes.
+     *
+     * Ownership is decided here rather than by the provider: only anpan-os knows which
+     * names are in its database, and a backend like Open Directory records no author.
+     */
+    .get("/all-shares", async ({ set }) => {
+      const provider = await shareProvider();
+      if (!provider) return [];
       try {
-        return await readAllShares();
-      } catch {
-        return Response.json({ error: "Failed to read samba config" }, { status: 500 });
+        const ours      = await managedShares();
+        const ourNames  = new Set(ours.map(s => s.name));
+        const published = await provider.list();
+
+        // Our own rows win: they carry the comment, which some backends cannot store.
+        const external = published
+          .filter(s => !ourNames.has(s.name))
+          .map(s => ({ ...s, source: "external" as const }));
+
+        return [...ours.map(s => ({ ...s, source: "anpan" as const })), ...external];
+      } catch (e) {
+        set.status = 500;
+        return { error: e instanceof Error ? e.message : "Failed to read shares" };
       }
     })
 
-    // POST /api/samba/shares — add a new share (writes SQLite + conf file)
+    // POST /api/samba/shares — add a new share
     .post("/shares", async ({ body, set }) => {
-      try {
-        if (!/^[a-zA-Z0-9_\-]+$/.test(body.name)) {
-          set.status = 422;
-          return { error: "Share name may only contain letters, numbers, hyphens, and underscores" };
-        }
+      if (!/^[a-zA-Z0-9_\-]+$/.test(body.name)) {
+        set.status = 422;
+        return { error: "Share name may only contain letters, numbers, hyphens, and underscores" };
+      }
 
-        const pathStat = await stat(body.path).catch(() => null);
-        if (!pathStat) {
-          set.status = 422;
-          return { error: "Path does not exist" };
-        }
-        if (!pathStat.isDirectory()) {
-          set.status = 422;
-          return { error: "Path is not a directory" };
-        }
+      const pathStat = await stat(body.path).catch(() => null);
+      if (!pathStat)              { set.status = 422; return { error: "Path does not exist" }; }
+      if (!pathStat.isDirectory()){ set.status = 422; return { error: "Path is not a directory" }; }
 
-        if (/[\n\r]/.test(body.path) || /[\n\r]/.test(body.comment ?? "")) {
-          set.status = 422;
-          return { error: "path and comment must not contain newline characters" };
-        }
+      if (/[\n\r]/.test(body.path) || /[\n\r]/.test(body.comment ?? "")) {
+        set.status = 422;
+        return { error: "path and comment must not contain newline characters" };
+      }
 
-        const existing = await SambaShareStore.findByName(body.name);
-        if (existing) {
-          set.status = 409;
-          return { error: "Share name already exists" };
-        }
+      if (await SambaShareStore.findByName(body.name)) {
+        set.status = 409;
+        return { error: "Share name already exists" };
+      }
 
+      return withProvider(set, async (provider) => {
         const created = await SambaShareStore.create({
           name:       body.name,
           path:       body.path,
-          comment:    body.comment ?? "",
-          readOnly:   body.readOnly  ?? false,
+          comment:    body.comment  ?? "",
           browseable: true,
-          guestOk:    body.guestOk   ?? true,
+          readOnly:   body.readOnly ?? false,
+          guestOk:    body.guestOk  ?? true,
         });
-
         try {
-          await rebuildConfFromDb();
-          await reloadSmbd().catch(rethrowUnlessNotRunning);
+          await publish(provider);
         } catch (e) {
-          // Roll back the DB insert so SQLite and conf stay in sync.
+          // Keep SQLite and the backend in step: a row nothing published is a share the
+          // user is told exists and cannot reach.
           await SambaShareStore.deleteByName(created.name).catch(() => {});
           throw e;
         }
         return { ok: true };
-      } catch (e) {
-        set.status = 500;
-        return { error: e instanceof Error ? e.message : "Failed to update samba config" };
-      }
+      });
     }, {
       body: t.Object({
         name:     t.String({ minLength: 1 }),
@@ -442,24 +180,21 @@ export function sambaPlugin(jwtSecret: string) {
     .patch("/shares/:name", async ({ params, body, set }) => {
       if (Object.keys(body).length === 0) {
         set.status = 422;
-        return { error: "At least one of comment, readOnly, or browseable must be provided" };
+        return { error: "At least one field must be provided" };
       }
-      try {
-        if (body.comment !== undefined && /[\n\r]/.test(body.comment)) {
-          set.status = 422;
-          return { error: "comment must not contain newline characters" };
-        }
+      if (body.comment !== undefined && /[\n\r]/.test(body.comment)) {
+        set.status = 422;
+        return { error: "comment must not contain newline characters" };
+      }
 
-        const before = await SambaShareStore.findByName(params.name);
-        if (!before) { set.status = 404; return { error: "Share not found" }; }
+      const before = await SambaShareStore.findByName(params.name);
+      if (!before) { set.status = 404; return { error: "Share not found" }; }
 
+      return withProvider(set, async (provider) => {
         await SambaShareStore.updateByName(params.name, body);
-
         try {
-          await rebuildConfFromDb();
-          await reloadSmbd().catch(rethrowUnlessNotRunning);
+          await publish(provider);
         } catch (e) {
-          // Roll back to the previous field values.
           await SambaShareStore.updateByName(params.name, {
             comment:    before.comment,
             readOnly:   before.readOnly,
@@ -469,10 +204,7 @@ export function sambaPlugin(jwtSecret: string) {
           throw e;
         }
         return { ok: true };
-      } catch (e) {
-        set.status = 500;
-        return { error: e instanceof Error ? e.message : "Failed to update samba config" };
-      }
+      });
     }, {
       body: t.Object({
         comment:    t.Optional(t.String()),
@@ -482,76 +214,55 @@ export function sambaPlugin(jwtSecret: string) {
       }),
     })
 
-    // POST /api/samba/shares/take-over/:name — import an external share into anpan-os management
+    // POST /api/samba/shares/take-over/:name — adopt a share defined elsewhere
     .post("/shares/take-over/:name", async ({ params, set }) => {
-      try {
-        const allShares = await readAllShares();
-        const target = allShares.find((s) => s.name === params.name && s.source === "external");
-        if (!target) {
-          set.status = 404;
-          return { error: "External share not found" };
+      return withProvider(set, async (provider) => {
+        const ourNames = new Set((await managedShares()).map(s => s.name));
+        if (ourNames.has(params.name)) {
+          throw new ShareError("conflict", "Share name is already managed by anpan-os");
         }
-        const existing = await SambaShareStore.findByName(target.name);
-        if (existing) {
-          set.status = 409;
-          return { error: "Share name is already managed by anpan-os" };
-        }
+
+        const target = (await provider.list()).find(s => s.name === params.name);
+        if (!target) throw new ShareError("not-found", "External share not found");
 
         await SambaShareStore.create({
           name:       target.name,
           path:       target.path,
-          comment:    `AnpanOS share ${target.name}`,
+          // Backends that cannot store a comment return an empty one; give it a usable
+          // default rather than leaving the share unlabelled in our own UI.
+          comment:    target.comment || `AnpanOS share ${target.name}`,
           readOnly:   target.readOnly,
           browseable: target.browseable,
           guestOk:    target.guestOk,
         });
 
-        // Capture original external conf content before modifying it so we can
-        // restore it if something fails after the write.
-        let originalSrcText: string | undefined;
-
         try {
-          // Remove the share section from the external conf file so samba
-          // doesn't see duplicate [ShareName] definitions.
-          if (target.sourceFile) {
-            const srcFile = Bun.file(target.sourceFile);
-            if (await srcFile.exists()) {
-              originalSrcText = await srcFile.text();
-              const cleaned = removeShareSection(originalSrcText, target.name);
-              await Bun.write(target.sourceFile, cleaned);
-            }
-          }
-
-          await rebuildConfFromDb();
-          await reloadSmbd().catch(rethrowUnlessNotRunning);
+          await provider.adopt(target);
+          await publish(provider);
         } catch (e) {
-          // Restore the external conf if we modified it.
-          if (originalSrcText !== undefined && target.sourceFile) {
-            await Bun.write(target.sourceFile, originalSrcText).catch(() => {});
-          }
           await SambaShareStore.deleteByName(target.name).catch(() => {});
           throw e;
         }
         return { ok: true };
-      } catch (e) {
-        set.status = 500;
-        return { error: e instanceof Error ? e.message : "Failed to take over share" };
-      }
+      });
     })
 
     // DELETE /api/samba/shares/:name
     .delete("/shares/:name", async ({ params, set }) => {
-      try {
-        const before = await SambaShareStore.findByName(params.name);
-        if (!before) { set.status = 404; return { error: "Share not found" }; }
+      const before = await SambaShareStore.findByName(params.name);
+      if (!before) { set.status = 404; return { error: "Share not found" }; }
 
+      return withProvider(set, async (provider) => {
         await SambaShareStore.deleteByName(params.name);
-
         try {
-          await rebuildConfFromDb();
-          await reloadSmbd().catch(rethrowUnlessNotRunning);
+          // sync() only reconciles names it is given, so a removed share must also be
+          // withdrawn explicitly — otherwise it stays published with no record of it.
+          await provider.remove(params.name).catch((e) => {
+            if (e instanceof ShareError && e.kind === "not-found") return;
+            throw e;
+          });
+          await publish(provider);
         } catch (e) {
-          // Roll back: re-insert the deleted share.
           await SambaShareStore.create({
             name:       before.name,
             path:       before.path,
@@ -563,65 +274,52 @@ export function sambaPlugin(jwtSecret: string) {
           throw e;
         }
         return { ok: true };
-      } catch (e) {
-        set.status = 500;
-        return { error: e instanceof Error ? e.message : "Failed to update samba config" };
-      }
+      });
     })
 
-    // GET /api/samba/setup-status
+    /**
+     * GET /api/samba/setup-status — what backend is in charge and whether it is ready.
+     *
+     * `capabilities` is the field the UI needs most: it decides which inputs to render, so
+     * a backend that cannot store a comment is never offered one to discard.
+     */
     .get("/setup-status", async () => {
-      try {
-        const present    = await isIncludePresent();
-        const sharesPath = config.sambaSharesPath;
-        const smbConf    = config.smbConfPath;
-        return { present, sharesPath, smbConf };
-      } catch (e) {
-        return Response.json({ error: e instanceof Error ? e.message : "Unknown error" }, { status: 500 });
+      const provider = await shareProvider();
+      if (!provider) {
+        return {
+          provider: null,
+          present:  false,
+          ready:    false,
+          detail:   "No SMB server is available on this system.",
+          fixable:  false,
+        };
       }
+      const status = await provider.status();
+      return {
+        provider:     provider.id,
+        providerName: provider.label,
+        capabilities: provider.capabilities,
+        // Retained under its old name so existing clients keep working.
+        present:      status.ready,
+        ready:        status.ready,
+        detail:       status.detail,
+        fixable:      status.fixable,
+      };
     })
 
-    // POST /api/samba/setup — patch smb.conf to include our shares file
-    .post("/setup", async ({ set }) => {
-      try {
-        await addIncludeToSystemConf();
-        return { ok: true };
-      } catch (e) {
-        set.status = 500;
-        return { error: e instanceof Error ? e.message : "Failed to patch smb.conf" };
-      }
-    })
+    // POST /api/samba/setup — one-time wiring, where the backend needs it
+    .post("/setup", async ({ set }) =>
+      withProvider(set, async (provider) => { await provider.setup(); return { ok: true }; }))
 
-    // DELETE /api/samba/setup — remove our include directive from smb.conf
-    .delete("/setup", async ({ set }) => {
-      try {
-        await removeIncludeFromSystemConf();
-        return { ok: true };
-      } catch (e) {
-        set.status = 500;
-        return { error: e instanceof Error ? e.message : "Failed to unpatch smb.conf" };
-      }
-    })
+    // DELETE /api/samba/setup — undo it
+    .delete("/setup", async ({ set }) =>
+      withProvider(set, async (provider) => { await provider.teardown(); return { ok: true }; }))
 
-    // POST /api/samba/rebuild — rebuild conf file from SQLite
-    .post("/rebuild", async ({ set }) => {
-      try {
-        await rebuildConfFromDb();
-        return { ok: true };
-      } catch (e) {
-        set.status = 500;
-        return { error: e instanceof Error ? e.message : "Failed to rebuild samba config" };
-      }
-    })
+    // POST /api/samba/rebuild — republish everything from SQLite
+    .post("/rebuild", async ({ set }) =>
+      withProvider(set, async (provider) => { await publish(provider); return { ok: true }; }))
 
-    // POST /api/samba/reload — reload smbd
-    .post("/reload", async ({ set }) => {
-      try {
-        await reloadSmbd();
-        return { ok: true };
-      } catch (e) {
-        set.status = 500;
-        return { error: e instanceof Error ? e.message : "Failed to reload smbd" };
-      }
-    });
+    // POST /api/samba/reload — ask the server to re-read its configuration
+    .post("/reload", async ({ set }) =>
+      withProvider(set, async (provider) => { await provider.reload(); return { ok: true }; }));
 }

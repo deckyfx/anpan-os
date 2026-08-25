@@ -10,9 +10,12 @@ interface Props {
 }
 
 function EditShareDialogInner({ share, onClose }: Omit<Props, "open">) {
-  const { editShare, setSambaError, sambaError } = useFileStore();
+  const { editShare, setSambaError, sambaError, sambaBackend } = useFileStore();
 
   const [comment,  setComment]  = useState(share.comment);
+  // Apple's SMB server has nowhere to put a description, so anpan-os keeps it in its own
+  // database and shows it here. The field stays useful; it just never reaches a client.
+  const commentReachesClients = sambaBackend?.capabilities?.comment !== false;
   const [readOnly, setReadOnly] = useState(share.readOnly);
   const [guestOk,  setGuestOk]  = useState(share.guestOk);
   const [busy,     setBusy]     = useState(false);
@@ -68,7 +71,11 @@ function EditShareDialogInner({ share, onClose }: Omit<Props, "open">) {
         </div>
 
         <div>
-          <label className="block text-xs text-gray-400 mb-1">Comment <span className="text-gray-600">(optional)</span></label>
+          <label className="block text-xs text-gray-400 mb-1">
+            Comment <span className="text-gray-600">(optional)</span>{!commentReachesClients && (
+            <span className="text-gray-600"> · stored in anpan-os only</span>
+          )}
+          </label>
           <input
             autoFocus
             value={comment}
