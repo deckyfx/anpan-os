@@ -86,6 +86,16 @@ silently never appear, anpan-os detects which server is present and says so. Ins
 with `brew install samba` to manage shares from anpan-os, or use System Settings to manage
 them natively.
 
+**Port 5000 and AirPlay.** macOS runs AirPlay Receiver by default on Apple Silicon, and it
+holds ports **5000 and 7000** through Control Center. Its port cannot be changed. The
+installer therefore probes 5000 before writing the config: where it is free — the normal
+case on Linux — nothing changes, and where it is not, the next free port is used and the
+reason is recorded both in the installer output and as a comment in `config.toml`. If every
+preferred port is taken the search widens rather than guessing; if nothing at all is free
+the install stops instead of writing a port it knows cannot bind. To use
+5000 on a Mac, turn AirPlay Receiver off in System Settings → General → AirDrop & Handoff
+and edit the port back.
+
 **Docker socket discovery.** The daemon runs as root, while every macOS Docker runtime puts
 its socket in a user's home directory. anpan-os finds it — root can connect to a socket it
 does not own — and points the `docker` CLI at the same one via `DOCKER_HOST`, so no Docker

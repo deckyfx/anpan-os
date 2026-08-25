@@ -206,6 +206,131 @@ host_ip() {
   fi
 }
 
+# ── Port selection ────────────────────────────────────────────────────────────
+#
+# 5000 is not a safe default on macOS. AirPlay Receiver — part of Control Center, on by
+# default on Apple Silicon — listens on 5000 and 7000, and its port cannot be configured.
+# A fresh install that hardcoded 5000 therefore failed to bind, the service never came up,
+# and the first thing a Mac user did reported failure for a reason nothing explained.
+#
+# Probing keeps 5000 as the default everywhere it is actually free, which is the normal
+# case on Linux, and picks something usable where it is not — rather than silently failing
+# or telling people to switch off a feature of their operating system.
+
+DEFAULT_PORT=5000
+# Tried in order. All are outside the range macOS assigns to AirPlay and AirDrop.
+PORT_CANDIDATES="5000 5080 5001 8080 8000 9000"
+
+# The command name our own service runs as, used to tell our listener from a conflict.
+SERVICE_BIN_NAME="anpan-os"
+
+# True when anything at all is listening on $1.
+#
+# Three tools because no single one is present everywhere: lsof ships with macOS, ss with
+# modern Linux, netstat with almost everything older. If none of them can answer, the port
+# is treated as free — a wrong guess there produces a clear bind error at startup, which is
+# better than refusing to install over a question we could not resolve.
+port_listening() {
+  local p="$1"
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -nP -iTCP:"$p" -sTCP:LISTEN >/dev/null 2>&1 && return 0
+    return 1
+  fi
+  if command -v ss >/dev/null 2>&1; then
+    ss -Htln "sport = :$p" 2>/dev/null | grep -q . && return 0
+    return 1
+  fi
+  if command -v netstat >/dev/null 2>&1; then
+    netstat -an 2>/dev/null | grep -qE "[.:]$p[[:space:]].*LISTEN" && return 0
+    return 1
+  fi
+  return 1
+}
+
+# Names the process holding $1, or "" when it cannot be determined.
+port_holder() {
+  local p="$1"
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -nP -iTCP:"$p" -sTCP:LISTEN -Fc 2>/dev/null | grep '^c' | head -n1 | cut -c2-
+    return
+  fi
+  if command -v ss >/dev/null 2>&1; then
+    # users:(("anpan-os",pid=123,fd=4))
+    ss -Htlnp "sport = :$p" 2>/dev/null | sed -n 's/.*users:((\"\([^\"]*\)\".*/\1/p' | head -n1
+    return
+  fi
+  echo ""
+}
+
+# True when $1 is taken by something that is not us.
+#
+# Our own listener does not count. This installer stops and restarts the service, so a port
+# anpan-os currently holds will be free by the time it starts again — and treating it as
+# occupied would be actively harmful: re-running the installer after the config file was
+# removed would find our own process on 5000, move the service to a different port, and
+# leave anything pointing at the old one broken. That path is reachable, because the
+# service is only stopped when the binary actually changes.
+port_in_use() {
+  local p="$1"
+  port_listening "$p" || return 1
+  [ "$(port_holder "$p")" = "$SERVICE_BIN_NAME" ] && return 1
+  return 0
+}
+
+# Every port currently being listened on, one per line.
+#
+# Used only for the fallback scan below: asking about a hundred ports one at a time would
+# mean a hundred lsof invocations, where one call answers for all of them.
+listening_ports() {
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -nP -iTCP -sTCP:LISTEN -Fn 2>/dev/null | sed -n 's/^n.*:\([0-9][0-9]*\)$/\1/p'
+    return
+  fi
+  if command -v ss >/dev/null 2>&1; then
+    ss -Htln 2>/dev/null | awk '{print $4}' | sed -n 's/.*[.:]\([0-9][0-9]*\)$/\1/p'
+    return
+  fi
+  if command -v netstat >/dev/null 2>&1; then
+    netstat -an 2>/dev/null | awk '/LISTEN/{print $4}' | sed -n 's/.*[.:]\([0-9][0-9]*\)$/\1/p'
+    return
+  fi
+  echo ""
+}
+
+# Echoes a free port. Empty only when nothing in the scanned range is available.
+#
+# The preferred list is tried first because those numbers are memorable and documented.
+# When all of them are taken the search widens rather than giving up: writing a port
+# already known to be occupied would produce an installation that cannot start, which is a
+# worse outcome than an unfamiliar port number. Only an exhausted scan is a real failure,
+# and the caller stops rather than writing something it knows will not bind.
+FALLBACK_RANGE_START=5100
+FALLBACK_RANGE_END=5199
+
+choose_port() {
+  local p taken
+  for p in $PORT_CANDIDATES; do
+    port_in_use "$p" || { echo "$p"; return 0; }
+  done
+
+  taken="$(listening_ports)"
+  for p in $(seq "$FALLBACK_RANGE_START" "$FALLBACK_RANGE_END"); do
+    if printf '%s\n' "$taken" | grep -qx "$p"; then
+      # Listening — but our own listener is not a conflict here either, for the same
+      # reason it is not in the preferred list above: this installer restarts that very
+      # process. Skipping it would move a service already running on a fallback port to a
+      # different one, which is the migration the exemption exists to prevent.
+      #
+      # port_holder is only consulted for ports actually in use, so the bulk scan above
+      # still does the work and this costs one extra call at most.
+      [ "$(port_holder "$p")" = "$SERVICE_BIN_NAME" ] || continue
+    fi
+    echo "$p"; return 0
+  done
+
+  echo ""
+}
+
 ASSUME_YES="${ASSUME_YES:-0}"
 FORCE=0
 LIST=0
@@ -480,12 +605,39 @@ if [ -f "${CONFIG_DIR}/config.toml" ]; then
   warn "Config ${CONFIG_DIR}/config.toml already exists — skipping creation."
 else
   mkdir -p "${CONFIG_DIR}/certs"
-  cat > "${CONFIG_DIR}/config.toml" <<'EOF'
+
+  CHOSEN_PORT="$(choose_port)"
+  PORT_NOTE=""
+  if [ -z "$CHOSEN_PORT" ]; then
+    # Nothing free in the preferred list or the fallback range. Writing the default here
+    # would be writing a port already known to be occupied, producing an installation that
+    # cannot start and a config the user has to repair by hand before anything works.
+    # Stopping leaves the machine as it was found and says exactly what to do.
+    die "No free port found in ${PORT_CANDIDATES} or ${FALLBACK_RANGE_START}-${FALLBACK_RANGE_END}.
+       Free one of them, or create ${CONFIG_DIR}/config.toml with a [server] port of your
+       choosing and run this again — an existing config is never overwritten."
+  elif [ "$CHOSEN_PORT" != "$DEFAULT_PORT" ]; then
+    HOLDER="$(port_holder "$DEFAULT_PORT")"
+    PORT_NOTE="# Port ${DEFAULT_PORT} was already in use${HOLDER:+ by ${HOLDER}} at install time, so ${CHOSEN_PORT} was chosen."
+    warn "Port ${DEFAULT_PORT} is in use${HOLDER:+ by ${HOLDER}} — using ${CHOSEN_PORT} instead."
+    if [ "$PLATFORM" = "darwin" ] && [ "$DEFAULT_PORT" = "5000" ]; then
+      # Worth naming: this is the default configuration of the OS, not something the user
+      # did, and it is not obvious that Control Center is a network service.
+      warn "On macOS, ports 5000 and 7000 belong to AirPlay Receiver (System Settings →"
+      warn "General → AirDrop & Handoff). Turn it off to free them, or keep ${CHOSEN_PORT}."
+    fi
+  fi
+
+  {
+    cat <<EOF
 # anpan-os configuration
 # Edit this file to change server settings.
 
 [server]
-port = 5000
+${PORT_NOTE:+${PORT_NOTE}
+}port = ${CHOSEN_PORT}
+EOF
+    cat <<'EOF'
 bind = "public"   # "local" = 127.0.0.1 only | "public" = 0.0.0.0 (all interfaces)
 # tls_cert = "certs/cert.pem"
 # tls_key  = "certs/key.pem"
@@ -502,7 +654,8 @@ root = "/"
 
 [samba]
 EOF
-  success "Config created at ${CONFIG_DIR}/config.toml"
+  } > "${CONFIG_DIR}/config.toml"
+  success "Config created at ${CONFIG_DIR}/config.toml (port ${CHOSEN_PORT})"
 fi
 
 # ── Service unit ──────────────────────────────────────────────────────────────
