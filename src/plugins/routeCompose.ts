@@ -70,26 +70,36 @@ async function composeUpArgs(name: string, stackDir: string): Promise<string[]> 
  * GET  /api/compose/templates/:id            — get template detail (includes composeYaml)
  */
 /**
- * Compose endpoints that never invoke Docker.
+ * Compose endpoints that never invoke Docker, by method and path.
  *
  * `/tags` queries Docker Hub over HTTPS, and the rest read or write files under the compose
  * folder. Blocking them when the daemon is absent means a machine with no Docker installed
  * cannot view its own compose file, read an install log, or edit an env file — none of
  * which the daemon has any part in.
  *
- * Matched as whole paths rather than by suffix on purpose: a stack legitimately named
- * "file" would make `PUT /api/compose/stacks/file` end in "/file" and slip a redeploy past
- * the guard, which is the opposite of what this is for.
+ * The method matters as much as the path, and the two `/file` routes are why: GET returns
+ * the compose file, while PUT rewrites it and then runs `docker compose up`. Exempting the
+ * path alone let that PUT past the guard, so on a host without Docker it would persist the
+ * user's edit and only then fail on the deploy — leaving the stack's file changed and its
+ * containers untouched, which is worse than refusing the request outright.
+ *
+ * Matched as whole paths rather than by suffix, too: a stack legitimately named "file"
+ * would make `/api/compose/stacks/file` end in "/file" and slip past.
+ *
+ * Anything not listed here requires Docker. New routes are therefore guarded by default.
  */
-const DOCKER_FREE_ROUTES = [
-  /^\/api\/compose\/tags$/,
-  /^\/api\/compose\/compose-sources$/,
-  /^\/api\/compose\/stacks\/[^/]+\/(install-log|file|compose-source|envfile)$/,
+const DOCKER_FREE_ROUTES: { method: string; pattern: RegExp }[] = [
+  { method: "GET", pattern: /^\/api\/compose\/tags$/ },
+  { method: "GET", pattern: /^\/api\/compose\/compose-sources$/ },
+  { method: "GET", pattern: /^\/api\/compose\/stacks\/[^/]+\/(install-log|file|compose-source|envfile)$/ },
+  // Writing an env file touches no container; the compose file's PUT does, so it is absent.
+  { method: "PUT", pattern: /^\/api\/compose\/stacks\/[^/]+\/envfile$/ },
 ];
 
 /** True when the request needs a reachable Docker daemon. Exported for tests. */
-export function needsDocker(path: string): boolean {
-  return !DOCKER_FREE_ROUTES.some((re) => re.test(path));
+export function needsDocker(method: string, path: string): boolean {
+  const verb = method.toUpperCase();
+  return !DOCKER_FREE_ROUTES.some((r) => r.method === verb && r.pattern.test(path));
 }
 
 export function composePlugin(jwtSecret: string) {
@@ -134,8 +144,8 @@ export function composePlugin(jwtSecret: string) {
      * Scoped, too: several endpoints here only read or write files, and refusing those
      * would mean a host without Docker could not so much as view its own compose file.
      */
-    .onBeforeHandle(async ({ set, path }) => {
-      if (!needsDocker(path)) return;
+    .onBeforeHandle(async ({ set, path, request }) => {
+      if (!needsDocker(request.method, path)) return;
       if (!docker || !(await commands.isAvailable("docker"))) {
         set.status = 503;
         return { error: "Docker is not installed or not running — see System Doctor" };

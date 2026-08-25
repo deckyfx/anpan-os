@@ -440,7 +440,7 @@ describe("needsDocker — which compose routes require the daemon", () => {
    * for the first time and it began refusing endpoints that never touch Docker — so a host
    * without Docker installed could not read its own compose file.
    */
-  test("file and metadata endpoints do not need Docker", () => {
+  test("reads of files and metadata do not need Docker", () => {
     for (const path of [
       "/api/compose/tags",
       "/api/compose/compose-sources",
@@ -449,37 +449,59 @@ describe("needsDocker — which compose routes require the daemon", () => {
       "/api/compose/stacks/plex/compose-source",
       "/api/compose/stacks/plex/envfile",
     ]) {
-      expect(needsDocker(path)).toBe(false);
+      expect(needsDocker("GET", path)).toBe(false);
     }
   });
 
   test("anything that drives containers does need Docker", () => {
-    for (const path of [
-      "/api/compose/stacks",
-      "/api/compose/stacks/plex",
-      "/api/compose/stacks/plex/pull",
-      "/api/compose/stacks/plex/down",
-      "/api/compose/stacks/plex/restart",
-      "/api/compose/stacks/plex/logs",
-      "/api/compose/stacks/plex/repair",
-      "/api/compose/stacks/plex/containers",
-    ]) {
-      expect(needsDocker(path)).toBe(true);
+    for (const [method, path] of [
+      ["POST", "/api/compose/stacks"],
+      ["POST", "/api/compose/stacks/plex/pull"],
+      ["POST", "/api/compose/stacks/plex/down"],
+      ["POST", "/api/compose/stacks/plex/restart"],
+      ["GET",  "/api/compose/stacks/plex/logs"],
+      ["POST", "/api/compose/stacks/plex/repair"],
+      ["GET",  "/api/compose/stacks/plex/containers"],
+    ] as const) {
+      expect(needsDocker(method, path)).toBe(true);
     }
+  });
+
+  test("the two /file routes are classified by method, not path", () => {
+    // GET returns the compose file. PUT rewrites it and then runs `docker compose up`, so
+    // exempting it would persist the user's edit and fail on the deploy — leaving the file
+    // changed and the containers untouched.
+    expect(needsDocker("GET", "/api/compose/stacks/plex/file")).toBe(false);
+    expect(needsDocker("PUT", "/api/compose/stacks/plex/file")).toBe(true);
+  });
+
+  test("writing an env file touches no container", () => {
+    expect(needsDocker("PUT", "/api/compose/stacks/plex/envfile")).toBe(false);
+    expect(needsDocker("GET", "/api/compose/stacks/plex/envfile")).toBe(false);
   });
 
   test("a stack named after an exempt endpoint does not slip past the guard", () => {
     // Suffix matching would read PUT /api/compose/stacks/file as the exempt "…/file"
     // endpoint and let a redeploy through unchecked. Whole-path matching does not.
-    expect(needsDocker("/api/compose/stacks/file")).toBe(true);
-    expect(needsDocker("/api/compose/stacks/tags")).toBe(true);
-    expect(needsDocker("/api/compose/stacks/envfile")).toBe(true);
+    expect(needsDocker("PUT", "/api/compose/stacks/file")).toBe(true);
+    expect(needsDocker("GET", "/api/compose/stacks/tags")).toBe(true);
+    expect(needsDocker("GET", "/api/compose/stacks/envfile")).toBe(true);
     // The genuine per-stack endpoint is still exempt.
-    expect(needsDocker("/api/compose/stacks/file/file")).toBe(false);
+    expect(needsDocker("GET", "/api/compose/stacks/file/file")).toBe(false);
   });
 
   test("nested paths below an exempt endpoint are not exempt", () => {
-    expect(needsDocker("/api/compose/stacks/plex/file/extra")).toBe(true);
-    expect(needsDocker("/api/compose/stacks/plex/containers/abc/logs")).toBe(true);
+    expect(needsDocker("GET", "/api/compose/stacks/plex/file/extra")).toBe(true);
+    expect(needsDocker("GET", "/api/compose/stacks/plex/containers/abc/logs")).toBe(true);
+  });
+
+  test("an unlisted method on an exempt path still requires Docker", () => {
+    // Exemptions are opt-in per verb, so a route added later is guarded by default.
+    expect(needsDocker("DELETE", "/api/compose/stacks/plex/envfile")).toBe(true);
+    expect(needsDocker("POST", "/api/compose/tags")).toBe(true);
+  });
+
+  test("the method is matched case-insensitively", () => {
+    expect(needsDocker("get", "/api/compose/tags")).toBe(false);
   });
 });
