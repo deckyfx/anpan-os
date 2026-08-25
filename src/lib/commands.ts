@@ -10,7 +10,7 @@
  *   const report = await commands.doctor();
  */
 
-type Platform = "linux" | "darwin" | "win32";
+import { EXTRA_BIN_DIRS, PLATFORM, type Platform } from "./platform";
 
 export interface ToolDef {
   /** Human-readable name shown in doctor output. */
@@ -70,21 +70,61 @@ const TOOLS = {
   systemctl: {
     name:        "systemctl",
     description: "Systemd service manager",
-    feature:     "samba — service reload (fallback)",
-    binary:      { linux: "systemctl" }, // not present on macOS
+    feature:     "service restart, samba reload (Linux)",
+    binary:      { linux: "systemctl" }, // macOS uses launchctl / brew services
     installHint: {
       linux:  "Built-in (systemd)",
-      darwin: "Not applicable — use: brew services restart samba",
+      darwin: "Not applicable — anpan-os uses launchctl / brew services on macOS",
     },
   },
   ss: {
     name:        "ss",
     description: "Socket statistics — list listening ports",
-    feature:     "port scanner",
-    binary:      { linux: "ss" }, // not present on macOS (use netstat/lsof there)
+    feature:     "port scanner (Linux)",
+    binary:      { linux: "ss" }, // macOS has no iproute2; the port scanner uses lsof there
     installHint: {
       linux:  "Built-in (iproute2) — apt install iproute2  /  yum install iproute",
-      darwin: "Not applicable — use: netstat -an  or  lsof -i",
+      darwin: "Not applicable — the port scanner uses lsof on macOS",
+    },
+  },
+  lsof: {
+    name:        "lsof",
+    description: "List open files and sockets",
+    feature:     "port scanner (macOS)",
+    binary:      { darwin: "lsof" }, // Linux uses ss, which reports the same thing faster
+    installHint: {
+      linux:  "Not applicable — the port scanner uses ss on Linux",
+      darwin: "Built-in",
+    },
+  },
+  vm_stat: {
+    name:        "vm_stat",
+    description: "Virtual-memory statistics",
+    feature:     "system stats — RAM usage (macOS)",
+    binary:      { darwin: "vm_stat" }, // Linux reads /proc/meminfo instead
+    installHint: {
+      linux:  "Not applicable — RAM is read from /proc/meminfo on Linux",
+      darwin: "Built-in",
+    },
+  },
+  launchctl: {
+    name:        "launchctl",
+    description: "launchd service manager",
+    feature:     "service restart, samba reload (macOS)",
+    binary:      { darwin: "launchctl" }, // the systemd counterpart
+    installHint: {
+      linux:  "Not applicable — use systemctl on Linux",
+      darwin: "Built-in",
+    },
+  },
+  brew: {
+    name:        "brew",
+    description: "Homebrew package manager",
+    feature:     "samba — service control, installing optional tools (macOS)",
+    binary:      { darwin: "brew" },
+    installHint: {
+      linux:  "Not applicable",
+      darwin: "https://brew.sh — /bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/brew/HEAD/install.sh)\"",
     },
   },
   smbcontrol: {
@@ -94,7 +134,7 @@ const TOOLS = {
     binary:      { linux: "smbcontrol", darwin: "smbcontrol" },
     installHint: {
       linux:  "apt install samba-common-bin  /  yum install samba",
-      darwin: "brew install samba",
+      darwin: "brew install samba  (Apple's built-in sharing is configured in System Settings)",
     },
   },
   smbd: {
@@ -168,6 +208,16 @@ export interface DoctorResult {
   name:        string;
   feature:     string;
   binary:      string | undefined; // undefined = not applicable on this OS
+  /**
+   * False when the tool has no role on this platform at all.
+   *
+   * Distinct from `available`, and the distinction matters: systemctl and ss are absent on
+   * macOS by design, because launchctl and lsof do those jobs there. Counting them as
+   * missing told a Mac user that three tools needed installing, listed two that cannot be
+   * installed, and exited non-zero — so the doctor reported a broken system on a healthy
+   * one.
+   */
+  applicable:  boolean;
   available:   boolean;
   installHint: string;
 }
@@ -186,21 +236,67 @@ class CommandRegistry {
 
   readonly tools: typeof TOOLS = TOOLS;
 
+  /**
+   * Cached availability, keyed by tool.
+   *
+   * Whether a binary exists is asked on hot paths — every file copy checks rsync, every
+   * port scan checks docker — and answering it costs a `which` plus a handful of stats.
+   * The answer does not change while the process runs, short of someone installing
+   * something underneath it, which `refresh()` covers for the doctor screen.
+   *
+   * The promise is cached rather than the boolean, so concurrent callers share one probe
+   * instead of racing to run it.
+   */
+  private availability = new Map<ToolId, Promise<boolean>>();
+
   /** Resolve the binary name for a tool on the current OS. Returns undefined if not applicable. */
   bin(id: ToolId): string | undefined {
-    const platform = process.platform as Platform;
     const binaries = this.tools[id].binary as Partial<Record<Platform, string>>;
-    return binaries[platform];
+    return binaries[PLATFORM];
   }
 
-  /** Returns true if the binary is present on $PATH or a common system directory. */
-  async isAvailable(id: ToolId): Promise<boolean> {
+  /**
+   * True if the tool is installed and runnable on this host.
+   *
+   * Two separate questions live here, and conflating them is the bug this guards against:
+   * `bins.docker` being set means only that Docker is *conceivable* on this OS, not that
+   * anyone installed it. On a stock macOS there is no Docker, no ffmpeg and no smbcontrol,
+   * so anything that shells out to them must ask this first and report "not installed"
+   * rather than surfacing a raw "command not found".
+   */
+  isAvailable(id: ToolId): Promise<boolean> {
+    let probe = this.availability.get(id);
+    if (!probe) {
+      probe = this.probe(id);
+      this.availability.set(id, probe);
+    }
+    return probe;
+  }
+
+  /**
+   * The binary name to invoke, or undefined when the tool is missing.
+   *
+   * The shape callers want: one await that answers "can I run this, and as what", so a
+   * guard is a single line rather than a paired bins lookup and availability check that
+   * can drift apart.
+   */
+  async which(id: ToolId): Promise<string | undefined> {
+    return (await this.isAvailable(id)) ? this.bin(id) : undefined;
+  }
+
+  /** Discard cached availability — used by the doctor so a fresh install is picked up. */
+  refresh(): void {
+    this.availability.clear();
+  }
+
+  private async probe(id: ToolId): Promise<boolean> {
     const binary = this.bin(id);
     if (!binary) return false;
     const result = await Bun.$`which ${binary}`.quiet().nothrow();
     if (result.exitCode === 0) return true;
-    // sudo sanitises PATH and may exclude /usr/sbin; check common locations
-    for (const dir of ["/usr/sbin", "/sbin", "/usr/local/sbin"]) {
+    // sudo sanitises PATH and drops the sbin dirs; a macOS LaunchAgent gets a minimal
+    // PATH with no Homebrew on it at all. EXTRA_BIN_DIRS covers both.
+    for (const dir of EXTRA_BIN_DIRS) {
       if (await Bun.file(`${dir}/${binary}`).exists()) return true;
     }
     return false;
@@ -208,18 +304,20 @@ class CommandRegistry {
 
   /** Run a full doctor check — returns one result per registered tool. */
   async doctor(): Promise<DoctorResult[]> {
+    // The point of opening the doctor is usually that something was just installed.
+    this.refresh();
     return Promise.all(
       (Object.keys(this.tools) as ToolId[]).map(async (id) => {
-        const def     = this.tools[id];
-        const platform = process.platform as Platform;
-        const binary  = this.bin(id);
-        const hints   = def.installHint as Partial<Record<Platform, string>>;
-        const hint    = hints[platform] ?? hints.linux ?? "See documentation";
+        const def    = this.tools[id];
+        const binary = this.bin(id);
+        const hints  = def.installHint as Partial<Record<Platform, string>>;
+        const hint   = hints[PLATFORM] ?? hints.linux ?? "See documentation";
         return {
           id,
           name:        def.name,
           feature:     def.feature,
           binary,
+          applicable:  binary !== undefined,
           available:   await this.isAvailable(id),
           installHint: hint,
         };
@@ -234,11 +332,10 @@ export const commands = CommandRegistry.getInstance();
 // Resolved once at module load for the current OS.
 
 function resolveBins(): Partial<Record<ToolId, string>> {
-  const platform = process.platform as Platform;
   return Object.fromEntries(
     (Object.keys(TOOLS) as ToolId[])
       .flatMap((id) => {
-        const binary = (TOOLS[id].binary as Partial<Record<Platform, string>>)[platform];
+        const binary = (TOOLS[id].binary as Partial<Record<Platform, string>>)[PLATFORM];
         return binary !== undefined ? [[id, binary]] : [];
       }),
   );

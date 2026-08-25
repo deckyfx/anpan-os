@@ -1,7 +1,8 @@
 import { Elysia, t } from "elysia";
 import { join }      from "node:path";
 import { authGuard } from "./authGuard";
-import { bins }      from "../lib/commands";
+import { bins, commands } from "../lib/commands";
+import { IS_LINUX }  from "../lib/platform";
 import { envConfig } from "../env-config";
 
 export interface PortEntry {
@@ -64,6 +65,82 @@ function parseSsOutput(raw: string): Array<{ port: number; address: string; proc
   return entries;
 }
 
+interface Listener { port: number; address: string; process: string; pid: number | null; proto: string }
+
+/**
+ * Parse `lsof -nP -iTCP -sTCP:LISTEN -FpcnPL` field output into port entries.
+ *
+ * macOS has no iproute2, so `ss` does not exist there. lsof reports the same facts — bound
+ * address, port, owning process and pid — and is present on every macOS install.
+ *
+ * -F asks for machine-readable output instead of columns: one field per line, tagged by a
+ * leading character, with process-level fields (p=pid, c=command) preceding the file-level
+ * lines (n=name) they apply to. That is worth the extra parsing because the human-readable
+ * NAME column is genuinely ambiguous — a command containing spaces cannot be split apart
+ * from its arguments reliably.
+ *
+ * Names look like "*:8080", "127.0.0.1:5000", or "[::1]:631" for IPv6.
+ */
+function parseLsofOutput(raw: string, proto: string): Listener[] {
+  const entries: Listener[] = [];
+  let pid: number | null = null;
+  let command = "";
+
+  for (const line of raw.split("\n")) {
+    const tag  = line[0];
+    const rest = line.slice(1);
+
+    if (tag === "p") { pid = parseInt(rest, 10) || null; continue; }
+    if (tag === "c") { command = rest; continue; }
+    if (tag !== "n") continue;
+
+    // UDP rows have no "->"; skip established TCP connections, which are not listeners.
+    if (rest.includes("->")) continue;
+
+    // IPv6 addresses are bracketed, so the port is after the last colon in both forms.
+    const lastColon = rest.lastIndexOf(":");
+    if (lastColon < 0) continue;
+    const port = parseInt(rest.slice(lastColon + 1), 10);
+    if (isNaN(port) || port <= 0) continue;
+
+    const address = rest.slice(0, lastColon).replace(/^\[|\]$/g, "") || "*";
+    entries.push({ port, address, process: command, pid, proto });
+  }
+
+  return entries;
+}
+
+/**
+ * Every listening socket on the host.
+ *
+ * `ss` is preferred on Linux: it reads /proc/net directly and is markedly faster than lsof,
+ * which stats every open file descriptor on the system. macOS has only lsof.
+ */
+async function listListeners(): Promise<Listener[]> {
+  if (IS_LINUX) {
+    const [tcp, udp] = await Promise.all([
+      Bun.$`${bins.ss ?? "ss"} -Htlnp`.quiet().nothrow(),
+      Bun.$`${bins.ss ?? "ss"} -Htunp`.quiet().nothrow(),
+    ]);
+    return [
+      ...parseSsOutput(tcp.stdout.toString()).map(e => ({ ...e, proto: "tcp" })),
+      ...parseSsOutput(udp.stdout.toString()).map(e => ({ ...e, proto: "udp" })),
+    ];
+  }
+
+  const lsof = bins.lsof ?? "lsof";
+  // -sTCP:LISTEN filters to listeners; UDP sockets have no such state, so every bound
+  // UDP socket is reported and the "->" check in the parser drops the connected ones.
+  const [tcp, udp] = await Promise.all([
+    Bun.$`${lsof} -nP -iTCP -sTCP:LISTEN -FpcnPL`.quiet().nothrow(),
+    Bun.$`${lsof} -nP -iUDP -FpcnPL`.quiet().nothrow(),
+  ]);
+  return [
+    ...parseLsofOutput(tcp.stdout.toString(), "tcp"),
+    ...parseLsofOutput(udp.stdout.toString(), "udp"),
+  ];
+}
+
 /**
  * Parse `docker ps --format '{{.Names}}\t{{.Ports}}'` into a map from "port/proto" → container name.
  *
@@ -97,13 +174,8 @@ export function portsPlugin(jwtSecret: string) {
     .use(authGuard(jwtSecret))
 
     .get("/", async ({ set }) => {
-      // 1. Get listening TCP/UDP ports from ss
-      const ssResult = await Bun.$`ss -Htlnp`.nothrow();
-      // Also grab UDP
-      const ssUdpResult = await Bun.$`ss -Htunp`.nothrow();
-      const tcpEntries = parseSsOutput(ssResult.stdout.toString()).map(e => ({ ...e, proto: "tcp" }));
-      const udpEntries = parseSsOutput(ssUdpResult.stdout.toString()).map(e => ({ ...e, proto: "udp" }));
-      const allEntries = [...tcpEntries, ...udpEntries];
+      // 1. Listening TCP/UDP sockets — ss on Linux, lsof on macOS
+      const allEntries = await listListeners();
 
       // Deduplicate by port+proto
       const seen = new Set<string>();
@@ -114,9 +186,15 @@ export function portsPlugin(jwtSecret: string) {
         return true;
       });
 
-      // 2. Get Docker port bindings
-      const dockerResult = await Bun.$`${bins.docker} ps --format ${"{{.Names}}\t{{.Ports}}"}`.nothrow();
-      const containerByPort = parseDockerPorts(dockerResult.stdout.toString());
+      // 2. Docker port bindings — enrichment only. A host without Docker still has ports
+      // worth listing, so its absence annotates nothing rather than failing the scan.
+      const docker = await commands.which("docker");
+      const containerByPort = docker
+        ? parseDockerPorts(
+            (await Bun.$`${docker} ps --format ${"{{.Names}}\t{{.Ports}}"}`.quiet().nothrow())
+              .stdout.toString(),
+          )
+        : new Map<string, string>();
 
       // 3. Load notes
       const notes = await readNotes();

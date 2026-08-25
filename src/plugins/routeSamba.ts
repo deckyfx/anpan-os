@@ -4,7 +4,8 @@ import { stat, realpath } from "node:fs/promises";
 import { authGuard } from "./authGuard";
 import { config } from "../config";
 import { envConfig } from "../env-config";
-import { bins, commands } from "../lib/commands";
+import { commands } from "../lib/commands";
+import { IS_LINUX, IS_MACOS, detectSamba } from "../lib/platform";
 import { SambaShareStore } from "../stores/samba-share-store";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -202,16 +203,56 @@ function rethrowUnlessNotRunning(e: unknown): void {
   throw e;
 }
 
+/**
+ * Ask a running smbd to re-read its configuration.
+ *
+ * Ordered by how little they disturb existing connections. smbcontrol is the right tool
+ * and works identically on both platforms — but it ships with samba, and samba is not
+ * installed by default on either, so it cannot be assumed. The fallbacks are the service
+ * manager, which differs: systemd can reload in place, while launchd has no reload verb
+ * at all and a restart is the only option.
+ *
+ * Doing nothing is a legitimate outcome. The share file on disk is already correct; a
+ * host with no samba installed has nothing to tell, and returning an error there would
+ * report a failure for an operation that fully succeeded.
+ */
 async function reloadSmbd(): Promise<void> {
-  const hasSmbcontrol = await commands.isAvailable("smbcontrol");
-  if (hasSmbcontrol && bins.smbcontrol) {
-    const proc = Bun.spawn([bins.smbcontrol, "smbd", "reload-config"], { stdout: "pipe", stderr: "pipe" });
+  const smbcontrol = await commands.which("smbcontrol");
+  if (smbcontrol) {
+    const proc = Bun.spawn([smbcontrol, "smbd", "reload-config"], { stdout: "pipe", stderr: "pipe" });
     const code = await proc.exited;
     if (code !== 0) throw new Error(`smbcontrol exited ${code}`);
-  } else if (bins.systemctl) {
-    const proc = Bun.spawn([bins.systemctl, "reload", "smbd"], { stdout: "pipe", stderr: "pipe" });
+    return;
+  }
+
+  if (IS_LINUX) {
+    const systemctl = await commands.which("systemctl");
+    if (!systemctl) return;
+    const proc = Bun.spawn([systemctl, "reload", "smbd"], { stdout: "pipe", stderr: "pipe" });
     const code = await proc.exited;
     if (code !== 0) throw new Error(`systemctl reload smbd exited ${code}`);
+    return;
+  }
+
+  if (IS_MACOS) {
+    // Homebrew's samba first: if the user installed it, that is the smbd serving our
+    // shares, and `brew services` owns its plist.
+    const brew = await commands.which("brew");
+    if (brew) {
+      const proc = Bun.spawn([brew, "services", "restart", "samba"], { stdout: "pipe", stderr: "pipe" });
+      if (await proc.exited === 0) return;
+      // Not installed under brew — fall through to Apple's daemon.
+    }
+
+    // Apple's own sharing daemon. kickstart -k restarts it if it is loaded and reports a
+    // clean failure if it is not, which is exactly the distinction we want.
+    const launchctl = await commands.which("launchctl");
+    if (!launchctl) return;
+    const proc = Bun.spawn([launchctl, "kickstart", "-k", "system/com.apple.smbd"], { stdout: "pipe", stderr: "pipe" });
+    const code = await proc.exited;
+    // 3 = "no such service" — Apple's file sharing is simply switched off, which is not
+    // an error in a request that only rewrote a config file.
+    if (code !== 0 && code !== 3) throw new Error(`launchctl kickstart smbd exited ${code}`);
   }
 }
 
@@ -287,6 +328,27 @@ function removeShareSection(raw: string, shareName: string): string {
 export function sambaPlugin(jwtSecret: string) {
   return new Elysia({ prefix: "/api/samba" })
     .use(authGuard(jwtSecret))
+
+    /**
+     * Refuse every write when no server would read the result.
+     *
+     * On a stock Mac /usr/sbin/smbd exists and is running, so a naive check passes and the
+     * share is written to a file Apple's SMBX never opens. The user is then told the share
+     * was created, sees it listed, and finds nothing on the network — with no way to tell
+     * that anpan-os was never in a position to make it work. Failing the request is the
+     * only honest answer.
+     *
+     * Reads are left alone: listing what is configured stays useful, and the UI uses it to
+     * explain the situation.
+     */
+    .onBeforeHandle(async ({ set, request }) => {
+      if (request.method === "GET") return;
+      const smb = await detectSamba();
+      if (!smb.manageable) {
+        set.status = 501;
+        return { error: smb.reason ?? "Samba is not available on this system" };
+      }
+    })
 
     // GET /api/samba/shares — our managed shares (from SQLite)
     .get("/shares", async () => {

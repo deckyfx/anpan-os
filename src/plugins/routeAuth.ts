@@ -4,7 +4,7 @@ import { jwt } from "@elysiajs/jwt";
 import { config } from "../config";
 import { UserStore } from "../stores/user-store";
 import { SettingsStore } from "../stores/settings-store";
-import { bins } from "../lib/commands";
+import { commands } from "../lib/commands";
 import {
   usernameField,
   passwordField,
@@ -127,6 +127,22 @@ function checkCredentials(
  *   POST /api/auth/login   — verify credentials, set JWT session cookie
  *   POST /api/auth/logout  — clear session cookie
  */
+/**
+ * What the browser is told when Docker is absent.
+ *
+ * "not installed or not running" rather than "not available": on macOS Docker is a
+ * third-party application that may simply not be there, and on both platforms the daemon
+ * can be stopped. Neither is a fault the user can act on without being told which it is.
+ */
+const DOCKER_MISSING = "Docker is not installed or not running — see System Doctor";
+
+/** Sets a 503 and returns true when Docker cannot be invoked. */
+async function dockerMissing(set: { status?: number | string }): Promise<boolean> {
+  if (await commands.isAvailable("docker")) return false;
+  set.status = 503;
+  return true;
+}
+
 export function authPlugin(jwtSecret: string) {
   return new Elysia({ prefix: "/api/auth" })
     .use(jwt({ name: "jwt", secret: jwtSecret, exp: "7d" }))
@@ -229,8 +245,8 @@ export function authPlugin(jwtSecret: string) {
     // ── Docker Hub auth ───────────────────────────────────────────────────────
 
     .get("/dockerhub", ({ jwt: jwtCtx, cookie: { anpan_session }, set }) => {
-      if (!bins.docker) { set.status = 503; return Promise.resolve({ error: "Docker is not available on this system" }); }
       return withDockerHubAuth(jwtCtx, anpan_session.value, set, async () => {
+        if (await dockerMissing(set)) return { error: DOCKER_MISSING };
         const username = await SettingsStore.get("dockerhub_username");
         return { loggedIn: !!username, username: username ?? null };
       });
@@ -239,9 +255,9 @@ export function authPlugin(jwtSecret: string) {
     .post(
       "/dockerhub",
       ({ body, jwt: jwtCtx, cookie: { anpan_session }, set }) => {
-        if (!bins.docker) { set.status = 503; return Promise.resolve({ error: "Docker is not available on this system" }); }
-        const docker = bins.docker;
         return withDockerHubAuth(jwtCtx, anpan_session.value, set, async () => {
+          const docker = await commands.which("docker");
+          if (!docker) { set.status = 503; return { error: DOCKER_MISSING }; }
           const proc = Bun.spawn(
             [docker, "login", "--username", body.username, "--password-stdin"],
             { stdin: "pipe", stdout: "pipe", stderr: "pipe" },
@@ -276,9 +292,9 @@ export function authPlugin(jwtSecret: string) {
     )
 
     .delete("/dockerhub", ({ jwt: jwtCtx, cookie: { anpan_session }, set }) => {
-      if (!bins.docker) { set.status = 503; return Promise.resolve({ error: "Docker is not available on this system" }); }
-      const docker = bins.docker;
       return withDockerHubAuth(jwtCtx, anpan_session.value, set, async () => {
+        const docker = await commands.which("docker");
+        if (!docker) { set.status = 503; return { error: DOCKER_MISSING }; }
         const proc = Bun.spawn([docker, "logout"], { stdout: "pipe", stderr: "pipe" });
         let logoutCode: number;
         try {

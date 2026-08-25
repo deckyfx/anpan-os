@@ -4,7 +4,7 @@ import { mkdirSync } from "node:fs";
 import { appendFile } from "node:fs/promises";
 import { authGuard } from "./authGuard";
 import { config } from "../config";
-import { bins } from "../lib/commands";
+import { bins, commands } from "../lib/commands";
 import { StackStore } from "../stores/stack-store";
 import { envConfig } from "../env-config";
 import { StreamAggregator, drainStream } from "../lib/sse";
@@ -17,6 +17,7 @@ import {
   findOrphanServices,
 } from "../lib/compose-source";
 import type { ComposeSourceReport } from "../lib/compose-source";
+import { CASAOS_APPS_DIR } from "../lib/platform";
 
 const STACK_NAME_RE     = /^[a-zA-Z0-9_-]+$/;
 const CONTAINER_NAME_RE = /^[a-zA-Z0-9_.\-]+$/;
@@ -69,12 +70,19 @@ async function composeUpArgs(name: string, stackDir: string): Promise<string[]> 
  * GET  /api/compose/templates/:id            — get template detail (includes composeYaml)
  */
 export function composePlugin(jwtSecret: string) {
-  const docker = bins.docker; // resolved once; undefined = docker not installed on this OS
+  const docker = bins.docker; // the name to invoke; presence is checked per request below
 
   return new Elysia({ prefix: "/api/compose" })
     .use(authGuard(jwtSecret))
-    .onBeforeHandle(({ set }) => {
-      if (!docker) { set.status = 503; return { error: "Docker is not available on this system" }; }
+    // `bins.docker` being set means only that Docker is possible on this OS. Whether it is
+    // installed is a separate question, and on macOS the common case is that it is not:
+    // Docker Desktop, OrbStack and Colima are all third-party. Cached in the registry, so
+    // this is a map lookup after the first request rather than a `which` per call.
+    .onBeforeHandle(async ({ set }) => {
+      if (!docker || !(await commands.isAvailable("docker"))) {
+        set.status = 503;
+        return { error: "Docker is not installed or not running — see System Doctor" };
+      }
     })
 
     /**
@@ -223,9 +231,9 @@ export function composePlugin(jwtSecret: string) {
         stackDir = join(config.composeFolder, name);
       } else {
         // CasaOS — requires running as root
-        const casaosCompose = `/var/lib/casaos/apps/${name}/docker-compose.yml`;
+        const casaosCompose = `${CASAOS_APPS_DIR}/${name}/docker-compose.yml`;
         if (await Bun.file(casaosCompose).exists()) {
-          stackDir = `/var/lib/casaos/apps/${name}`;
+          stackDir = `${CASAOS_APPS_DIR}/${name}`;
         }
       }
 
@@ -347,7 +355,7 @@ export function composePlugin(jwtSecret: string) {
       }
 
       // 2. Try CasaOS apps directory (direct read)
-      const casaosPath = `/var/lib/casaos/apps/${name}/docker-compose.yml`;
+      const casaosPath = `${CASAOS_APPS_DIR}/${name}/docker-compose.yml`;
       try {
         const content = await Bun.file(casaosPath).text();
         return new Response(content, { headers });

@@ -6,9 +6,33 @@ export interface ToolInfo {
   name:        string;
   feature:     string;
   binary:      string | undefined;
+  /** False when the tool has no role on this platform — absent by design, not missing. */
+  applicable:  boolean;
   available:   boolean;
   installHint: string;
 }
+
+/**
+ * Features the server reports as usable on this host.
+ *
+ * Mirrors PlatformFeatures in lib/platform. The UI renders against these rather than
+ * against a platform string, so adding a platform does not mean revisiting every
+ * conditional — and a control that cannot work is absent rather than present-and-broken.
+ */
+export interface PlatformFeatures {
+  casaosMigration: boolean;
+  powerControl:    boolean;
+  samba:           boolean;
+  selfUpdate:      boolean;
+}
+
+/** Assume nothing works until the server says otherwise — a missing button is recoverable. */
+const NO_FEATURES: PlatformFeatures = {
+  casaosMigration: false,
+  powerControl:    false,
+  samba:           false,
+  selfUpdate:      false,
+};
 
 interface SystemState {
   /** Process username (whoami). Empty string until loaded. */
@@ -17,6 +41,14 @@ interface SystemState {
   uid:     number;
   /** True when running as root (uid === 0). */
   isRoot:  boolean;
+  /** Host OS as reported by the server: "linux" | "darwin" | "win32". */
+  platform: string;
+  /** Host architecture: "x64" | "arm64". */
+  arch:     string;
+  /** Human-readable platform, e.g. "macOS (Apple Silicon)". */
+  platformLabel: string;
+  /** Which platform-gated features this host supports. */
+  features: PlatformFeatures;
   /** All registered external tools and their availability. Empty until loaded. */
   tools:   ToolInfo[];
   /** True once both environment and tool fetches have completed. */
@@ -32,9 +64,10 @@ interface SystemState {
 }
 
 async function fetchAll() {
-  const [envRes, toolsRes] = await Promise.all([
+  const [envRes, toolsRes, infoRes] = await Promise.all([
     api.api.system.environment.get(),
     api.api.system.doctor.get(),
+    api.api.system.info.get(),
   ]);
 
   const envData = envRes.data;
@@ -44,13 +77,22 @@ async function fetchAll() {
 
   const tools = Array.isArray(toolsRes.data) ? toolsRes.data as ToolInfo[] : [];
 
-  return { env, tools };
+  const infoData = infoRes.data;
+  const info = (infoData && typeof infoData === "object" && "features" in infoData)
+    ? infoData as { platform: string; arch: string; platformLabel: string; features: PlatformFeatures }
+    : null;
+
+  return { env, tools, info };
 }
 
 export const useSystemStore = create<SystemState>((set, get) => ({
   user:   "",
   uid:    -1,
   isRoot: false,
+  platform: "",
+  arch:     "",
+  platformLabel: "",
+  features: NO_FEATURES,
   tools:  [],
   loaded: false,
 
@@ -62,9 +104,10 @@ export const useSystemStore = create<SystemState>((set, get) => ({
   load: async () => {
     if (get().loaded) return;
     try {
-      const { env, tools } = await fetchAll();
+      const { env, tools, info } = await fetchAll();
       set({
         ...(env ?? {}),
+        ...(info ?? {}),
         tools,
         loaded: true,
       });
@@ -75,9 +118,10 @@ export const useSystemStore = create<SystemState>((set, get) => ({
 
   reload: async () => {
     try {
-      const { env, tools } = await fetchAll();
+      const { env, tools, info } = await fetchAll();
       set({
         ...(env ?? {}),
+        ...(info ?? {}),
         tools,
         loaded: true,
       });

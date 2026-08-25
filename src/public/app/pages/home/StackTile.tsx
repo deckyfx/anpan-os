@@ -27,7 +27,7 @@ function TileMenu({ stack, onAction, onClose }: TileMenuProps) {
   const allRunning = stack.state === "running";
   const allStopped = stack.state === "stopped";
   const act = (a: StackAction) => { onAction(a); onClose(); };
-  const { isRoot } = useSystemStore();
+  const { isRoot, features } = useSystemStore();
 
   const item = "w-full flex items-center gap-2.5 px-3 py-1.5 rounded-lg hover:bg-gray-700 text-gray-200 transition-colors";
 
@@ -85,13 +85,19 @@ function TileMenu({ stack, onAction, onClose }: TileMenuProps) {
       <button className={item} onClick={() => act("download-compose")}>
         <FileDown size={14} className="text-gray-400 shrink-0" /> Download Compose File
       </button>
-      <button className={`${item} text-gray-500 text-xs`} onClick={() => act("casaos-import")}>
-        <PackagePlus size={13} className="text-gray-500 shrink-0" /> Import from CasaOS
-      </button>
-      {stack.origin === "casaos" && isRoot && (
-        <button className={item} onClick={() => act("migrate-casaos")}>
-          <ArrowRightLeft size={13} className="text-sky-400 shrink-0" /> Migrate to anpan-os
-        </button>
+      {/* CasaOS only runs on Linux, so on any other host there is nothing to import from
+          and these would fail on click. See PlatformFeatures in the system store. */}
+      {features.casaosMigration && (
+        <>
+          <button className={`${item} text-gray-500 text-xs`} onClick={() => act("casaos-import")}>
+            <PackagePlus size={13} className="text-gray-500 shrink-0" /> Import from CasaOS
+          </button>
+          {stack.origin === "casaos" && isRoot && (
+            <button className={item} onClick={() => act("migrate-casaos")}>
+              <ArrowRightLeft size={13} className="text-sky-400 shrink-0" /> Migrate to anpan-os
+            </button>
+          )}
+        </>
       )}
 
       <div className="border-t border-gray-700 my-1 mx-1" />

@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
-# anpan-os local installer
+# anpan-os local installer  —  Linux (systemd) and macOS (launchd)
 #
 # Builds the binary from the current working tree and installs it over the
 # system service — the same layout install.sh produces, but from local source
 # instead of a GitHub release. Use this to test changes in a real production
-# run (root, systemd, real Docker socket) rather than `bun run dev`.
+# run (root, the real service manager, the real Docker socket) rather than
+# `bun run dev`.
 #
 # Usage:
 #   ./install-local.sh                 # build host arch, install, restart, follow logs
 #   ./install-local.sh --skip-build    # reinstall the binary already in ./binaries
 #   ./install-local.sh --no-typecheck  # skip `tsc --noEmit` (faster iteration)
-#   ./install-local.sh --no-follow     # do not tail journalctl at the end
+#   ./install-local.sh --no-follow     # do not tail the service logs at the end
 #
 # Run as your normal user — it calls sudo only for the privileged steps.
 # Running the whole script under sudo is rejected because the build needs your
@@ -19,8 +20,6 @@
 set -euo pipefail
 
 INSTALL_DIR="/usr/local/bin"
-CONFIG_DIR="/var/lib/anpan-os"
-SERVICE_FILE="/etc/systemd/system/anpan-os.service"
 SERVICE="anpan-os"
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -56,22 +55,108 @@ if [ "$(id -u)" -eq 0 ]; then
   die "Do not run this script as root. Run it as your normal user — it will sudo where needed."
 fi
 
-command -v sudo       >/dev/null || die "sudo not found."
-command -v systemctl  >/dev/null || die "systemctl not found — this script targets systemd hosts."
+command -v sudo >/dev/null || die "sudo not found."
 
-ARCH="$(uname -m)"
-case "$ARCH" in
-  x86_64)  BUILD_TARGET="bun-linux-x64";   BINARY="anpan-os-linux-x64"   ;;
-  aarch64) BUILD_TARGET="bun-linux-arm64"; BINARY="anpan-os-linux-arm64" ;;
-  *) die "Unsupported architecture: $ARCH" ;;
+# ── Platform ──────────────────────────────────────────────────────────────────
+
+OS="$(uname -s)"
+ARCH_RAW="$(uname -m)"
+
+case "$ARCH_RAW" in
+  x86_64|amd64)  ARCH="x64"   ;;
+  # macOS says arm64 where Linux says aarch64.
+  aarch64|arm64) ARCH="arm64" ;;
+  *) die "Unsupported architecture: $ARCH_RAW" ;;
 esac
+
+case "$OS" in
+  Linux)
+    PLATFORM="linux"
+    CONFIG_DIR="/var/lib/anpan-os"
+    SERVICE_FILE="/etc/systemd/system/${SERVICE}.service"
+    command -v systemctl >/dev/null || die "systemctl not found — this script targets systemd hosts."
+    ;;
+  Darwin)
+    PLATFORM="darwin"
+    CONFIG_DIR="/usr/local/var/anpan-os"
+    LAUNCHD_LABEL="io.anpan.anpan-os"
+    SERVICE_FILE="/Library/LaunchDaemons/${LAUNCHD_LABEL}.plist"
+    command -v launchctl >/dev/null || die "launchctl not found."
+    ;;
+  *) die "Unsupported operating system: $OS" ;;
+esac
+
+BUILD_TARGET="bun-${PLATFORM}-${ARCH}"
+BINARY="anpan-os-${PLATFORM}-${ARCH}"
+
+# ── Service provider ──────────────────────────────────────────────────────────
+#
+# The same vocabulary as install.sh, over systemd or launchd.
+
+svc_is_active() {
+  if [ "$PLATFORM" = "linux" ]; then
+    systemctl is-active --quiet "$SERVICE" 2>/dev/null
+  else
+    sudo launchctl print "system/${LAUNCHD_LABEL}" 2>/dev/null | grep -q "state = running"
+  fi
+}
+
+svc_stop() {
+  if [ "$PLATFORM" = "linux" ]; then
+    sudo systemctl stop "$SERVICE"
+  else
+    sudo launchctl bootout "system/${LAUNCHD_LABEL}" 2>/dev/null || true
+  fi
+}
+
+svc_restart() {
+  if [ "$PLATFORM" = "linux" ]; then
+    sudo systemctl daemon-reload
+    sudo systemctl enable --now "$SERVICE"
+    sudo systemctl restart "$SERVICE"
+  else
+    sudo launchctl bootout "system/${LAUNCHD_LABEL}" 2>/dev/null || true
+    sudo launchctl bootstrap system "$SERVICE_FILE"
+    sudo launchctl enable "system/${LAUNCHD_LABEL}" 2>/dev/null || true
+    sudo launchctl kickstart -k "system/${LAUNCHD_LABEL}"
+  fi
+}
+
+svc_logs() {
+  if [ "$PLATFORM" = "linux" ]; then
+    sudo journalctl -u "$SERVICE" -n "${1:-40}" --no-pager || true
+  else
+    sudo tail -n "${1:-40}" "${CONFIG_DIR}/anpan-os.log" "${CONFIG_DIR}/anpan-os.err" 2>/dev/null || true
+  fi
+}
+
+svc_follow() {
+  if [ "$PLATFORM" = "linux" ]; then
+    sudo journalctl -u "$SERVICE" -n 30 -f --no-pager
+  else
+    sudo tail -n 30 -f "${CONFIG_DIR}/anpan-os.log" "${CONFIG_DIR}/anpan-os.err"
+  fi
+}
+
+host_ip() {
+  if [ "$PLATFORM" = "linux" ]; then
+    hostname -I 2>/dev/null | awk '{print $1}'
+  else
+    for iface in $(route -n get default 2>/dev/null | awk '/interface:/{print $2}') en0 en1; do
+      ip="$(ipconfig getifaddr "$iface" 2>/dev/null || true)"
+      [ -n "$ip" ] && { echo "$ip"; return; }
+    done
+    echo "localhost"
+  fi
+}
 
 BINARY_PATH="${REPO_DIR}/binaries/${BINARY}"
 VERSION="$(grep -m1 '"version"' "${REPO_DIR}/package.json" | cut -d'"' -f4)"
 
-info "Repo    : ${REPO_DIR}"
-info "Version : ${VERSION:-unknown}"
-info "Target  : ${BUILD_TARGET}"
+info "Repo     : ${REPO_DIR}"
+info "Version  : ${VERSION:-unknown}"
+info "Platform : ${PLATFORM}/${ARCH}"
+info "Target   : ${BUILD_TARGET}"
 
 # Warn about a dev server holding the port — it would fight the service.
 if pgrep -f "bun run src/index.ts" >/dev/null 2>&1 || pgrep -f "bun.*--hot.*src/index.ts" >/dev/null 2>&1; then
@@ -106,12 +191,16 @@ info "Requesting sudo for install steps..."
 sudo -v || die "sudo authentication failed."
 
 # Stop before replacing — overwriting a running executable gives "Text file busy".
-if systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
+if svc_is_active; then
   info "Stopping ${SERVICE}..."
-  sudo systemctl stop "$SERVICE"
+  svc_stop
 fi
 
+sudo mkdir -p "$INSTALL_DIR"
 sudo install -m 755 "$BINARY_PATH" "${INSTALL_DIR}/anpan-os"
+# A locally built binary is not quarantined, but a previously downloaded one at this path
+# may have been, and `install` preserves the destination's attributes in some cases.
+[ "$PLATFORM" = "darwin" ] && sudo xattr -d com.apple.quarantine "${INSTALL_DIR}/anpan-os" 2>/dev/null || true
 success "Binary installed at ${INSTALL_DIR}/anpan-os"
 
 # ── Config directory (created once, never overwritten) ────────────────────────
@@ -127,8 +216,8 @@ else
 [server]
 port = 5000
 bind = "public"   # "local" = 127.0.0.1 only | "public" = 0.0.0.0 (all interfaces)
-# tls_cert = "/var/lib/anpan-os/certs/cert.pem"
-# tls_key  = "/var/lib/anpan-os/certs/key.pem"
+# tls_cert = "certs/cert.pem"
+# tls_key  = "certs/key.pem"
 
 [auth]
 passkey_allowed_origins = []
@@ -147,7 +236,10 @@ fi
 
 # ── Systemd service ───────────────────────────────────────────────────────────
 
-sudo tee "$SERVICE_FILE" >/dev/null <<EOF
+sudo mkdir -p "$(dirname "$SERVICE_FILE")"
+
+if [ "$PLATFORM" = "linux" ]; then
+  sudo tee "$SERVICE_FILE" >/dev/null <<EOF
 [Unit]
 Description=anpan-os Home Server OS
 After=network-online.target docker.service
@@ -164,18 +256,57 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
+else
+  # KeepAlive stands in for Restart=on-failure. PATH is explicit because launchd gives a
+  # daemon a minimal environment with neither Homebrew nor Docker Desktop on it.
+  sudo tee "$SERVICE_FILE" >/dev/null <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${LAUNCHD_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${INSTALL_DIR}/anpan-os</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>${CONFIG_DIR}</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+    <key>StandardOutPath</key>
+    <string>${CONFIG_DIR}/anpan-os.log</string>
+    <key>StandardErrorPath</key>
+    <string>${CONFIG_DIR}/anpan-os.err</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+</dict>
+</plist>
+EOF
+  # launchd refuses a plist that is group- or world-writable.
+  sudo chown root:wheel "$SERVICE_FILE"
+  sudo chmod 644 "$SERVICE_FILE"
+fi
 
-sudo systemctl daemon-reload
-sudo systemctl enable --now "$SERVICE"
-sudo systemctl restart "$SERVICE"
+svc_restart
 
 # Give it a moment to either come up or crash, then report honestly.
 sleep 2
-if systemctl is-active --quiet "$SERVICE"; then
+if svc_is_active; then
   success "${SERVICE} is running."
 else
   warn "${SERVICE} is NOT active. Recent logs:"
-  sudo journalctl -u "$SERVICE" -n 40 --no-pager || true
+  svc_logs 40
   die "Service failed to start."
 fi
 
@@ -183,19 +314,24 @@ fi
 
 PORT="$(sudo grep -m1 '^port' "${CONFIG_DIR}/config.toml" | tr -dc '0-9' || true)"
 PORT="${PORT:-5000}"
-IP="$(hostname -I | awk '{print $1}')"
+IP="$(host_ip)"
 
 echo ""
 echo -e "${GREEN}✅ anpan-os ${VERSION} (local build) installed and running!${NC}"
 echo ""
 echo -e "   Config : ${CYAN}${CONFIG_DIR}/config.toml${NC}"
-echo -e "   Service: ${CYAN}systemctl status ${SERVICE}${NC}"
-echo -e "   Logs   : ${CYAN}journalctl -u ${SERVICE} -f${NC}"
+if [ "$PLATFORM" = "linux" ]; then
+  echo -e "   Service: ${CYAN}systemctl status ${SERVICE}${NC}"
+  echo -e "   Logs   : ${CYAN}journalctl -u ${SERVICE} -f${NC}"
+else
+  echo -e "   Service: ${CYAN}sudo launchctl print system/${LAUNCHD_LABEL}${NC}"
+  echo -e "   Logs   : ${CYAN}tail -f ${CONFIG_DIR}/anpan-os.log${NC}"
+fi
 echo ""
 echo -e "   Open ${CYAN}http://${IP}:${PORT}${NC} in your browser."
 echo ""
 
 if [ "$FOLLOW" -eq 1 ]; then
   info "Following logs (Ctrl-C to detach — the service keeps running)..."
-  sudo journalctl -u "$SERVICE" -n 30 -f --no-pager
+  svc_follow
 fi

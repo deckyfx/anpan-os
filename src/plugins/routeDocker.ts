@@ -8,6 +8,7 @@ import { judgeStackBindPaths, judgeBindPath, otherStacksBindPaths } from "../lib
 import { getDiskUsage, prune, type CleanupCategory } from "../lib/docker-cleanup";
 import { config } from "../config";
 import { envConfig } from "../env-config";
+import { CASAOS_APPS_DIR } from "../lib/platform";
 
 type ComposeOrigin = "managed" | "casaos" | null;
 
@@ -27,7 +28,7 @@ async function detectOrigin(name: string, managed: boolean): Promise<ComposeOrig
 
   let origin: ComposeOrigin = null;
 
-  const casaosPath = `/var/lib/casaos/apps/${name}/docker-compose.yml`;
+  const casaosPath = `${CASAOS_APPS_DIR}/${name}/docker-compose.yml`;
   try {
     if (await Bun.file(casaosPath).exists()) { origin = "casaos"; }
   } catch { /* directory not readable */ }

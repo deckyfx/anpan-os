@@ -1,6 +1,7 @@
 import { join, resolve } from "node:path";
 import { mkdirSync } from "node:fs";
 import { envConfig } from "./env-config";
+import { DEFAULT_SMB_CONF } from "./lib/platform";
 
 const CONFIG_FILE = "config.toml";
 
@@ -26,14 +27,15 @@ passkey_allowed_origins = []
 # disable_login_method = []      # "form" disables password login/setup; "passkey" disables passkey auth/registration
 
 [compose]
-# folder = "/var/lib/anpan-os/composes"   # defaults to $HOME/.anpanos/composes
+# folder = "..."   # defaults to $HOME/.anpanos/composes
 
 [files]
 root = "/"   # root path the file manager is allowed to browse
 # metadata_lookup = false   # allow track lookup at iTunes / MusicBrainz (sends track and album names off-box)
 
 [samba]
-# smb_conf = "/etc/samba/smb.conf"   # system smb.conf (anpan-os adds one include line here)
+# smb_conf = "..."   # system smb.conf (anpan-os adds one include line here)
+#                    # defaults: /etc/samba/smb.conf (Linux), <brew prefix>/etc/smb.conf (macOS)
 `;
 
 interface ServerConfig {
@@ -201,12 +203,17 @@ class Config {
   }
 
   /**
-   * Path to the system smb.conf — defaults to /etc/samba/smb.conf.
-   * anpan-os adds a single `include = <sambaSharesPath>` line here (requires root).
+   * Path to the system smb.conf. anpan-os adds a single `include = <sambaSharesPath>`
+   * line here (requires root).
+   *
+   * The default is platform-dependent: /etc/samba/smb.conf on Linux, and the Homebrew
+   * prefix's etc/smb.conf on macOS — /opt/homebrew on Apple Silicon, /usr/local on Intel.
+   * macOS has no /etc/samba at all, so the Linux default would silently create a file
+   * that no smbd ever reads.
    */
   get smbConfPath(): string {
     const raw = this.data.samba.smb_conf;
-    if (!raw) return "/etc/samba/smb.conf";
+    if (!raw) return DEFAULT_SMB_CONF;
     return resolve(raw);
   }
 

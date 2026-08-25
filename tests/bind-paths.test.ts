@@ -1,9 +1,23 @@
 import { test, expect, describe, beforeAll, afterAll } from "bun:test";
 import { judgeBindPath } from "../src/lib/bind-paths";
 import { mkdtempSync, mkdirSync, symlinkSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { realpathSync } from "node:fs";
+
+/**
+ * Scratch directories live under the home directory, not the OS temp directory.
+ *
+ * tmpdir() is not a neutral location for these tests. On macOS it is /var/folders/…, which
+ * canonicalises to /private/var/… and is therefore inside a protected system root — so
+ * every "this path is deletable" case was refused for the wrong reason and the whole
+ * allowed-suite failed on macOS while passing on Linux. A directory in $HOME is what real
+ * stack data actually looks like on both platforms, so the guards judge it on the rule
+ * under test rather than on where the test happened to put it.
+ */
+function scratch(prefix: string): string {
+  return realpathSync(mkdtempSync(join(homedir(), prefix)));
+}
 
 /**
  * These guards are the only thing between a checkbox and irreversible data loss, so the
@@ -17,7 +31,7 @@ let deep: string;
 beforeAll(() => {
   // realpath the temp dir: macOS and some Linux setups symlink /tmp, and the guards
   // compare canonical paths.
-  base = realpathSync(mkdtempSync(join(tmpdir(), "anpan-binds-")));
+  base = scratch(".anpan-binds-");
   deep = join(base, "AppData", "myapp");
   mkdirSync(deep, { recursive: true });
   writeFileSync(join(deep, "data.db"), "x");
@@ -80,7 +94,7 @@ describe("judgeBindPath — refusals", () => {
     // A files root is required for this to mean anything: with "/" nothing is outside it.
     // The link sits inside the root, so the lexical prefix check used elsewhere would
     // pass it — only canonicalisation catches the escape.
-    const outside = realpathSync(mkdtempSync(join(tmpdir(), "anpan-outside-")));
+    const outside = scratch(".anpan-outside-");
     const link = join(base, "AppData", "escape");
     symlinkSync(outside, link);
     try {

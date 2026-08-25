@@ -478,15 +478,19 @@ export function filesPlugin(jwtSecret: string) {
     }, { body: t.Object({ path: t.String(), owner: t.String(), group: t.String(), recursive: t.Optional(t.Boolean()) }) })
 
     // POST /api/files/zip
-    .post("/zip", async ({ body }) => {
+    .post("/zip", async ({ body, set }) => {
       let dest: string;
       let paths: string[];
       try {
         dest  = guardPath(body.dest);
         paths = body.paths.map((p) => guardPath(p));
       } catch { return forbidden(); }
+      // zip ships with macOS and most Linux distros, but "most" is not "all" — a slim
+      // container image has neither, and a raw "command not found" is not an answer.
+      const zip = await commands.which("zip");
+      if (!zip) { set.status = 503; return { error: "zip is not installed — see System Doctor" }; }
       try {
-        await Bun.$`${bins.zip} -r ${dest} ${paths}`.quiet();
+        await Bun.$`${zip} -r ${dest} ${paths}`.quiet();
         return { ok: true };
       } catch {
         return serverError();
@@ -494,14 +498,16 @@ export function filesPlugin(jwtSecret: string) {
     }, { body: t.Object({ paths: t.Array(t.String()), dest: t.String() }) })
 
     // POST /api/files/unzip
-    .post("/unzip", async ({ body }) => {
+    .post("/unzip", async ({ body, set }) => {
       let src: string, dest: string;
       try {
         src  = guardPath(body.path);
         dest = guardPath(body.dest);
       } catch { return forbidden(); }
+      const unzip = await commands.which("unzip");
+      if (!unzip) { set.status = 503; return { error: "unzip is not installed — see System Doctor" }; }
       try {
-        await Bun.$`${bins.unzip} -o ${src} -d ${dest}`.quiet();
+        await Bun.$`${unzip} -o ${src} -d ${dest}`.quiet();
         return { ok: true };
       } catch {
         return serverError();

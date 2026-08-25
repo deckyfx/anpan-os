@@ -24,7 +24,17 @@ interface EnvInfo {
   user:   string;
   uid:    number;
   isRoot: boolean;
-  samba:  { installed: boolean; active: boolean; enabled: boolean };
+  /**
+   * `installed` means a server anpan-os can actually configure, not merely a binary named
+   * smbd — see detectSamba() on the server. `flavor` says which one was found.
+   */
+  samba:  {
+    installed: boolean;
+    active:    boolean;
+    enabled:   boolean;
+    flavor?:   "samba" | "apple" | "none";
+    reason?:   string;
+  };
 }
 
 // ─── Initial state ────────────────────────────────────────────────────────────
@@ -98,6 +108,15 @@ async function runComposeSourceCheck(set: (i: number, patch: Partial<Check>) => 
 }
 
 function applySambaChecks(env: EnvInfo, set: (i: number, patch: Partial<Check>) => void) {
+  // macOS has an smbd — Apple's — that ignores smb.conf entirely. Saying "not found on
+  // PATH" there would be plainly wrong and would send the user looking for a missing
+  // binary that is sitting in /usr/sbin.
+  if (env.samba.flavor === "apple") {
+    set(4, { status: "warn", detail: "Apple SMB server — does not read smb.conf" });
+    set(5, { status: "warn", detail: "Shares are managed in System Settings, or install Samba: brew install samba" });
+    return;
+  }
+
   if (!env.samba.installed) {
     set(4, { status: "warn", detail: "smbd not found on PATH" });
     set(5, { status: "warn", detail: "N/A — Samba not installed" });
@@ -256,7 +275,9 @@ export function DoctorDialog({ open, onClose }: {
     : hasErr ? { text: "Issues detected",          color: "text-red-400",    bg: "bg-red-500/10    border-red-500/20"    }
     :          { text: "Check warnings above",     color: "text-yellow-400", bg: "bg-yellow-500/10 border-yellow-500/20" };
 
-  const toolsMissing = tools.filter(t => t.binary !== undefined && !t.available).length;
+  // `applicable` excludes tools with no role on this platform — systemctl and ss on macOS,
+  // lsof and launchctl on Linux — which are absent by design rather than missing.
+  const toolsMissing = tools.filter(t => t.applicable !== false && !t.available).length;
 
   return (
     <>

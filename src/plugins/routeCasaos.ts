@@ -10,8 +10,13 @@ import { StreamAggregator, drainStream } from "../lib/sse";
 import { buildComposeSourceReport, findOrphanServices } from "../lib/compose-source";
 import type { SSEMsg } from "../lib/sse";
 import { invalidateOriginCache } from "./routeDocker";
+import { CASAOS_APPS_DIR as PLATFORM_CASAOS_APPS_DIR, FEATURES } from "../lib/platform";
 
-const CASAOS_APPS_DIR = "/var/lib/casaos/apps";
+/**
+ * CasaOS keeps its stacks here. Imported from lib/platform rather than redeclared, so the
+ * path and the availability flag that gates these routes cannot drift apart.
+ */
+const CASAOS_APPS_DIR = PLATFORM_CASAOS_APPS_DIR;
 
 type MigrateMsg =
   | { step: "reading" | "writing" | "deploying" }
@@ -38,6 +43,22 @@ export function casaosPlugin(jwtSecret: string) {
 
   return new Elysia({ prefix: "/api/casaos" })
     .use(authGuard(jwtSecret))
+
+    /**
+     * CasaOS itself only runs on Linux, so on any other platform there is nothing to read
+     * and nothing to migrate from. Refused here rather than left to fail deeper: without
+     * this the routes would walk a /var/lib/casaos that cannot exist and report an empty
+     * app list, which reads as "you have no CasaOS apps" instead of "this does not apply".
+     *
+     * The UI hides these controls entirely — see FEATURES in lib/platform — so reaching
+     * this guard means a direct API call.
+     */
+    .onBeforeHandle(({ set }) => {
+      if (!FEATURES.casaosMigration) {
+        set.status = 501;
+        return { error: "CasaOS migration is only available on Linux" };
+      }
+    })
 
     .get("/apps", () => readCasaOSApps())
 
