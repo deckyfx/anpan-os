@@ -163,17 +163,24 @@ Open `http://<your-server-ip>:5000` and complete the setup wizard on first run.
 case "$(uname -s)" in Linux) OS=linux ;; Darwin) OS=darwin ;; esac
 case "$(uname -m)" in x86_64|amd64) ARCH=x64 ;; aarch64|arm64) ARCH=arm64 ;; esac
 
-# Download binary + checksum
+# Download binary + checksum.
+# Keep the published asset name: the .sha256 file names that file, so renaming it
+# on download makes verification fail to find it.
+ASSET="anpan-os-${OS}-${ARCH}"
 BASE="https://github.com/deckyfx/anpan-os/releases/latest/download"
-curl -fsSL "${BASE}/anpan-os-${OS}-${ARCH}"        -o anpan-os
-curl -fsSL "${BASE}/anpan-os-${OS}-${ARCH}.sha256" -o anpan-os.sha256
+curl -fsSL "${BASE}/${ASSET}"        -o "${ASSET}"
+curl -fsSL "${BASE}/${ASSET}.sha256" -o "${ASSET}.sha256"
 
-# Verify — macOS has no sha256sum
-if [ "$OS" = darwin ]; then shasum -a 256 -c anpan-os.sha256; else sha256sum -c anpan-os.sha256; fi
+# Verify, and stop if it fails — macOS has no sha256sum
+if [ "$OS" = darwin ]; then
+  shasum -a 256 -c "${ASSET}.sha256" || exit 1
+else
+  sha256sum -c "${ASSET}.sha256" || exit 1
+fi
 
 # Install
-chmod +x anpan-os
-sudo mv anpan-os /usr/local/bin/anpan-os
+chmod +x "${ASSET}"
+sudo mv "${ASSET}" /usr/local/bin/anpan-os
 
 # macOS only: strip the Gatekeeper quarantine flag curl set, or the binary
 # is killed on launch with no useful message.

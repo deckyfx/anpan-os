@@ -15,8 +15,10 @@ import { test, expect, describe } from "bun:test";
 import { parseProcStat, parseMeminfo, cpuUsageFrom } from "../src/lib/providers/metrics/linux";
 import { parseVmStat, groupApfs, apfsParts, isSystemMount } from "../src/lib/providers/metrics/darwin";
 import { parseDf, dedupeByDevice } from "../src/lib/providers/metrics/df";
-import { parseSs }   from "../src/lib/providers/ports/ss";
+import { parseSs, SS_ARGS } from "../src/lib/providers/ports/ss";
 import { parseLsof } from "../src/lib/providers/ports/lsof";
+import { AppleShareProvider } from "../src/lib/providers/shares/apple-provider";
+import type { DiscoveredShare } from "../src/lib/providers/shares/types";
 
 // ─── Linux CPU and memory ────────────────────────────────────────────────────
 
@@ -31,6 +33,21 @@ intr 12345
     // idle 9000 + iowait 120
     expect(s.idle).toBe(9120);
     expect(s.total).toBe(102 + 3 + 45 + 9000 + 120 + 0 + 8);
+  });
+
+  test("guest counters are not double-counted", () => {
+    // The kernel already includes `guest` within `user` and `guest_nice` within `nice`.
+    // Adding the last two fields again inflates the total, which understates usage on a
+    // host running VMs.
+    const withGuests = `cpu  100 10 40 800 50 0 0 0 70 5\n`;
+    const s = parseProcStat(withGuests);
+    expect(s.total).toBe(100 + 10 + 40 + 800 + 50); // not + 70 + 5
+  });
+
+  test("a kernel reporting fewer fields still parses", () => {
+    // Older kernels stop at softirq; slicing must not invent NaN.
+    const short = `cpu  100 10 40 800 50 0 0\n`;
+    expect(parseProcStat(short).total).toBe(1000);
   });
 
   test("cpuUsageFrom turns two samples into a percentage", () => {
@@ -214,6 +231,19 @@ LISTEN 0      4096       127.0.0.1:5432       0.0.0.0:*    users:(("postgres",pi
   test("garbage lines are skipped rather than throwing", () => {
     expect(parseSs("nonsense\n\n", "tcp")).toEqual([]);
   });
+
+  test("each query asks for listeners of one protocol only", () => {
+    // -l is what restricts the answer to listening sockets; without it `ss` reports every
+    // socket, and established TCP connections were being labelled as UDP listeners.
+    expect(SS_ARGS.tcp).toEqual(["-Htlnp"]);
+    expect(SS_ARGS.udp).toEqual(["-Hulnp"]);
+    for (const [proto, args] of Object.entries(SS_ARGS)) {
+      const flags = args[0]!;
+      expect(flags).toContain("l");                          // listening only
+      expect(flags).toContain(proto === "tcp" ? "t" : "u");  // the right protocol
+      expect(flags).not.toContain(proto === "tcp" ? "u" : "t");
+    }
+  });
 });
 
 describe("lsof -F output (macOS)", () => {
@@ -251,5 +281,67 @@ n[::1]:631
   test("a command containing spaces is not split", () => {
     const raw = "p1\ncMy Long App Name\nn*:8080\n";
     expect(parseLsof(raw, "tcp")[0]!.process).toBe("My Long App Name");
+  });
+});
+
+// ─── Apple share updates ─────────────────────────────────────────────────────
+
+describe("AppleShareProvider.update — which changes reach the backend", () => {
+  /**
+   * The provider is exercised through a recording stub rather than `sharing` itself: the
+   * question here is which commands would be issued, and running the real tool would
+   * mutate the host's Open Directory.
+   */
+  class Recorder extends AppleShareProvider {
+    calls: string[][] = [];
+    listResult: DiscoveredShare[] = [];
+    protected override async run(args: string[]): Promise<string> { this.calls.push(args); return ""; }
+    override async list(): Promise<DiscoveredShare[]> { return this.listResult; }
+  }
+
+  const existing: DiscoveredShare = {
+    name: "docs", path: "/old/path", comment: "", readOnly: false,
+    browseable: true, guestOk: true, source: "external",
+  };
+
+  test("a path-only change is not silently dropped", async () => {
+    // sync() emits exactly this patch when only the path differs. The early return used to
+    // swallow it, leaving the sharepoint on the old directory while the UI showed the new.
+    const p = new Recorder();
+    p.listResult = [existing];
+    await p.update("docs", { path: "/new/path" });
+
+    const verbs = p.calls.map(c => c[0]);
+    expect(verbs).toContain("-r"); // removed
+    expect(verbs).toContain("-a"); // and recreated at the new path
+    const create = p.calls.find(c => c[0] === "-a")!;
+    expect(create).toContain("/new/path");
+  });
+
+  test("a flag-only change issues one edit and no recreate", async () => {
+    const p = new Recorder();
+    p.listResult = [existing];
+    await p.update("docs", { readOnly: true });
+
+    expect(p.calls).toHaveLength(1);
+    expect(p.calls[0]![0]).toBe("-e");
+    expect(p.calls[0]).toContain("-R");
+  });
+
+  test("a change the backend cannot store does nothing at all", async () => {
+    // `comment` lives in SQLite only; issuing a bare `sharing -e docs` would be pointless.
+    const p = new Recorder();
+    p.listResult = [existing];
+    await p.update("docs", { comment: "new description" });
+    expect(p.calls).toHaveLength(0);
+  });
+
+  test("a rename moves both identifiers", async () => {
+    // -n is the lookup key, -S is what clients see; moving only one leaves the share
+    // answering to a name the user is not shown.
+    const p = new Recorder();
+    p.listResult = [existing];
+    await p.update("docs", { name: "documents" });
+    expect(p.calls[0]).toEqual(["-e", "docs", "-n", "documents", "-S", "documents"]);
   });
 });

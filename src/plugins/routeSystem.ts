@@ -1,7 +1,7 @@
 import { Elysia } from "elysia";
 import { join } from "node:path";
 import { authGuard } from "./authGuard";
-import { metrics, ports, service } from "../lib/providers";
+import { metrics, ports, service, shareProvider } from "../lib/providers";
 import {
   ARCH, FEATURES, PLATFORM, PLATFORM_LABEL, TMP_DIR,
   binaryName, currentBinaryPath, detectSamba,
@@ -32,14 +32,19 @@ export function systemPlugin(jwtSecret: string) {
     // Apple's SMBX, which ignores smb.conf, so "smbd is present" is not "shares work".
     .get("/info", async () => {
       const samba = await detectSamba();
+      // Whether shares can be managed is a question about the provider, not about Samba.
+      // detectSamba() answers only "is this a real Samba install", which was the whole
+      // story before the Apple provider existed and is now half of it: a stock Mac has no
+      // Samba and full share management. Reporting `manageable` here said otherwise.
+      const provider = await shareProvider();
       return {
         version:   APP_VERSION,
         configDir: envConfig.RUNTIME_CONFIG_DIR,
         platform:  PLATFORM,
         arch:      ARCH,
         platformLabel: PLATFORM_LABEL,
-        features:  { ...FEATURES, samba: samba.manageable },
-        smb:       samba,
+        features:  { ...FEATURES, samba: provider !== null },
+        smb:       { ...samba, provider: provider?.id ?? null },
       };
     })
     .get("/stats", async () => {
@@ -56,19 +61,23 @@ export function systemPlugin(jwtSecret: string) {
                      || process.env.USER
                      || (isRoot ? "root" : "unknown");
 
-      const smb = await detectSamba();
-      // "installed" means a server anpan-os can actually drive. Apple's SMBX is running
-      // software, but not something these routes can configure, and reporting it as
-      // installed would put a working-looking share dialog in front of the user.
-      const state = smb.manageable
-        ? await service.state("smbd")
-        : { active: false, enabled: false };
+      const smb      = await detectSamba();
+      const provider = await shareProvider();
+      // "installed" means a server anpan-os can actually drive — which now includes
+      // Apple's, through the native provider.
+      const state = provider ? await service.state("smbd") : { active: false, enabled: false };
 
       return {
         user, uid, isRoot,
         platform: PLATFORM,
         arch: ARCH,
-        samba: { installed: smb.manageable, flavor: smb.flavor, reason: smb.reason, ...state },
+        samba: {
+          installed: provider !== null,
+          provider:  provider?.id ?? null,
+          flavor:    smb.flavor,
+          reason:    smb.reason,
+          ...state,
+        },
       };
     })
     .get("/update-check", async () => {
@@ -112,6 +121,18 @@ export function systemPlugin(jwtSecret: string) {
     })
     .post("/update", async ({ set }) => {
       if ((process.getuid?.() ?? -1) !== 0) { set.status = 403; return { error: "Requires root" }; }
+
+      // Refuse unless this process *is* the compiled binary.
+      //
+      // The update replaces process.execPath. Under `bun run src/index.ts` that is the Bun
+      // runtime itself, so a self-update in source mode would overwrite the user's Bun
+      // installation with an anpan-os binary. The build-mode flag is the only reliable
+      // signal — the executable's name is not, since a compiled binary can be renamed and
+      // `bun` cannot.
+      if (!envConfig.IS_BINARY_MODE) {
+        set.status = 409;
+        return { error: "Self-update is only available for an installed binary, not a source-mode run." };
+      }
 
       // Re-fetch latest release to get download URLs
       const releaseRes = await fetch(

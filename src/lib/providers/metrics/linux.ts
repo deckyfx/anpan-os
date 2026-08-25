@@ -9,16 +9,25 @@ import { bins } from "../../commands";
 import { parseDf, dedupeByDevice } from "./df";
 import type { CpuSample, DiskMount, MetricsProvider, RamUsage } from "./types";
 
+/** Fields of the /proc/stat "cpu" line that are not already counted in another field. */
+const CPU_FIELDS = 8; // user, nice, system, idle, iowait, irq, softirq, steal
+
 /**
  * Parse the aggregate "cpu" line of /proc/stat.
  *
  * Fields after the label are jiffies per state: user, nice, system, idle, iowait, irq,
- * softirq, steal… Idle is idle + iowait, because a CPU waiting on disk is not doing work.
+ * softirq, steal, guest, guest_nice. Idle is idle + iowait, because a CPU waiting on disk
+ * is not doing work.
+ *
+ * Only the first eight are summed. The kernel already includes `guest` within `user` and
+ * `guest_nice` within `nice`, so adding them again inflates the denominator — which on a
+ * KVM host running guests understates reported CPU usage, by an amount that grows with how
+ * busy the guests are.
  */
 export function parseProcStat(raw: string): CpuSample {
   const parts = raw.split("\n")[0]!.trim().split(/\s+/).slice(1).map(Number);
   const idle  = (parts[3] ?? 0) + (parts[4] ?? 0);
-  const total = parts.reduce((a, b) => a + (Number.isFinite(b) ? b : 0), 0);
+  const total = parts.slice(0, CPU_FIELDS).reduce((a, b) => a + (Number.isFinite(b) ? b : 0), 0);
   return { idle, total };
 }
 

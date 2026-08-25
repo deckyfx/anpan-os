@@ -84,7 +84,14 @@ export class AppleShareProvider implements ShareProvider {
     return sharing;
   }
 
-  private async run(args: string[]): Promise<string> {
+  /**
+   * Invoke `sharing`.
+   *
+   * protected rather than private so tests can substitute a recorder: the useful question
+   * about update() is which commands it decides to issue, and answering it against the
+   * real tool would mean mutating the host's Open Directory to assert on a branch.
+   */
+  protected async run(args: string[]): Promise<string> {
     const sharing = await this.bin();
     const proc = Bun.spawn([sharing, ...args], { stdout: "pipe", stderr: "pipe" });
     const [out, err, code] = await Promise.all([
@@ -163,9 +170,15 @@ export class AppleShareProvider implements ShareProvider {
 
     // `comment` and `browseable` are deliberately absent: the backend has nowhere to put
     // them, and capabilities.comment/browseable tell the UI not to offer them.
-    if (args.length === 2) return; // nothing this backend can act on
+    //
+    // A path change carries no flag, so it is handled below rather than here — and
+    // returning on an empty flag list would skip it. sync() produces exactly that patch
+    // whenever only the path differs, which made a folder move update the database and the
+    // UI while the sharepoint kept serving the old directory.
+    const hasFlagChange = args.length > 2;
+    if (!hasFlagChange && patch.path === undefined) return;
 
-    await this.run(args);
+    if (hasFlagChange) await this.run(args);
 
     // `sharing` has no flag to move an existing sharepoint, so a path change is a
     // remove-and-recreate. Done last, so a failure above leaves the share intact.

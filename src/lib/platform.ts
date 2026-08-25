@@ -10,8 +10,8 @@
  */
 
 import { homedir, tmpdir } from "node:os";
-import { existsSync, readdirSync, statSync } from "node:fs";
-import { join }            from "node:path";
+import { existsSync, lstatSync, readdirSync, readlinkSync, realpathSync, statSync } from "node:fs";
+import { basename, dirname, isAbsolute, join } from "node:path";
 
 export type Platform = "linux" | "darwin" | "win32";
 export type Arch     = "x64" | "arm64";
@@ -140,11 +140,16 @@ function candidateHomes(): string[] {
   if (!isRoot) return homes;
 
   // Real accounts only: /Users also holds Shared and .localized.
+  //
+  // Sorted, because readdir order is filesystem-defined and not stable: without this, a
+  // host with two Docker users could bind to a different daemon between reboots, and
+  // Docker operations here include pruning volumes.
   try {
-    for (const entry of readdirSync("/Users", { withFileTypes: true })) {
-      if (!entry.isDirectory() || entry.name.startsWith(".") || entry.name === "Shared") continue;
-      homes.push(join("/Users", entry.name));
-    }
+    const accounts = readdirSync("/Users", { withFileTypes: true })
+      .filter(e => e.isDirectory() && !e.name.startsWith(".") && e.name !== "Shared")
+      .map(e => e.name)
+      .sort();
+    for (const name of accounts) homes.push(join("/Users", name));
   } catch { /* unreadable /Users — fall back to our own home */ }
 
   return homes;
@@ -157,10 +162,18 @@ function candidateHomes(): string[] {
  * override is always honoured before anything is probed.
  */
 export function dockerSocketCandidates(): string[] {
-  const candidates: string[] = [];
+  // An explicit unix:// DOCKER_HOST is the whole list, not the head of it.
+  //
+  // Probing past it split the application in two: the HTTP client would fall through to
+  // some other socket it found, while `docker compose` — which reads DOCKER_HOST itself —
+  // kept using the configured one. Container listings and stack operations would then be
+  // talking to different daemons, and `docker system prune` would reclaim from whichever
+  // the cleanup client had picked. A configured socket that is missing must fail as a
+  // configured socket that is missing.
+  const explicit = explicitDockerSocket();
+  if (explicit) return [explicit];
 
-  const host = Bun.env.DOCKER_HOST;
-  if (host?.startsWith("unix://")) candidates.push(host.slice("unix://".length));
+  const candidates: string[] = [];
 
   if (IS_MACOS) {
     for (const home of candidateHomes()) {
@@ -173,6 +186,31 @@ export function dockerSocketCandidates(): string[] {
 }
 
 /**
+ * Canonical path of a socket, following one level of symlink.
+ *
+ * `realpathSync` cannot be used on the socket itself: on macOS it fails with EOPNOTSUPP
+ * for a socket node, and the failure is silent enough to look like "no symlink here" —
+ * which defeated the deduplication this exists for. The link is read directly instead, and
+ * only the containing directory is canonicalised, which is where /var → /private/var and
+ * any other directory symlink gets resolved.
+ */
+function canonicalSocketPath(path: string): string {
+  try {
+    const target   = lstatSync(path).isSymbolicLink() ? readlinkSync(path) : path;
+    const absolute = isAbsolute(target) ? target : join(dirname(path), target);
+    return join(realpathSync(dirname(absolute)), basename(absolute));
+  } catch {
+    return path;
+  }
+}
+
+/** The socket named by DOCKER_HOST, when it names one over a unix path. */
+export function explicitDockerSocket(): string | null {
+  const host = Bun.env.DOCKER_HOST;
+  return host?.startsWith("unix://") ? host.slice("unix://".length) : null;
+}
+
+/**
  * The Docker socket to talk to.
  *
  * Resolved once at module load: the socket does not move while the process runs, and
@@ -182,12 +220,34 @@ export function dockerSocketCandidates(): string[] {
  */
 export const DOCKER_SOCKET: string = (() => {
   const candidates = dockerSocketCandidates();
-  for (const path of candidates) {
-    try {
-      if (statSync(path).isSocket()) return path;
-    } catch { /* absent — try the next */ }
+
+  const found = candidates.filter((path) => {
+    try { return statSync(path).isSocket(); } catch { return false; }
+  });
+
+  // Distinct *daemons*, not distinct paths. Docker Desktop links /var/run/docker.sock to
+  // the socket in the user's home, so the two paths that turn up on a perfectly ordinary
+  // Mac are one daemon — and warning about that would put a spurious line in the log on
+  // every boot for most users.
+  const distinct = new Set(found.map(canonicalSocketPath));
+
+  // Several users each have their own Docker runtime. Root can reach all of them, and
+  // nothing in the filesystem says which one the administrator meant — so the choice is
+  // announced rather than made silently, and DOCKER_HOST is offered to settle it.
+  // Refusing outright was the other option, but this service starts unattended at boot,
+  // and a host that stops managing containers because a second account once ran Docker is
+  // a worse failure than a named default.
+  if (distinct.size > 1) {
+    console.warn(
+      `⚠️  Multiple Docker sockets found; using ${found[0]}\n` +
+      `   Others: ${found.slice(1).join(", ")}\n` +
+      `   Set DOCKER_HOST=unix://<path> to choose explicitly.`,
+    );
   }
-  return candidates[candidates.length - 1]!;
+
+  // Nothing found: still name the conventional path, so the error a caller reports is
+  // "cannot connect to /var/run/docker.sock" rather than something invented.
+  return found[0] ?? candidates[candidates.length - 1]!;
 })();
 
 /**

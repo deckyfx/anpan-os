@@ -42,6 +42,19 @@ export function parseSs(raw: string, proto: string): Listener[] {
   return entries;
 }
 
+/**
+ * The flags each query needs, kept as data so they can be asserted in a test.
+ *
+ * The UDP query previously read `-Htunp`, which is wrong twice over: `-t` includes TCP, and
+ * the absence of `-l` means every socket is listed rather than only listening ones. Both
+ * TCP sockets and established connections were therefore reported as UDP listeners. `-u`
+ * plus `-l` asks the question that was intended.
+ */
+export const SS_ARGS = {
+  tcp: ["-Htlnp"],
+  udp: ["-Hulnp"],
+} as const;
+
 export class SsPortProvider implements PortProvider {
   readonly id = "ss" as const;
 
@@ -49,8 +62,8 @@ export class SsPortProvider implements PortProvider {
     const ss = await commands.which("ss");
     if (!ss) return [];
     const [tcp, udp] = await Promise.all([
-      Bun.$`${ss} -Htlnp`.quiet().nothrow(),
-      Bun.$`${ss} -Htunp`.quiet().nothrow(),
+      Bun.$`${ss} ${SS_ARGS.tcp}`.quiet().nothrow(),
+      Bun.$`${ss} ${SS_ARGS.udp}`.quiet().nothrow(),
     ]);
     return [
       ...parseSs(tcp.stdout.toString(), "tcp"),
