@@ -12,11 +12,13 @@ interface Props {
 function AddShareDialogInner({
   onClose, initialName = "", initialPath = "",
 }: Omit<Props, "open"> & { initialName: string; initialPath: string }) {
-  const { addShare, setNewShare, setSambaError, sambaError, loadShares } = useFileStore();
+  const { addShare, setNewShare, setSambaError, sambaError, loadShares, sambaBackend } = useFileStore();
 
   const [name,            setName]           = useState(initialName);
   const [path,            setPath]           = useState(initialPath);
   const [comment,         setComment]        = useState(initialName ? `AnpanOS share ${initialName}` : "");
+  // See EditShareDialog: kept locally when the backend cannot store it.
+  const commentReachesClients = sambaBackend?.capabilities?.comment !== false;
   const [commentEdited,   setCommentEdited]  = useState(false);
   const [readOnly,        setReadOnly]       = useState(false);
   const [guestOk,         setGuestOk]        = useState(true);
@@ -103,7 +105,11 @@ function AddShareDialogInner({
         </div>
 
         <div>
-          <label className="block text-xs text-gray-400 mb-1">Comment <span className="text-gray-600">(optional)</span></label>
+          <label className="block text-xs text-gray-400 mb-1">
+            Comment <span className="text-gray-600">(optional)</span>{!commentReachesClients && (
+            <span className="text-gray-600"> · stored in anpan-os only</span>
+          )}
+          </label>
           <input
             value={comment}
             onChange={(e) => { setComment(e.target.value); setCommentEdited(true); }}

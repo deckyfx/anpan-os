@@ -1,9 +1,10 @@
 /**
  * System stats route — integration tests.
  *
- * GET /api/system/stats reads /proc/stat, /proc/meminfo, and `df /` — all
- * available on Linux. The response must contain numeric fields in a plausible
- * range.
+ * GET /api/system/stats reads whatever the host provides — /proc/stat and /proc/meminfo on
+ * Linux, os.cpus() ticks and `vm_stat` on macOS — plus `df -Pk` on both. The assertions are
+ * deliberately about plausibility rather than exact values, so the same suite holds on
+ * either platform without knowing which one it is running on.
  *
  * Run: bun test tests/system.test.ts
  */

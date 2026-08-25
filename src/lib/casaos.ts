@@ -1,7 +1,9 @@
 import { parse } from "yaml";
 import { readdir } from "node:fs/promises";
 
-const APPS_DIR = "/var/lib/casaos/apps";
+import { CASAOS_APPS_DIR } from "./platform";
+
+const APPS_DIR = CASAOS_APPS_DIR;
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 

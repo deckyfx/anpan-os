@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# anpan-os installer / updater
+# anpan-os installer / updater  —  Linux (systemd) and macOS (launchd)
 #
 # Usage: curl -fsSL https://raw.githubusercontent.com/deckyfx/anpan-os/main/install.sh | sudo bash
 #
@@ -19,8 +19,6 @@ set -euo pipefail
 
 REPO="deckyfx/anpan-os"
 INSTALL_DIR="/usr/local/bin"
-CONFIG_DIR="/var/lib/anpan-os"
-SERVICE_FILE="/etc/systemd/system/anpan-os.service"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -29,6 +27,184 @@ info()    { echo -e "${CYAN}[INFO]${NC}  $*"; }
 success() { echo -e "${GREEN}[ OK ]${NC}  $*"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 die()     { echo -e "${RED}[FAIL]${NC}  $*" >&2; exit 1; }
+
+# ── Platform detection ────────────────────────────────────────────────────────
+#
+# Everything below this point speaks through the svc_* functions and the variables set
+# here, so the two platforms differ in one place rather than at every call site.
+
+OS="$(uname -s)"
+ARCH_RAW="$(uname -m)"
+
+case "$ARCH_RAW" in
+  x86_64|amd64)   ARCH="x64"   ;;
+  # macOS reports arm64 where Linux reports aarch64. Accepting only one of the two is
+  # exactly what makes this script fail on Apple Silicon.
+  aarch64|arm64)  ARCH="arm64" ;;
+  *) die "Unsupported architecture: $ARCH_RAW" ;;
+esac
+
+case "$OS" in
+  Linux)
+    PLATFORM="linux"
+    CONFIG_DIR="/var/lib/anpan-os"
+    SERVICE_FILE="/etc/systemd/system/anpan-os.service"
+    # coreutils
+    SHA_CMD="sha256sum"
+    ;;
+  Darwin)
+    PLATFORM="darwin"
+    # The macOS counterpart of /var/lib. Deliberately not a Homebrew prefix: that differs
+    # between Apple Silicon (/opt/homebrew) and Intel (/usr/local), and state should not
+    # move when a machine is replaced.
+    CONFIG_DIR="/usr/local/var/anpan-os"
+    LAUNCHD_LABEL="io.anpan.anpan-os"
+    SERVICE_FILE="/Library/LaunchDaemons/${LAUNCHD_LABEL}.plist"
+    # macOS has no sha256sum; shasum -a 256 prints the same "<hash>  <file>" format.
+    SHA_CMD="shasum -a 256"
+    ;;
+  *) die "Unsupported operating system: $OS (this installer supports Linux and macOS)" ;;
+esac
+
+BINARY="anpan-os-${PLATFORM}-${ARCH}"
+
+# ── Service provider ──────────────────────────────────────────────────────────
+#
+# systemd and launchd disagree about almost everything: launchd has no "enable" separate
+# from "load", no "reload", and reports state through `print` rather than `is-active`.
+# These wrappers give the install flow one vocabulary.
+
+svc_is_active() {
+  if [ "$PLATFORM" = "linux" ]; then
+    systemctl is-active --quiet anpan-os 2>/dev/null
+  else
+    # `print` exits non-zero when the job is not loaded. A loaded job with a live PID is
+    # the closest launchd equivalent of "active".
+    launchctl print "system/${LAUNCHD_LABEL}" 2>/dev/null | grep -q "state = running"
+  fi
+}
+
+svc_stop() {
+  if [ "$PLATFORM" = "linux" ]; then
+    systemctl stop anpan-os
+  else
+    launchctl bootout "system/${LAUNCHD_LABEL}" 2>/dev/null || true
+  fi
+}
+
+svc_start() {
+  if [ "$PLATFORM" = "linux" ]; then
+    systemctl start anpan-os
+  else
+    launchctl bootstrap system "$SERVICE_FILE" 2>/dev/null || true
+    launchctl kickstart "system/${LAUNCHD_LABEL}" 2>/dev/null || true
+  fi
+}
+
+svc_restart() {
+  if [ "$PLATFORM" = "linux" ]; then
+    systemctl restart anpan-os
+  else
+    # -k kills the running instance first; bootstrap covers the not-yet-loaded case.
+    launchctl bootstrap system "$SERVICE_FILE" 2>/dev/null || true
+    launchctl kickstart -k "system/${LAUNCHD_LABEL}"
+  fi
+}
+
+svc_enable() {
+  if [ "$PLATFORM" = "linux" ]; then
+    systemctl enable --quiet anpan-os 2>/dev/null || true
+  else
+    # RunAtLoad in the plist is what makes a LaunchDaemon start at boot; bootstrapping it
+    # into the system domain is the whole of "enable" here.
+    launchctl enable "system/${LAUNCHD_LABEL}" 2>/dev/null || true
+  fi
+}
+
+svc_logs() {
+  if [ "$PLATFORM" = "linux" ]; then
+    journalctl -u anpan-os -n "${1:-20}" --no-pager || true
+  else
+    # launchd has no log store of its own; the plist redirects stdout/stderr to these.
+    tail -n "${1:-20}" "${CONFIG_DIR}/anpan-os.log" "${CONFIG_DIR}/anpan-os.err" 2>/dev/null || true
+  fi
+}
+
+# The unit/plist text, written only when it differs from what is already installed.
+svc_unit_content() {
+  if [ "$PLATFORM" = "linux" ]; then
+    cat <<EOF
+[Unit]
+Description=anpan-os Home Server OS
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=${CONFIG_DIR}
+ExecStart=${INSTALL_DIR}/anpan-os
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  else
+    # KeepAlive replaces Restart=on-failure. PATH is set explicitly because launchd hands a
+    # daemon a minimal environment with neither Homebrew nor Docker Desktop on it, and
+    # anpan-os shells out to both.
+    cat <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${LAUNCHD_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${INSTALL_DIR}/anpan-os</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>${CONFIG_DIR}</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+    <key>StandardOutPath</key>
+    <string>${CONFIG_DIR}/anpan-os.log</string>
+    <key>StandardErrorPath</key>
+    <string>${CONFIG_DIR}/anpan-os.err</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+</dict>
+</plist>
+EOF
+  fi
+}
+
+# Local IP, for the "open this URL" line at the end.
+host_ip() {
+  if [ "$PLATFORM" = "linux" ]; then
+    hostname -I 2>/dev/null | awk '{print $1}'
+  else
+    # macOS has no `hostname -I`. Ask the active interface, falling back across the usual
+    # Wi-Fi/Ethernet names, then to localhost.
+    for iface in $(route -n get default 2>/dev/null | awk '/interface:/{print $2}') en0 en1; do
+      ip="$(ipconfig getifaddr "$iface" 2>/dev/null || true)"
+      [ -n "$ip" ] && { echo "$ip"; return; }
+    done
+    echo "localhost"
+  fi
+}
 
 ASSUME_YES="${ASSUME_YES:-0}"
 FORCE=0
@@ -55,8 +231,24 @@ done
 
 # True when $1 is an older version than $2. sort -V understands v-prefixed semver, so the
 # smaller of the pair sorts first; equal versions are not "older".
+#
+# macOS `sort` has no -V. The fallback compares the three numeric fields directly, which is
+# all these tags ever contain.
 is_older() {
-  [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n1)" = "$1" ]
+  [ "$1" = "$2" ] && return 1
+  if printf 'v1.0.0\nv1.0.1\n' | sort -V >/dev/null 2>&1; then
+    [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n1)" = "$1" ]
+  else
+    awk -v a="${1#v}" -v b="${2#v}" 'BEGIN {
+      split(a, x, "."); split(b, y, ".");
+      for (i = 1; i <= 3; i++) {
+        xi = x[i] + 0; yi = y[i] + 0;
+        if (xi < yi) exit 0;
+        if (xi > yi) exit 1;
+      }
+      exit 1
+    }'
+  fi
 }
 
 # This script is normally piped into bash, so stdin is the script itself — never a user.
@@ -118,14 +310,7 @@ fi
 
 [ "$(id -u)" -eq 0 ] || die "This script must be run as root (use sudo)."
 
-# ── Architecture detection ────────────────────────────────────────────────────
-
-ARCH="$(uname -m)"
-case "$ARCH" in
-  x86_64)  BINARY="anpan-os-linux-x64"   ;;
-  aarch64) BINARY="anpan-os-linux-arm64" ;;
-  *) die "Unsupported architecture: $ARCH" ;;
-esac
+info "Platform: ${PLATFORM}/${ARCH}"
 
 # ── Installed version ─────────────────────────────────────────────────────────
 
@@ -182,7 +367,7 @@ rm -f "${TMP_SHA:-}"
 
 BINARY_UP_TO_DATE=0
 if [ -n "$EXPECTED_HASH" ] && [ -f "$INSTALLED_BIN" ]; then
-  if [ "$(sha256sum "$INSTALLED_BIN" | awk '{print $1}')" = "$EXPECTED_HASH" ]; then
+  if [ "$($SHA_CMD "$INSTALLED_BIN" | awk '{print $1}')" = "$EXPECTED_HASH" ]; then
     BINARY_UP_TO_DATE=1
   fi
 elif [ -z "$EXPECTED_HASH" ] && [ -n "$CURRENT_VERSION" ] && [ "$CURRENT_VERSION" = "$LATEST" ]; then
@@ -254,11 +439,12 @@ if [ "$NEED_DOWNLOAD" -eq 1 ]; then
   info "Downloading $BINARY ($LATEST)..."
   TMP="$(mktemp)"
   # --progress-bar shows a visual bar; -f fails on HTTP errors; -L follows redirects
-  curl -fL --progress-bar "$DOWNLOAD_URL" -o "$TMP" || die "Download failed: $DOWNLOAD_URL"
+  curl -fL --progress-bar "$DOWNLOAD_URL" -o "$TMP" \
+    || die "Download failed: $DOWNLOAD_URL (is there a ${PLATFORM}/${ARCH} build for ${LATEST}?)"
 
   if [ -n "$EXPECTED_HASH" ]; then
     info "Verifying SHA256 checksum..."
-    ACTUAL_HASH="$(sha256sum "$TMP" | awk '{print $1}')"
+    ACTUAL_HASH="$($SHA_CMD "$TMP" | awk '{print $1}')"
     [ "$EXPECTED_HASH" = "$ACTUAL_HASH" ] \
       || { rm -f "$TMP"; die "SHA256 mismatch — download may be corrupted. Aborting."; }
     success "Checksum verified."
@@ -266,15 +452,24 @@ if [ "$NEED_DOWNLOAD" -eq 1 ]; then
     warn "No published checksum for ${LATEST} — skipping verification."
   fi
 
-  # Stop the service before replacing the binary — overwriting a running
-  # executable causes "Text file busy" on Linux.
-  if systemctl is-active --quiet anpan-os 2>/dev/null; then
+  # Stop the service before replacing the binary — overwriting a running executable gives
+  # "Text file busy" on Linux, and on macOS leaves the old image mapped.
+  if svc_is_active; then
     info "Stopping anpan-os service..."
-    systemctl stop anpan-os
+    svc_stop
   fi
 
+  mkdir -p "$INSTALL_DIR"
   chmod +x "$TMP"
   mv "$TMP" "$INSTALLED_BIN"
+
+  if [ "$PLATFORM" = "darwin" ]; then
+    # Gatekeeper quarantines anything curl wrote. An unsigned binary carrying the
+    # quarantine attribute is killed on exec with no useful message, so it is stripped
+    # here rather than left for the user to discover.
+    xattr -d com.apple.quarantine "$INSTALLED_BIN" 2>/dev/null || true
+  fi
+
   BINARY_CHANGED=1
   success "Binary installed at ${INSTALLED_BIN}"
 fi
@@ -292,8 +487,8 @@ else
 [server]
 port = 5000
 bind = "public"   # "local" = 127.0.0.1 only | "public" = 0.0.0.0 (all interfaces)
-# tls_cert = "/var/lib/anpan-os/certs/cert.pem"
-# tls_key  = "/var/lib/anpan-os/certs/key.pem"
+# tls_cert = "certs/cert.pem"
+# tls_key  = "certs/key.pem"
 
 [auth]
 passkey_allowed_origins = []
@@ -310,45 +505,37 @@ EOF
   success "Config created at ${CONFIG_DIR}/config.toml"
 fi
 
-# ── Systemd service ───────────────────────────────────────────────────────────
+# ── Service unit ──────────────────────────────────────────────────────────────
 #
 # Written only when the contents actually differ, so an unchanged unit costs neither a
-# daemon-reload nor a restart.
+# reload nor a restart.
 
-UNIT_CONTENT="$(cat <<EOF
-[Unit]
-Description=anpan-os Home Server OS
-After=network-online.target docker.service
-Wants=network-online.target
-Requires=docker.service
-
-[Service]
-Type=simple
-WorkingDirectory=${CONFIG_DIR}
-ExecStart=${INSTALL_DIR}/anpan-os
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-EOF
-)"
+UNIT_CONTENT="$(svc_unit_content)"
 
 UNIT_CHANGED=0
 if [ ! -f "$SERVICE_FILE" ] || [ "$(cat "$SERVICE_FILE")" != "$UNIT_CONTENT" ]; then
+  mkdir -p "$(dirname "$SERVICE_FILE")"
   printf '%s\n' "$UNIT_CONTENT" > "$SERVICE_FILE"
-  systemctl daemon-reload
+  if [ "$PLATFORM" = "linux" ]; then
+    systemctl daemon-reload
+  else
+    # launchd refuses to load a plist that is group- or world-writable.
+    chown root:wheel "$SERVICE_FILE"
+    chmod 644 "$SERVICE_FILE"
+    # A changed plist must be unloaded before the new one takes effect.
+    launchctl bootout "system/${LAUNCHD_LABEL}" 2>/dev/null || true
+  fi
   UNIT_CHANGED=1
-  info "Systemd unit written."
+  info "Service definition written to ${SERVICE_FILE}"
 fi
 
-systemctl enable --quiet anpan-os 2>/dev/null || true
+svc_enable
 
 if [ "$BINARY_CHANGED" -eq 1 ] || [ "$UNIT_CHANGED" -eq 1 ]; then
-  systemctl restart anpan-os
+  svc_restart
   success "anpan-os service restarted."
-elif ! systemctl is-active --quiet anpan-os; then
-  systemctl start anpan-os
+elif ! svc_is_active; then
+  svc_start
   success "anpan-os service started."
 else
   success "anpan-os service already running — left untouched."
@@ -356,10 +543,10 @@ fi
 
 # ── Done ──────────────────────────────────────────────────────────────────────
 
-sleep 1
-if ! systemctl is-active --quiet anpan-os; then
+sleep 2
+if ! svc_is_active; then
   warn "anpan-os is not active. Recent logs:"
-  journalctl -u anpan-os -n 20 --no-pager || true
+  svc_logs 20
   die "Service failed to start."
 fi
 
@@ -374,8 +561,13 @@ else
 fi
 echo ""
 echo -e "   Config : ${CYAN}${CONFIG_DIR}/config.toml${NC}"
-echo -e "   Service: ${CYAN}systemctl status anpan-os${NC}"
-echo -e "   Logs   : ${CYAN}journalctl -u anpan-os -f${NC}"
+if [ "$PLATFORM" = "linux" ]; then
+  echo -e "   Service: ${CYAN}systemctl status anpan-os${NC}"
+  echo -e "   Logs   : ${CYAN}journalctl -u anpan-os -f${NC}"
+else
+  echo -e "   Service: ${CYAN}sudo launchctl print system/${LAUNCHD_LABEL}${NC}"
+  echo -e "   Logs   : ${CYAN}tail -f ${CONFIG_DIR}/anpan-os.log${NC}"
+fi
 echo ""
-echo -e "   Open ${CYAN}http://$(hostname -I | awk '{print $1}'):${PORT}${NC} in your browser."
+echo -e "   Open ${CYAN}http://$(host_ip):${PORT}${NC} in your browser."
 echo ""

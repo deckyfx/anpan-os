@@ -1,8 +1,37 @@
 import { Database } from "bun:sqlite";
 import { drizzle } from "drizzle-orm/bun-sqlite";
+import { mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 import { config } from "../config";
+import { envConfig } from "../env-config";
 
-const sqlite = new Database(config.databasePath);
+/**
+ * Create the runtime directory before opening the database.
+ *
+ * config.load() creates it, but this module runs at *import* time — long before that — so
+ * on a host where the directory does not exist yet SQLite fails with SQLITE_CANTOPEN and
+ * takes the whole process down, including `--version` and `--doctor`, which need no
+ * database at all. On Linux this never surfaced because the installer creates
+ * /var/lib/anpan-os before the binary ever runs; anywhere else, the first run is the
+ * failing one.
+ *
+ * A failure here is reported rather than swallowed: an unwritable directory is a
+ * permission problem the user can fix, and "unable to open database file" does not say
+ * which file or why.
+ */
+const databasePath = config.databasePath;
+try {
+  mkdirSync(dirname(databasePath), { recursive: true });
+} catch (err) {
+  const reason = err instanceof Error ? err.message : String(err);
+  console.error(
+    `❌ Cannot create the runtime directory ${envConfig.RUNTIME_CONFIG_DIR}: ${reason}\n` +
+    `   Create it and make it writable, or point RUNTIME_CONFIG_DIR somewhere else.`,
+  );
+  process.exit(1);
+}
+
+const sqlite = new Database(databasePath);
 // Wait for a competing writer rather than failing instantly. Without this, a second
 // process starting while the first is migrating dies here at import time — setting WAL
 // needs an exclusive lock, and this module is loaded long before any migration guard runs.

@@ -38,6 +38,10 @@ export const INFRA_MOUNTS = new Set([
 const PROTECTED = [
   "/", "/home", "/mnt", "/media", "/srv", "/tmp",
   "/DATA", "/DATA/AppData", "/DATA/Media",
+  // macOS equivalents. /Users is the counterpart of /home, and /Volumes of /mnt: both
+  // hold every account's or every disk's data, so a stack mounting one must never offer
+  // to take the whole tree with it.
+  "/Users", "/Users/Shared", "/Volumes", "/Applications", "/Library",
   homedir(),
 ];
 
@@ -52,6 +56,15 @@ const PROTECTED = [
 const SYSTEM_ROOTS = [
   "/etc", "/usr", "/var", "/opt", "/boot", "/dev", "/proc", "/sys", "/run",
   "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32", "/root", "/snap",
+  // macOS. /System and /Library are the OS itself; /cores and /Network complete the set of
+  // top-level directories nothing should be deleting.
+  //
+  // The macOS spellings of the Unix roots are deliberately absent: /etc, /var and /tmp are
+  // symlinks into /private, and the entries above are canonicalised before comparison, so
+  // "/etc" already matches as /private/etc. Listing "/private" as well would be broader
+  // than the Linux rule rather than equivalent to it — it would swallow /private/tmp,
+  // whose Linux counterpart /tmp permits deletion below the first level.
+  "/System", "/Library", "/Applications", "/cores", "/Network", "/Volumes/Preboot",
 ];
 
 /**
@@ -69,6 +82,9 @@ const SYSTEM_ROOTS = [
 const PERSONAL_DIR_NAMES = new Set([
   "Music", "Videos", "Pictures", "Documents", "Downloads", "Desktop", "Public",
   "Templates", "Movies", "Media", "Photos", "Books",
+  // macOS home directories. "Library" especially: it holds application state for the
+  // whole account, and a stack mounting it must not be able to nominate it for deletion.
+  "Library", "Applications", "Sites", "Creative Cloud Files",
 ]);
 
 /** Minimum depth below the files root, so a stack cannot nominate the root itself. */

@@ -1,7 +1,8 @@
 import { Elysia, t } from "elysia";
 import { join }      from "node:path";
 import { authGuard } from "./authGuard";
-import { bins }      from "../lib/commands";
+import { commands } from "../lib/commands";
+import { ports as portProvider } from "../lib/providers";
 import { envConfig } from "../env-config";
 
 export interface PortEntry {
@@ -30,38 +31,6 @@ async function readNotes(): Promise<NotesMap> {
 
 async function writeNotes(notes: NotesMap): Promise<void> {
   await Bun.write(notesPath(), JSON.stringify(notes, null, 2));
-}
-
-/**
- * Parse `ss -Htlnp` output into port entries.
- *
- * Example line:
- *   LISTEN  0  128  0.0.0.0:22  0.0.0.0:*  users:(("sshd",pid=1234,fd=3))
- */
-function parseSsOutput(raw: string): Array<{ port: number; address: string; process: string; pid: number | null }> {
-  const entries: Array<{ port: number; address: string; process: string; pid: number | null }> = [];
-  for (const line of raw.split("\n")) {
-    const cols = line.trim().split(/\s+/);
-    if (cols.length < 5) continue;
-    const local = cols[3] ?? "";
-    // Local address is "addr:port" — port is after the last colon
-    const lastColon = local.lastIndexOf(":");
-    if (lastColon < 0) continue;
-    const portStr = local.slice(lastColon + 1);
-    const port    = parseInt(portStr, 10);
-    if (isNaN(port) || port <= 0) continue;
-    const address = local.slice(0, lastColon) || "*";
-
-    // Process field: users:(("name",pid=NNN,fd=N))
-    const usersCol = cols.slice(5).join(" ");
-    const nameMatch = usersCol.match(/"\(([^"]+)"\)|"([^"]+)"/);
-    const processName = nameMatch ? (nameMatch[1] ?? nameMatch[2] ?? "") : "";
-    const pidMatch = usersCol.match(/pid=(\d+)/);
-    const pid = pidMatch ? parseInt(pidMatch[1]!, 10) : null;
-
-    entries.push({ port, address, process: processName, pid });
-  }
-  return entries;
 }
 
 /**
@@ -97,13 +66,8 @@ export function portsPlugin(jwtSecret: string) {
     .use(authGuard(jwtSecret))
 
     .get("/", async ({ set }) => {
-      // 1. Get listening TCP/UDP ports from ss
-      const ssResult = await Bun.$`ss -Htlnp`.nothrow();
-      // Also grab UDP
-      const ssUdpResult = await Bun.$`ss -Htunp`.nothrow();
-      const tcpEntries = parseSsOutput(ssResult.stdout.toString()).map(e => ({ ...e, proto: "tcp" }));
-      const udpEntries = parseSsOutput(ssUdpResult.stdout.toString()).map(e => ({ ...e, proto: "udp" }));
-      const allEntries = [...tcpEntries, ...udpEntries];
+      // 1. Listening TCP/UDP sockets — ss on Linux, lsof on macOS
+      const allEntries = await portProvider.listeners();
 
       // Deduplicate by port+proto
       const seen = new Set<string>();
@@ -114,9 +78,15 @@ export function portsPlugin(jwtSecret: string) {
         return true;
       });
 
-      // 2. Get Docker port bindings
-      const dockerResult = await Bun.$`${bins.docker} ps --format ${"{{.Names}}\t{{.Ports}}"}`.nothrow();
-      const containerByPort = parseDockerPorts(dockerResult.stdout.toString());
+      // 2. Docker port bindings — enrichment only. A host without Docker still has ports
+      // worth listing, so its absence annotates nothing rather than failing the scan.
+      const docker = await commands.which("docker");
+      const containerByPort = docker
+        ? parseDockerPorts(
+            (await Bun.$`${docker} ps --format ${"{{.Names}}\t{{.Ports}}"}`.quiet().nothrow())
+              .stdout.toString(),
+          )
+        : new Map<string, string>();
 
       // 3. Load notes
       const notes = await readNotes();

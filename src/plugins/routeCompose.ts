@@ -4,7 +4,7 @@ import { mkdirSync } from "node:fs";
 import { appendFile } from "node:fs/promises";
 import { authGuard } from "./authGuard";
 import { config } from "../config";
-import { bins } from "../lib/commands";
+import { bins, commands } from "../lib/commands";
 import { StackStore } from "../stores/stack-store";
 import { envConfig } from "../env-config";
 import { StreamAggregator, drainStream } from "../lib/sse";
@@ -17,6 +17,7 @@ import {
   findOrphanServices,
 } from "../lib/compose-source";
 import type { ComposeSourceReport } from "../lib/compose-source";
+import { CASAOS_APPS_DIR } from "../lib/platform";
 
 const STACK_NAME_RE     = /^[a-zA-Z0-9_-]+$/;
 const CONTAINER_NAME_RE = /^[a-zA-Z0-9_.\-]+$/;
@@ -68,15 +69,44 @@ async function composeUpArgs(name: string, stackDir: string): Promise<string[]> 
  * GET  /api/compose/templates                — list available stack templates
  * GET  /api/compose/templates/:id            — get template detail (includes composeYaml)
  */
+/**
+ * Compose endpoints that never invoke Docker, by method and path.
+ *
+ * `/tags` queries Docker Hub over HTTPS, and the rest read or write files under the compose
+ * folder. Blocking them when the daemon is absent means a machine with no Docker installed
+ * cannot view its own compose file, read an install log, or edit an env file — none of
+ * which the daemon has any part in.
+ *
+ * The method matters as much as the path, and the two `/file` routes are why: GET returns
+ * the compose file, while PUT rewrites it and then runs `docker compose up`. Exempting the
+ * path alone let that PUT past the guard, so on a host without Docker it would persist the
+ * user's edit and only then fail on the deploy — leaving the stack's file changed and its
+ * containers untouched, which is worse than refusing the request outright.
+ *
+ * Matched as whole paths rather than by suffix, too: a stack legitimately named "file"
+ * would make `/api/compose/stacks/file` end in "/file" and slip past.
+ *
+ * Anything not listed here requires Docker. New routes are therefore guarded by default.
+ */
+const DOCKER_FREE_ROUTES: { method: string; pattern: RegExp }[] = [
+  { method: "GET", pattern: /^\/api\/compose\/tags$/ },
+  { method: "GET", pattern: /^\/api\/compose\/compose-sources$/ },
+  { method: "GET", pattern: /^\/api\/compose\/stacks\/[^/]+\/(install-log|file|compose-source|envfile)$/ },
+  // Writing an env file touches no container; the compose file's PUT does, so it is absent.
+  { method: "PUT", pattern: /^\/api\/compose\/stacks\/[^/]+\/envfile$/ },
+];
+
+/** True when the request needs a reachable Docker daemon. Exported for tests. */
+export function needsDocker(method: string, path: string): boolean {
+  const verb = method.toUpperCase();
+  return !DOCKER_FREE_ROUTES.some((r) => r.method === verb && r.pattern.test(path));
+}
+
 export function composePlugin(jwtSecret: string) {
-  const docker = bins.docker; // resolved once; undefined = docker not installed on this OS
+  const docker = bins.docker; // the name to invoke; presence is checked per request below
 
   return new Elysia({ prefix: "/api/compose" })
     .use(authGuard(jwtSecret))
-    .onBeforeHandle(({ set }) => {
-      if (!docker) { set.status = 503; return { error: "Docker is not available on this system" }; }
-    })
-
     /**
      * Rejects a bad stack name with a real status before the stream opens.
      *
@@ -96,6 +126,29 @@ export function composePlugin(jwtSecret: string) {
       if (!stackDir.startsWith(config.composeFolder)) {
         set.status = 422;
         return { error: "Invalid stack name" };
+      }
+    })
+
+    /**
+     * Refuse Docker-backed routes when Docker cannot be reached.
+     *
+     * `bins.docker` being set means only that Docker is possible on this OS; whether it is
+     * installed is a separate question, and on macOS the common case is that it is not —
+     * Docker Desktop, OrbStack and Colima are all third-party. Cached in the registry, so
+     * this is a map lookup after the first request rather than a `which` per call.
+     *
+     * Registered after the name check on purpose. A malformed stack name is wrong whatever
+     * state the daemon is in, and 422 tells the caller something they can act on, where a
+     * 503 would send them to look at Docker over a typo.
+     *
+     * Scoped, too: several endpoints here only read or write files, and refusing those
+     * would mean a host without Docker could not so much as view its own compose file.
+     */
+    .onBeforeHandle(async ({ set, path, request }) => {
+      if (!needsDocker(request.method, path)) return;
+      if (!docker || !(await commands.isAvailable("docker"))) {
+        set.status = 503;
+        return { error: "Docker is not installed or not running — see System Doctor" };
       }
     })
 
@@ -223,9 +276,9 @@ export function composePlugin(jwtSecret: string) {
         stackDir = join(config.composeFolder, name);
       } else {
         // CasaOS — requires running as root
-        const casaosCompose = `/var/lib/casaos/apps/${name}/docker-compose.yml`;
+        const casaosCompose = `${CASAOS_APPS_DIR}/${name}/docker-compose.yml`;
         if (await Bun.file(casaosCompose).exists()) {
-          stackDir = `/var/lib/casaos/apps/${name}`;
+          stackDir = `${CASAOS_APPS_DIR}/${name}`;
         }
       }
 
@@ -347,7 +400,7 @@ export function composePlugin(jwtSecret: string) {
       }
 
       // 2. Try CasaOS apps directory (direct read)
-      const casaosPath = `/var/lib/casaos/apps/${name}/docker-compose.yml`;
+      const casaosPath = `${CASAOS_APPS_DIR}/${name}/docker-compose.yml`;
       try {
         const content = await Bun.file(casaosPath).text();
         return new Response(content, { headers });

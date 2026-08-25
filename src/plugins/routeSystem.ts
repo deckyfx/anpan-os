@@ -1,5 +1,13 @@
 import { Elysia } from "elysia";
+import { dirname, join } from "node:path";
+import { chmod, rename, rm } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { authGuard } from "./authGuard";
+import { metrics, ports, service, shareProvider } from "../lib/providers";
+import {
+  ARCH, FEATURES, PLATFORM, PLATFORM_LABEL,
+  binaryName, currentBinaryPath, detectSamba,
+} from "../lib/platform";
 import { bins, commands } from "../lib/commands";
 import { envConfig } from "../env-config";
 
@@ -18,50 +26,82 @@ const APP_VERSION: string =
   ((await Bun.file("package.json").json()) as { version?: string }).version ??
   "0.0.0";
 
+/**
+ * True while a self-update is running.
+ *
+ * /update downloads ~70 MB, stages it beside the target and renames over it. Two of those
+ * at once interleave: one request can still be writing its staged file while the other
+ * renames, and the binary the service launches from ends up partial. A double-click on the
+ * update button is enough to produce it, so the second caller is refused rather than
+ * allowed to race the first.
+ *
+ * Process-local, which is the right scope: the lock exists to protect this process's own
+ * write, and only one anpan-os owns a given install.
+ */
+let updateInFlight = false;
+
 export function systemPlugin(jwtSecret: string) {
   return new Elysia({ prefix: "/api/system" })
     .use(authGuard(jwtSecret))
-    .get("/info", () => ({ version: APP_VERSION, configDir: envConfig.RUNTIME_CONFIG_DIR }))
+    // The UI reads `features` to decide what to render at all — see lib/platform.
+    // Samba is resolved rather than assumed: /usr/sbin/smbd exists on every Mac but is
+    // Apple's SMBX, which ignores smb.conf, so "smbd is present" is not "shares work".
+    .get("/info", async () => {
+      const samba = await detectSamba();
+      // Whether shares can be managed is a question about the provider, not about Samba.
+      // detectSamba() answers only "is this a real Samba install", which was the whole
+      // story before the Apple provider existed and is now half of it: a stock Mac has no
+      // Samba and full share management. Reporting `manageable` here said otherwise.
+      const provider = await shareProvider();
+      return {
+        version:   APP_VERSION,
+        configDir: envConfig.RUNTIME_CONFIG_DIR,
+        platform:  PLATFORM,
+        arch:      ARCH,
+        platformLabel: PLATFORM_LABEL,
+        features:  { ...FEATURES, samba: provider !== null },
+        // `reason` is advice for a host that cannot manage shares at all. Emitting it
+        // beside a working provider produced a self-contradicting payload — "installed,
+        // and also: no SMB server found" — so readiness comes from the provider instead.
+        smb: provider
+          ? { provider: provider.id, flavor: samba.flavor, ...(await provider.status()) }
+          : { provider: null, flavor: samba.flavor, ready: false, detail: samba.reason ?? "", fixable: false },
+      };
+    })
     .get("/stats", async () => {
-      const [cpu, ram, disk] = await Promise.all([getCpu(), getRam(), getDisk()]);
-      return { cpu, ...ram, ...disk };
+      const [cpu, ram, disks] = await Promise.all([metrics.cpu(), metrics.ram(), metrics.disks()]);
+      return { cpu, ...ram, disks };
     })
     .get("/doctor", () => commands.doctor())
-    .post("/restart",  async ({ set }) => {
-      if ((process.getuid?.() ?? -1) !== 0) { set.status = 403; return { error: "Requires root" }; }
-      void Bun.$`systemctl reboot`.quiet().nothrow();
-      return { ok: true };
-    })
-    .post("/shutdown", async ({ set }) => {
-      if ((process.getuid?.() ?? -1) !== 0) { set.status = 403; return { error: "Requires root" }; }
-      void Bun.$`systemctl poweroff`.quiet().nothrow();
-      return { ok: true };
-    })
+    .post("/restart",  ({ set }) => power(set, service.rebootCommand()))
+    .post("/shutdown", ({ set }) => power(set, service.poweroffCommand()))
     .get("/environment", async () => {
-      const [whoamiRes, uidRes, sambaWhichRes] = await Promise.all([
-        Bun.$`whoami`.quiet().nothrow(),
-        Bun.$`id -u`.quiet().nothrow(),
-        Bun.$`which smbd`.quiet().nothrow(),
-      ]);
-
-      const user   = whoamiRes.stdout.toString().trim() || (process.env.USER ?? "unknown");
-      const uid    = parseInt(uidRes.stdout.toString().trim(), 10);
+      const uid    = process.getuid?.() ?? -1;
       const isRoot = uid === 0;
+      const user   = (await Bun.$`whoami`.quiet().nothrow()).stdout.toString().trim()
+                     || process.env.USER
+                     || (isRoot ? "root" : "unknown");
 
-      const sambaInstalled = sambaWhichRes.exitCode === 0;
+      const smb      = await detectSamba();
+      const provider = await shareProvider();
+      // "installed" means a server anpan-os can actually drive — which now includes
+      // Apple's, through the native provider.
+      const state = provider ? await service.state("smbd") : { active: false, enabled: false };
 
-      let sambaActive  = false;
-      let sambaEnabled = false;
-      if (sambaInstalled) {
-        const [activeRes, enabledRes] = await Promise.all([
-          Bun.$`systemctl is-active smbd`.quiet().nothrow(),
-          Bun.$`systemctl is-enabled smbd`.quiet().nothrow(),
-        ]);
-        sambaActive  = activeRes.stdout.toString().trim()  === "active";
-        sambaEnabled = enabledRes.stdout.toString().trim() === "enabled";
-      }
-
-      return { user, uid, isRoot, samba: { installed: sambaInstalled, active: sambaActive, enabled: sambaEnabled } };
+      return {
+        user, uid, isRoot,
+        platform: PLATFORM,
+        arch: ARCH,
+        samba: {
+          installed: provider !== null,
+          provider:  provider?.id ?? null,
+          flavor:    smb.flavor,
+          // Only when nothing can manage shares — otherwise this said "no SMB server
+          // found" next to installed: true.
+          reason:    provider ? undefined : smb.reason,
+          ...state,
+        },
+      };
     })
     .get("/update-check", async () => {
       try {
@@ -83,11 +123,12 @@ export function systemPlugin(jwtSecret: string) {
         const latestVersion = (data.tag_name ?? "").replace(/^v/, "");
         const updateAvailable = latestVersion !== "" && semverGt(latestVersion, APP_VERSION);
 
-        const arch        = process.arch === "arm64" ? "arm64" : "x64";
-        const binaryName  = `anpan-os-linux-${arch}`;
+        // Asset for *this* host, not always the Linux one — downloading a Linux ELF
+        // onto a Mac and marking it executable produces a service that cannot start.
+        const asset       = binaryName();
         const assets      = data.assets ?? [];
-        const downloadUrl = assets.find(a => a.name === binaryName)?.browser_download_url ?? "";
-        const sha256Url   = assets.find(a => a.name === `${binaryName}.sha256`)?.browser_download_url ?? "";
+        const downloadUrl = assets.find(a => a.name === asset)?.browser_download_url ?? "";
+        const sha256Url   = assets.find(a => a.name === `${asset}.sha256`)?.browser_download_url ?? "";
 
         return {
           currentVersion: APP_VERSION,
@@ -104,6 +145,39 @@ export function systemPlugin(jwtSecret: string) {
     .post("/update", async ({ set }) => {
       if ((process.getuid?.() ?? -1) !== 0) { set.status = 403; return { error: "Requires root" }; }
 
+      // Refuse unless this process *is* the compiled binary.
+      //
+      // The update replaces process.execPath. Under `bun run src/index.ts` that is the Bun
+      // runtime itself, so a self-update in source mode would overwrite the user's Bun
+      // installation with an anpan-os binary. The build-mode flag is the only reliable
+      // signal — the executable's name is not, since a compiled binary can be renamed and
+      // `bun` cannot.
+      if (!envConfig.IS_BINARY_MODE) {
+        set.status = 409;
+        return { error: "Self-update is only available for an installed binary, not a source-mode run." };
+      }
+
+      if (updateInFlight) {
+        set.status = 409;
+        return { error: "An update is already in progress." };
+      }
+      updateInFlight = true;
+      try {
+        return await runUpdate(set);
+      } finally {
+        updateInFlight = false;
+      }
+    });
+}
+
+/**
+ * Download the latest release and replace the running binary.
+ *
+ * Split out of the route so the in-flight guard can wrap it in a try/finally without the
+ * early returns below leaking the lock.
+ */
+async function runUpdate(set: { status?: number | string }): Promise<Record<string, unknown>> {
+
       // Re-fetch latest release to get download URLs
       const releaseRes = await fetch(
         "https://api.github.com/repos/deckyfx/anpan-os/releases/latest",
@@ -115,13 +189,12 @@ export function systemPlugin(jwtSecret: string) {
         assets?: { name: string; browser_download_url: string }[];
       };
 
-      const arch       = process.arch === "arm64" ? "arm64" : "x64";
-      const binaryName = `anpan-os-linux-${arch}`;
-      const assets     = release.assets ?? [];
-      const binaryUrl  = assets.find(a => a.name === binaryName)?.browser_download_url;
-      const sha256Url  = assets.find(a => a.name === `${binaryName}.sha256`)?.browser_download_url;
+      const asset     = binaryName();
+      const assets    = release.assets ?? [];
+      const binaryUrl = assets.find(a => a.name === asset)?.browser_download_url;
+      const sha256Url = assets.find(a => a.name === `${asset}.sha256`)?.browser_download_url;
 
-      if (!binaryUrl || !sha256Url) { set.status = 404; return { error: `No release asset found for ${binaryName}` }; }
+      if (!binaryUrl || !sha256Url) { set.status = 404; return { error: `No release asset found for ${asset}` }; }
 
       // Download checksum file
       const sha256Res = await fetch(sha256Url, { signal: AbortSignal.timeout(15_000) });
@@ -129,9 +202,7 @@ export function systemPlugin(jwtSecret: string) {
       const sha256Text    = await sha256Res.text();
       const expectedHash  = sha256Text.trim().split(/\s+/)[0] ?? "";
 
-      // Download binary
-      const tmpPath = "/tmp/anpan-os-update";
-      const binRes  = await fetch(binaryUrl, { signal: AbortSignal.timeout(120_000) });
+      const binRes = await fetch(binaryUrl, { signal: AbortSignal.timeout(120_000) });
       if (!binRes.ok) { set.status = 502; return { error: "Failed to download binary" }; }
       const binaryBuffer = await binRes.arrayBuffer();
 
@@ -141,73 +212,60 @@ export function systemPlugin(jwtSecret: string) {
       const actualHash = hasher.digest("hex");
       if (actualHash !== expectedHash) { set.status = 422; return { error: "SHA256 mismatch — download may be corrupted" }; }
 
-      // Write to temp path, make executable, then replace the running binary
-      await Bun.write(tmpPath, binaryBuffer);
-      await Bun.$`chmod +x ${tmpPath}`.quiet();
-      await Bun.$`mv ${tmpPath} /usr/local/bin/anpan-os`.quiet();
+      // Replace the binary this process is running from, wherever the installer put it,
+      // rather than assuming /usr/local/bin — a self-update that writes somewhere other
+      // than the path the service unit launches would appear to succeed and change nothing.
+      const target = currentBinaryPath();
 
-      // Fire-and-forget restart (response is sent before the process dies)
-      void Bun.$`systemctl restart anpan-os`.quiet().nothrow();
+      /**
+       * Stage the replacement beside the binary it replaces, never in the temp directory.
+       *
+       * rename() is atomic only within a single filesystem, and the temp directory is
+       * routinely on another — tmpfs on Linux, a per-user sandbox under /var/folders on
+       * macOS, or wherever a custom TMPDIR points. Across filesystems `mv` silently
+       * degrades to copy-then-unlink, so a crash, a full disk or a kill part-way through
+       * leaves a half-written executable at the exact path the service launches from, and
+       * the machine has no working anpan-os until someone reinstalls it by hand.
+       *
+       * Writing the download straight into the target's own directory keeps the final step
+       * a same-filesystem rename, which either happens completely or not at all. The name
+       * is unique and dotted so a partial file is neither picked up nor mistaken for the
+       * real binary if this process dies before the rename.
+       */
+      const staged = join(dirname(target), `.anpan-os-update-${process.pid}-${randomUUID()}`);
 
-      return { ok: true };
-    });
+      try {
+        await Bun.write(staged, binaryBuffer);
+        await chmod(staged, 0o755);
+        await rename(staged, target);
+      } catch (e) {
+        // The staged file is ours alone; leaving it behind would accumulate a copy of the
+        // binary in /usr/local/bin on every failed update.
+        await rm(staged, { force: true }).catch(() => {});
+        set.status = 500;
+        return { error: `Could not replace ${target}: ${e instanceof Error ? e.message : String(e)}` };
+      }
+
+      // Fire-and-forget restart (the response is sent before the process dies).
+      const restart = service.restartSelfCommand();
+      if (restart) void Bun.$`${restart}`.quiet().nothrow();
+
+  return { ok: true, restarted: restart !== null };
 }
 
-/** CPU usage % — two /proc/stat samples 150 ms apart. */
-async function getCpu(): Promise<number> {
-  const sample = async () => {
-    const text = await Bun.file("/proc/stat").text();
-    const parts = text.split("\n")[0]!.trim().split(/\s+/).slice(1).map(Number);
-    const idle  = (parts[3] ?? 0) + (parts[4] ?? 0); // idle + iowait
-    const total = parts.reduce((a, b) => a + b, 0);
-    return { idle, total };
-  };
+// ─── Power control ───────────────────────────────────────────────────────────
 
-  const s1 = await sample();
-  await Bun.sleep(150);
-  const s2 = await sample();
-
-  const deltaIdle  = s2.idle  - s1.idle;
-  const deltaTotal = s2.total - s1.total;
-  if (deltaTotal === 0) return 0;
-  return Math.round((1 - deltaIdle / deltaTotal) * 100);
-}
-
-/** RAM from /proc/meminfo — returns bytes. */
-async function getRam(): Promise<{ ramUsed: number; ramTotal: number }> {
-  const text  = await Bun.file("/proc/meminfo").text();
-  const lines = text.split("\n");
-  const get   = (key: string) => {
-    const line = lines.find((l) => l.startsWith(key));
-    return line ? parseInt(line.split(/\s+/)[1]!, 10) * 1024 : 0;
-  };
-  const total = get("MemTotal:");
-  const avail = get("MemAvailable:");
-  return { ramUsed: total - avail, ramTotal: total };
-}
-
-interface DiskMount {
-  device: string;
-  mount: string;
-  used: number;
-  total: number;
-}
-
-/** All physical disk mounts from `df -k`. Filters out virtual filesystems. */
-async function getDisk(): Promise<{ disks: DiskMount[] }> {
-  const result = await Bun.$`${bins.df} -k`.quiet().nothrow();
-  const lines  = result.stdout.toString().trim().split("\n").slice(1);
-  const disks: DiskMount[] = [];
-  for (const line of lines) {
-    const parts = line.trim().split(/\s+/);
-    if (parts.length < 6) continue;
-    const device = parts[0]!;
-    // Only real block devices (skip tmpfs, devtmpfs, squashfs, overlay, etc.)
-    if (!device.startsWith("/dev/")) continue;
-    const total = parseInt(parts[1]!, 10) * 1024;
-    const used  = parseInt(parts[2]!, 10) * 1024;
-    const mount = parts[5]!;
-    disks.push({ device, mount, used, total });
-  }
-  return { disks };
+/**
+ * Reboot or power off the host.
+ *
+ * Both platforms need root, and neither asks politely: `shutdown` and `systemctl poweroff`
+ * refuse outright for an unprivileged caller, so checking first gives a clearer 403 than
+ * the shell error would. Fire-and-forget — the machine goes down before a second response
+ * could be written.
+ */
+function power(set: { status?: number | string }, argv: string[] | null): { ok: true } | { error: string } {
+  if ((process.getuid?.() ?? -1) !== 0) { set.status = 403; return { error: "Requires root" }; }
+  if (!argv) { set.status = 501; return { error: `Power control is not supported on ${PLATFORM_LABEL}` }; }
+  void Bun.$`${argv}`.quiet().nothrow();
+  return { ok: true };
 }

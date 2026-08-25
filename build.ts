@@ -14,9 +14,13 @@ type BunCrossTarget =
   | "bun-darwin-arm64"
   | "bun-windows-x64";
 
+// Bun cross-compiles every one of these from any host, so a Linux CI runner produces the
+// macOS binaries too and no second runner is needed.
 const allTargets: { target: BunCrossTarget; outfile: string }[] = [
-  { target: "bun-linux-x64",   outfile: "./binaries/anpan-os-linux-x64"   },
-  { target: "bun-linux-arm64", outfile: "./binaries/anpan-os-linux-arm64" },
+  { target: "bun-linux-x64",    outfile: "./binaries/anpan-os-linux-x64"    },
+  { target: "bun-linux-arm64",  outfile: "./binaries/anpan-os-linux-arm64"  },
+  { target: "bun-darwin-arm64", outfile: "./binaries/anpan-os-darwin-arm64" },
+  { target: "bun-darwin-x64",   outfile: "./binaries/anpan-os-darwin-x64"   },
 ];
 
 // Optional filter: BUILD_TARGETS="bun-linux-x64" (comma-separated) builds a subset.

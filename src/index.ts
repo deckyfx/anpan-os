@@ -1,3 +1,4 @@
+import { ensureToolPath } from "./lib/platform";
 import { envConfig } from "./env-config";
 import { config } from "./config";
 import { MigrationManager } from "./db/migration-manager";
@@ -6,6 +7,11 @@ import { AppRepoStore }  from "./stores/app-repo-store";
 import { createApp } from "./app";
 import { appPlugin } from "./plugins/routeApp";
 import { parseCli, printHelp } from "./cli-parser";
+
+// launchd gives a macOS agent a minimal PATH with neither Homebrew nor Docker on it.
+// Repair it before anything shells out — including --doctor, whose whole job is to
+// report what is installed.
+ensureToolPath();
 
 // --- CLI dispatch ---
 const cli = parseCli();

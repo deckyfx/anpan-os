@@ -1,3 +1,5 @@
+import { DEFAULT_CONFIG_DIR } from "./lib/platform";
+
 /**
  * Bootstrap environment configuration — only what's needed before config.toml is loaded.
  * All runtime settings (port, TLS, database) live in RUNTIME_CONFIG_DIR/config.toml.
@@ -28,12 +30,13 @@ class EnvConfig {
   }
 
   /**
-   * Runtime config directory — only bootstrap env var.
-   * Defaults to /var/lib/anpan-os (system install) if not set.
-   * Override with RUNTIME_CONFIG_DIR env var for custom locations.
+   * Runtime config directory — the only bootstrap env var.
+   *
+   * Defaults to the platform's system location: /var/lib/anpan-os on Linux,
+   * /usr/local/var/anpan-os on macOS. Override with RUNTIME_CONFIG_DIR.
    */
   get RUNTIME_CONFIG_DIR(): string {
-    return Bun.env.RUNTIME_CONFIG_DIR ?? "/var/lib/anpan-os";
+    return Bun.env.RUNTIME_CONFIG_DIR ?? DEFAULT_CONFIG_DIR;
   }
 }
 

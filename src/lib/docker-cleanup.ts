@@ -12,7 +12,16 @@
  * by name.
  */
 
-const SOCKET = "/var/run/docker.sock";
+import { DOCKER_SOCKET } from "./platform";
+
+/**
+ * Where the daemon listens.
+ *
+ * Not a constant path any more: Docker Desktop, OrbStack, Colima and Rancher Desktop
+ * each put the socket somewhere under the user's home on macOS, and only Docker
+ * Desktop reliably links /var/run/docker.sock to it. See lib/platform.
+ */
+const SOCKET = DOCKER_SOCKET;
 const BASE   = "http://localhost";
 
 export type CleanupCategory =

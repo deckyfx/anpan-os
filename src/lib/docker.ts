@@ -2,6 +2,7 @@
 
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
+import { DOCKER_SOCKET } from "./platform";
 
 /**
  * Canonical form of a compose file path, for comparing our own paths against the
@@ -154,7 +155,14 @@ type DockerResult<T> =
   | { ok: true; data: T }
   | { ok: false; error: string };
 
-const SOCKET = "/var/run/docker.sock";
+/**
+ * Where the daemon listens.
+ *
+ * Not a constant path any more: Docker Desktop, OrbStack, Colima and Rancher Desktop
+ * each put the socket somewhere under the user's home on macOS, and only Docker
+ * Desktop reliably links /var/run/docker.sock to it. See lib/platform.
+ */
+const SOCKET = DOCKER_SOCKET;
 const BASE   = "http://localhost";
 
 async function dockerFetch<T>(

@@ -1,9 +1,28 @@
 import { test, expect, describe, beforeAll, afterAll } from "bun:test";
 import { judgeBindPath } from "../src/lib/bind-paths";
 import { mkdtempSync, mkdirSync, symlinkSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { realpathSync } from "node:fs";
+
+/**
+ * Scratch directories live under /tmp — literally, not via tmpdir() or homedir().
+ *
+ * Both of the obvious choices are wrong on one platform:
+ *
+ *   tmpdir() is /var/folders/… on macOS, which canonicalises under /private/var and is
+ *   therefore inside a protected system root, so every "this is deletable" case was
+ *   refused for the wrong reason.
+ *
+ *   homedir() is /root when the suite runs as root on Linux — which is itself a protected
+ *   system root, producing the same failure with the platforms swapped.
+ *
+ * "/tmp" is neither. On Linux it is protected only as an exact match, so paths beneath it
+ * are judged on the rule under test; on macOS it resolves to /private/tmp, which is the
+ * same exact-match case. The guards then answer the question the test is actually asking.
+ */
+function scratch(prefix: string): string {
+  return realpathSync(mkdtempSync(join("/tmp", prefix)));
+}
 
 /**
  * These guards are the only thing between a checkbox and irreversible data loss, so the
@@ -17,7 +36,7 @@ let deep: string;
 beforeAll(() => {
   // realpath the temp dir: macOS and some Linux setups symlink /tmp, and the guards
   // compare canonical paths.
-  base = realpathSync(mkdtempSync(join(tmpdir(), "anpan-binds-")));
+  base = scratch(".anpan-binds-");
   deep = join(base, "AppData", "myapp");
   mkdirSync(deep, { recursive: true });
   writeFileSync(join(deep, "data.db"), "x");
@@ -80,7 +99,7 @@ describe("judgeBindPath — refusals", () => {
     // A files root is required for this to mean anything: with "/" nothing is outside it.
     // The link sits inside the root, so the lexical prefix check used elsewhere would
     // pass it — only canonicalisation catches the escape.
-    const outside = realpathSync(mkdtempSync(join(tmpdir(), "anpan-outside-")));
+    const outside = scratch(".anpan-outside-");
     const link = join(base, "AppData", "escape");
     symlinkSync(outside, link);
     try {

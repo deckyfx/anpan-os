@@ -38,6 +38,30 @@ export interface SambaShare {
   sourceFile?: string;
 }
 
+/**
+ * What the server's share backend can actually honour.
+ *
+ * The UI renders against these rather than assuming Samba: a backend with no place to put
+ * a comment should not be offered one, because the value would be accepted and dropped.
+ */
+export interface ShareCapabilities {
+  comment:        boolean;
+  browseable:     boolean;
+  masks:          boolean;
+  requiresSetup:  boolean;
+  serviceControl: boolean;
+}
+
+/** Which backend is publishing shares, and whether it is ready to. */
+export interface ShareBackend {
+  provider:     "samba" | "apple" | null;
+  providerName?: string;
+  capabilities?: ShareCapabilities;
+  ready:        boolean;
+  detail:       string;
+  fixable:      boolean;
+}
+
 export interface FileBookmark {
   name: string;
   path: string;

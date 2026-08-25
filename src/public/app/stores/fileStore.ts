@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { api } from "../lib/api";
-import type { FileEntry, ViewMode, UploadItem, CtxMenu, SambaShare, FileBrowserConfig } from "../pages/files/types";
+import type { FileEntry, ViewMode, UploadItem, CtxMenu, SambaShare, ShareBackend, FileBrowserConfig } from "../pages/files/types";
 import { normalizePath, parentPath } from "../pages/files/helpers";
 import { useToastStore } from "./toastStore";
 
@@ -122,7 +122,9 @@ interface FileState {
   addShareOpen:       boolean;
   newShare:           NewShare;
   reloadingSmbd:      boolean;
-  /** null = not yet checked, true/false = include present in smb.conf */
+  /** Which backend publishes shares, and whether it is ready. null until checked. */
+  sambaBackend:       ShareBackend | null;
+  /** null = not yet checked, true/false = backend ready to serve shares */
   sambaSetupPresent:  boolean | null;
   sambaError:         string;
 
@@ -265,6 +267,7 @@ export const useFileStore = create<FileState>((set, get) => ({
   newShare:           { name: "", path: "/", comment: "", readOnly: false, guestOk: true },
   reloadingSmbd:      false,
   sambaSetupPresent:  null,
+  sambaBackend:       null,
   sambaError:         "",
 
   pendingNavigatePath: null,
@@ -382,8 +385,20 @@ export const useFileStore = create<FileState>((set, get) => ({
   checkSambaSetup: async () => {
     try {
       const { data } = await (api.api.samba as unknown as { "setup-status": { get: () => Promise<{ data: unknown }> } })["setup-status"].get();
-      const d = data as { present?: boolean } | null;
-      set({ sambaSetupPresent: d?.present ?? false });
+      const d = data as (Partial<ShareBackend> & { present?: boolean }) | null;
+      set({
+        sambaSetupPresent: d?.present ?? false,
+        sambaBackend: d
+          ? {
+              provider:     d.provider     ?? null,
+              providerName: d.providerName,
+              capabilities: d.capabilities,
+              ready:        d.ready        ?? d.present ?? false,
+              detail:       d.detail       ?? "",
+              fixable:      d.fixable      ?? false,
+            }
+          : null,
+      });
     } catch { /* ignore */ }
   },
 
