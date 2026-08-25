@@ -18,7 +18,7 @@
  *     conflicts and missing paths rather than a generic failure.
  */
 
-import { commands } from "../commands";
+import { commands } from "../../commands";
 import {
   ShareError, type DiscoveredShare, type ShareCapabilities, type ShareDefinition,
   type ShareProvider, type SetupStatus,

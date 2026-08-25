@@ -6,7 +6,7 @@
  * smb.conf *and* Apple's native sharing, and the two publish shares independently.
  */
 
-import { IS_MACOS, detectSamba } from "../platform";
+import { IS_MACOS, detectSamba } from "../../platform";
 import { AppleShareProvider }    from "./apple-provider";
 import { SambaShareProvider }    from "./samba-provider";
 import { ShareError, type ShareProvider } from "./types";

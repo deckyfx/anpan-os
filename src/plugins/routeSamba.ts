@@ -18,7 +18,7 @@ import { SambaShareStore } from "../stores/samba-share-store";
 import {
   ShareError, requireShareProvider, shareProvider, statusFor,
   type DiscoveredShare, type ShareDefinition, type ShareProvider,
-} from "../lib/shares";
+} from "../lib/providers/shares";
 
 /** Re-exported for callers that still speak in this shape. */
 export type SambaShare = DiscoveredShare;

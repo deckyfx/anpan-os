@@ -207,37 +207,14 @@ export function ensureDockerHost(): void {
 }
 
 // ─── Service management ──────────────────────────────────────────────────────
+//
+// Only the identifiers live here. The verbs — restart, reboot, power off, query state —
+// belong to the service provider in lib/providers/service, which is where systemd and
+// launchd actually diverge.
 
 /** The launchd label and plist path the macOS installers write. */
 export const LAUNCHD_LABEL      = "io.anpan.anpan-os";
 export const LAUNCHD_PLIST_PATH = `/Library/LaunchDaemons/${LAUNCHD_LABEL}.plist`;
-
-/**
- * Argv that restarts the anpan-os service itself, or null where we cannot.
- *
- * `kickstart -k` on the system domain, not `unload` + `load`: the latter would have this
- * process tear down the job it is running inside, and the response would never be flushed.
- * kickstart lets launchd do the killing and the restarting after we have replied.
- */
-export function restartSelfCommand(): string[] | null {
-  if (IS_MACOS) return ["launchctl", "kickstart", "-k", `system/${LAUNCHD_LABEL}`];
-  if (IS_LINUX) return ["systemctl", "restart", "anpan-os"];
-  return null;
-}
-
-/** Argv that reboots the host. */
-export function rebootCommand(): string[] | null {
-  if (IS_MACOS) return ["shutdown", "-r", "now"];
-  if (IS_LINUX) return ["systemctl", "reboot"];
-  return null;
-}
-
-/** Argv that powers the host off. */
-export function poweroffCommand(): string[] | null {
-  if (IS_MACOS) return ["shutdown", "-h", "now"];
-  if (IS_LINUX) return ["systemctl", "poweroff"];
-  return null;
-}
 
 // ─── PATH repair ─────────────────────────────────────────────────────────────
 
@@ -262,8 +239,8 @@ function macDockerCliDirs(): string[] {
 /**
  * Put the directories we know about onto $PATH, once, at startup.
  *
- * launchd hands a LaunchAgent a minimal PATH — typically just /usr/bin:/bin:/usr/sbin:/sbin
- * — with no Homebrew and no Docker Desktop on it. Every `Bun.$` call in the app then fails
+ * launchd hands a daemon a minimal PATH — typically just /usr/bin:/bin:/usr/sbin:/sbin —
+ * with no Homebrew and no Docker Desktop on it. Every `Bun.$` call in the app then fails
  * with "command not found" even though the tool is installed and works in a terminal.
  * Repairing PATH here fixes all of them at once, instead of each caller having to know
  * where its own binary lives.

@@ -13,10 +13,11 @@
 
 import { mkdirSync } from "node:fs";
 import { realpath }   from "node:fs/promises";
-import { config }     from "../../config";
-import { envConfig }  from "../../env-config";
-import { commands }   from "../commands";
-import { IS_LINUX, IS_MACOS } from "../platform";
+import { config }     from "../../../config";
+import { envConfig }  from "../../../env-config";
+import { commands }   from "../../commands";
+import { IS_LINUX, IS_MACOS } from "../../platform";
+import { service } from "../service";
 import {
   ShareError, type DiscoveredShare, type ShareCapabilities, type ShareDefinition,
   type ShareProvider, type SetupStatus,
@@ -293,12 +294,15 @@ export class SambaShareProvider implements ShareProvider {
     }
 
     if (IS_LINUX) {
-      const systemctl = await commands.which("systemctl");
-      if (systemctl) await Bun.spawn([systemctl, "reload", "smbd"], { stdout: "pipe", stderr: "pipe" }).exited;
+      // systemd can reload in place; the service provider knows how.
+      await service.reload("smbd");
       return;
     }
 
     if (IS_MACOS) {
+      // Deliberately not the service provider: on macOS it maps "smbd" to com.apple.smbd,
+      // and a Homebrew Samba is a different job entirely (homebrew.mxcl.samba), managed
+      // through `brew services`. Restarting Apple's daemon would reload the wrong server.
       const brew = await commands.which("brew");
       if (brew) await Bun.spawn([brew, "services", "restart", "samba"], { stdout: "pipe", stderr: "pipe" }).exited;
     }
