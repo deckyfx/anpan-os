@@ -183,18 +183,51 @@ export class AppleShareProvider implements ShareProvider {
     // `sharing` has no flag to move an existing sharepoint, so a path change is a
     // remove-and-recreate. Done last, so a failure above leaves the share intact.
     if (patch.path !== undefined) {
-      const current = (await this.list()).find(s => s.name === (patch.name ?? name));
-      if (current && current.path !== patch.path) {
-        const finalName = patch.name ?? name;
-        await this.remove(finalName);
+      const finalName = patch.name ?? name;
+      const current   = (await this.list()).find(s => s.name === finalName);
+      if (!current || current.path === patch.path) return;
+
+      // `sharing` cannot move a sharepoint, so the path change is a remove and a recreate
+      // — and for a moment in between, the share does not exist. If the recreate fails
+      // (an unreadable path, a permissions change, a transient error) the user is left
+      // with no share at all, having asked only to move one.
+      //
+      // The previous definition is captured first and put back on failure, so the
+      // observable outcome is the same as if the request had been refused.
+      const previous: ShareDefinition = {
+        name:       current.name,
+        path:       current.path,
+        comment:    current.comment,
+        readOnly:   current.readOnly,
+        browseable: current.browseable,
+        guestOk:    current.guestOk,
+      };
+
+      await this.remove(finalName);
+
+      try {
         await this.create({
           name:       finalName,
           path:       patch.path,
-          comment:    patch.comment    ?? "",
-          readOnly:   patch.readOnly   ?? current.readOnly,
+          comment:    patch.comment  ?? "",
+          readOnly:   patch.readOnly ?? current.readOnly,
           browseable: true,
-          guestOk:    patch.guestOk    ?? current.guestOk,
+          guestOk:    patch.guestOk  ?? current.guestOk,
         });
+      } catch (e) {
+        try {
+          await this.create(previous);
+        } catch {
+          // Both the move and the rollback failed, so the share really is gone. Say that
+          // plainly: the original error alone would suggest nothing had changed.
+          throw new ShareError(
+            "failed",
+            `Could not move "${finalName}" to ${patch.path}, and restoring the previous ` +
+            `definition (${previous.path}) also failed. The share no longer exists and ` +
+            `must be recreated.`,
+          );
+        }
+        throw e;
       }
     }
   }

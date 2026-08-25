@@ -44,7 +44,12 @@ export function systemPlugin(jwtSecret: string) {
         arch:      ARCH,
         platformLabel: PLATFORM_LABEL,
         features:  { ...FEATURES, samba: provider !== null },
-        smb:       { ...samba, provider: provider?.id ?? null },
+        // `reason` is advice for a host that cannot manage shares at all. Emitting it
+        // beside a working provider produced a self-contradicting payload — "installed,
+        // and also: no SMB server found" — so readiness comes from the provider instead.
+        smb: provider
+          ? { provider: provider.id, flavor: samba.flavor, ...(await provider.status()) }
+          : { provider: null, flavor: samba.flavor, ready: false, detail: samba.reason ?? "", fixable: false },
       };
     })
     .get("/stats", async () => {
@@ -75,7 +80,9 @@ export function systemPlugin(jwtSecret: string) {
           installed: provider !== null,
           provider:  provider?.id ?? null,
           flavor:    smb.flavor,
-          reason:    smb.reason,
+          // Only when nothing can manage shares — otherwise this said "no SMB server
+          // found" next to installed: true.
+          reason:    provider ? undefined : smb.reason,
           ...state,
         },
       };

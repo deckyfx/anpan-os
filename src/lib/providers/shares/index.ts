@@ -6,6 +6,7 @@
  * smb.conf *and* Apple's native sharing, and the two publish shares independently.
  */
 
+import { commands } from "../../commands";
 import { IS_MACOS, detectSamba } from "../../platform";
 import { AppleShareProvider }    from "./apple-provider";
 import { SambaShareProvider }    from "./samba-provider";
@@ -35,7 +36,13 @@ export function shareProvider(): Promise<ShareProvider | null> {
   cached ??= (async () => {
     const smb = await detectSamba();
     if (smb.flavor === "samba") return new SambaShareProvider();
-    if (IS_MACOS)               return new AppleShareProvider();
+
+    // The Apple provider's prerequisite is `sharing`, not smbd: it writes sharepoint
+    // records, and whether a daemon is running to serve them is a separate question its
+    // status() answers. Checking for the tool rather than assuming macOS implies it keeps
+    // "we can manage shares" from being claimed on a host where nothing can.
+    if (IS_MACOS && await commands.isAvailable("sharing")) return new AppleShareProvider();
+
     return null;
   })();
   return cached;

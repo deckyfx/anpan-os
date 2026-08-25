@@ -18,7 +18,7 @@ import { parseDf, dedupeByDevice } from "../src/lib/providers/metrics/df";
 import { parseSs, SS_ARGS } from "../src/lib/providers/ports/ss";
 import { parseLsof } from "../src/lib/providers/ports/lsof";
 import { AppleShareProvider } from "../src/lib/providers/shares/apple-provider";
-import type { DiscoveredShare } from "../src/lib/providers/shares/types";
+import { ShareError, type DiscoveredShare } from "../src/lib/providers/shares/types";
 
 // ─── Linux CPU and memory ────────────────────────────────────────────────────
 
@@ -343,5 +343,78 @@ describe("AppleShareProvider.update — which changes reach the backend", () => 
     p.listResult = [existing];
     await p.update("docs", { name: "documents" });
     expect(p.calls[0]).toEqual(["-e", "docs", "-n", "documents", "-S", "documents"]);
+  });
+});
+
+// ─── Apple share updates — failure recovery ──────────────────────────────────
+
+describe("AppleShareProvider.update — a failed move must not destroy the share", () => {
+  /**
+   * `sharing` cannot move a sharepoint, so a path change is remove-then-recreate and the
+   * share briefly does not exist. These cover what happens when the recreate fails, which
+   * is the window in which a request to *move* a share could instead delete it.
+   */
+  class FailingCreate extends AppleShareProvider {
+    calls: string[][] = [];
+    listResult: DiscoveredShare[] = [];
+    /** How many `-a` calls to fail before letting one through. */
+    failCreates = 1;
+
+    protected override async run(args: string[]): Promise<string> {
+      this.calls.push(args);
+      if (args[0] === "-a" && this.failCreates > 0) {
+        this.failCreates--;
+        throw new ShareError("bad-path", "sharing: unable to stat '/new/path'");
+      }
+      return "";
+    }
+    override async list(): Promise<DiscoveredShare[]> { return this.listResult; }
+  }
+
+  const existing: DiscoveredShare = {
+    name: "docs", path: "/old/path", comment: "notes", readOnly: true,
+    browseable: true, guestOk: false, source: "external",
+  };
+
+  test("the original share is restored when the recreate fails", async () => {
+    const p = new FailingCreate();
+    p.listResult = [existing];
+
+    await expect(p.update("docs", { path: "/new/path" })).rejects.toThrow(/unable to stat/);
+
+    // Second -a is the rollback, and it must restore the original path and flags.
+    const creates = p.calls.filter(c => c[0] === "-a");
+    expect(creates).toHaveLength(2);
+    expect(creates[1]).toContain("/old/path");
+    expect(creates[1]).toContain("-R");
+    expect(creates[1]![creates[1]!.indexOf("-R") + 1]).toBe("1");     // readOnly preserved
+    expect(creates[1]![creates[1]!.indexOf("-g") + 1]).toBe("000");   // guestOk preserved
+  });
+
+  test("the caller sees the original failure, not the rollback", async () => {
+    const p = new FailingCreate();
+    p.listResult = [existing];
+    // The user asked to move a share and gave a bad path; that is what they need told.
+    await expect(p.update("docs", { path: "/new/path" })).rejects.toThrow(/unable to stat/);
+  });
+
+  test("when the rollback also fails, the error says the share is gone", async () => {
+    const p = new FailingCreate();
+    p.listResult = [existing];
+    p.failCreates = 2; // the move and the restore both fail
+
+    // Reporting only "unable to stat" would imply nothing had changed, which is the one
+    // thing that is not true here.
+    await expect(p.update("docs", { path: "/new/path" })).rejects.toThrow(/no longer exists/);
+  });
+
+  test("a move that succeeds does not attempt a rollback", async () => {
+    const p = new FailingCreate();
+    p.listResult = [existing];
+    p.failCreates = 0;
+
+    await p.update("docs", { path: "/new/path" });
+    expect(p.calls.filter(c => c[0] === "-a")).toHaveLength(1);
+    expect(p.calls.filter(c => c[0] === "-r")).toHaveLength(1);
   });
 });
