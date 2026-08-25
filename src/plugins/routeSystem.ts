@@ -1,9 +1,10 @@
 import { Elysia } from "elysia";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { chmod, rename, rm } from "node:fs/promises";
 import { authGuard } from "./authGuard";
 import { metrics, ports, service, shareProvider } from "../lib/providers";
 import {
-  ARCH, FEATURES, PLATFORM, PLATFORM_LABEL, TMP_DIR,
+  ARCH, FEATURES, PLATFORM, PLATFORM_LABEL,
   binaryName, currentBinaryPath, detectSamba,
 } from "../lib/platform";
 import { bins, commands } from "../lib/commands";
@@ -165,10 +166,7 @@ export function systemPlugin(jwtSecret: string) {
       const sha256Text    = await sha256Res.text();
       const expectedHash  = sha256Text.trim().split(/\s+/)[0] ?? "";
 
-      // Download binary. os.tmpdir(), not a literal /tmp: on macOS each user gets a
-      // private sandbox under /var/folders and TMPDIR points at it.
-      const tmpPath = join(TMP_DIR, "anpan-os-update");
-      const binRes  = await fetch(binaryUrl, { signal: AbortSignal.timeout(120_000) });
+      const binRes = await fetch(binaryUrl, { signal: AbortSignal.timeout(120_000) });
       if (!binRes.ok) { set.status = 502; return { error: "Failed to download binary" }; }
       const binaryBuffer = await binRes.arrayBuffer();
 
@@ -183,15 +181,33 @@ export function systemPlugin(jwtSecret: string) {
       // than the path the service unit launches would appear to succeed and change nothing.
       const target = currentBinaryPath();
 
-      await Bun.write(tmpPath, binaryBuffer);
-      await Bun.$`chmod +x ${tmpPath}`.quiet();
+      /**
+       * Stage the replacement beside the binary it replaces, never in the temp directory.
+       *
+       * rename() is atomic only within a single filesystem, and the temp directory is
+       * routinely on another — tmpfs on Linux, a per-user sandbox under /var/folders on
+       * macOS, or wherever a custom TMPDIR points. Across filesystems `mv` silently
+       * degrades to copy-then-unlink, so a crash, a full disk or a kill part-way through
+       * leaves a half-written executable at the exact path the service launches from, and
+       * the machine has no working anpan-os until someone reinstalls it by hand.
+       *
+       * Writing the download straight into the target's own directory keeps the final step
+       * a same-filesystem rename, which either happens completely or not at all. The name
+       * is unique and dotted so a partial file is neither picked up nor mistaken for the
+       * real binary if this process dies before the rename.
+       */
+      const staged = join(dirname(target), `.anpan-os-update-${process.pid}`);
 
-      // rename() cannot cross filesystems, and on macOS the temp dir is a different volume
-      // from /usr/local. `mv` falls back to copy+unlink, which rename() does not.
-      const moved = await Bun.$`mv -f ${tmpPath} ${target}`.quiet().nothrow();
-      if (moved.exitCode !== 0) {
+      try {
+        await Bun.write(staged, binaryBuffer);
+        await chmod(staged, 0o755);
+        await rename(staged, target);
+      } catch (e) {
+        // The staged file is ours alone; leaving it behind would accumulate a copy of the
+        // binary in /usr/local/bin on every failed update.
+        await rm(staged, { force: true }).catch(() => {});
         set.status = 500;
-        return { error: `Could not replace ${target}: ${moved.stderr.toString().trim()}` };
+        return { error: `Could not replace ${target}: ${e instanceof Error ? e.message : String(e)}` };
       }
 
       // Fire-and-forget restart (the response is sent before the process dies).

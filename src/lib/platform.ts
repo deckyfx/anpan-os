@@ -9,7 +9,7 @@
  * thing to remember, so the differences are named once here and imported everywhere else.
  */
 
-import { homedir, tmpdir } from "node:os";
+import { homedir } from "node:os";
 import { existsSync, lstatSync, readdirSync, readlinkSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join } from "node:path";
 
@@ -104,9 +104,6 @@ export const DEFAULT_SMB_CONF: string = IS_MACOS
 
 /** CasaOS app directory. CasaOS is Linux-only; on macOS nothing is there to import. */
 export const CASAOS_APPS_DIR = "/var/lib/casaos/apps";
-
-/** Temp directory — /tmp on Linux, a per-user sandbox under /var/folders on macOS. */
-export const TMP_DIR: string = tmpdir();
 
 // ─── Docker socket ───────────────────────────────────────────────────────────
 
