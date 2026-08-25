@@ -69,6 +69,29 @@ async function composeUpArgs(name: string, stackDir: string): Promise<string[]> 
  * GET  /api/compose/templates                — list available stack templates
  * GET  /api/compose/templates/:id            — get template detail (includes composeYaml)
  */
+/**
+ * Compose endpoints that never invoke Docker.
+ *
+ * `/tags` queries Docker Hub over HTTPS, and the rest read or write files under the compose
+ * folder. Blocking them when the daemon is absent means a machine with no Docker installed
+ * cannot view its own compose file, read an install log, or edit an env file — none of
+ * which the daemon has any part in.
+ *
+ * Matched as whole paths rather than by suffix on purpose: a stack legitimately named
+ * "file" would make `PUT /api/compose/stacks/file` end in "/file" and slip a redeploy past
+ * the guard, which is the opposite of what this is for.
+ */
+const DOCKER_FREE_ROUTES = [
+  /^\/api\/compose\/tags$/,
+  /^\/api\/compose\/compose-sources$/,
+  /^\/api\/compose\/stacks\/[^/]+\/(install-log|file|compose-source|envfile)$/,
+];
+
+/** True when the request needs a reachable Docker daemon. Exported for tests. */
+export function needsDocker(path: string): boolean {
+  return !DOCKER_FREE_ROUTES.some((re) => re.test(path));
+}
+
 export function composePlugin(jwtSecret: string) {
   const docker = bins.docker; // the name to invoke; presence is checked per request below
 
@@ -97,7 +120,7 @@ export function composePlugin(jwtSecret: string) {
     })
 
     /**
-     * Refuse everything when Docker cannot be reached.
+     * Refuse Docker-backed routes when Docker cannot be reached.
      *
      * `bins.docker` being set means only that Docker is possible on this OS; whether it is
      * installed is a separate question, and on macOS the common case is that it is not —
@@ -107,8 +130,12 @@ export function composePlugin(jwtSecret: string) {
      * Registered after the name check on purpose. A malformed stack name is wrong whatever
      * state the daemon is in, and 422 tells the caller something they can act on, where a
      * 503 would send them to look at Docker over a typo.
+     *
+     * Scoped, too: several endpoints here only read or write files, and refusing those
+     * would mean a host without Docker could not so much as view its own compose file.
      */
-    .onBeforeHandle(async ({ set }) => {
+    .onBeforeHandle(async ({ set, path }) => {
+      if (!needsDocker(path)) return;
       if (!docker || !(await commands.isAvailable("docker"))) {
         set.status = 503;
         return { error: "Docker is not installed or not running — see System Doctor" };

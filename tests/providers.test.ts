@@ -19,6 +19,7 @@ import { parseSs, SS_ARGS } from "../src/lib/providers/ports/ss";
 import { parseLsof } from "../src/lib/providers/ports/lsof";
 import { AppleShareProvider } from "../src/lib/providers/shares/apple-provider";
 import { ShareError, type DiscoveredShare } from "../src/lib/providers/shares/types";
+import { needsDocker } from "../src/plugins/routeCompose";
 
 // ─── Linux CPU and memory ────────────────────────────────────────────────────
 
@@ -427,5 +428,58 @@ describe("AppleShareProvider.update — a failed move must not destroy the share
     await p.update("docs", { path: "/new/path" });
     expect(p.calls.filter(c => c[0] === "-a")).toHaveLength(1);
     expect(p.calls.filter(c => c[0] === "-r")).toHaveLength(1);
+  });
+});
+
+// ─── Compose route scoping ───────────────────────────────────────────────────
+
+describe("needsDocker — which compose routes require the daemon", () => {
+  /**
+   * The Docker guard used to be dead code: it tested whether `bins.docker` was *defined*,
+   * which is true on every supported OS. Making it a real availability check turned it on
+   * for the first time and it began refusing endpoints that never touch Docker — so a host
+   * without Docker installed could not read its own compose file.
+   */
+  test("file and metadata endpoints do not need Docker", () => {
+    for (const path of [
+      "/api/compose/tags",
+      "/api/compose/compose-sources",
+      "/api/compose/stacks/plex/install-log",
+      "/api/compose/stacks/plex/file",
+      "/api/compose/stacks/plex/compose-source",
+      "/api/compose/stacks/plex/envfile",
+    ]) {
+      expect(needsDocker(path)).toBe(false);
+    }
+  });
+
+  test("anything that drives containers does need Docker", () => {
+    for (const path of [
+      "/api/compose/stacks",
+      "/api/compose/stacks/plex",
+      "/api/compose/stacks/plex/pull",
+      "/api/compose/stacks/plex/down",
+      "/api/compose/stacks/plex/restart",
+      "/api/compose/stacks/plex/logs",
+      "/api/compose/stacks/plex/repair",
+      "/api/compose/stacks/plex/containers",
+    ]) {
+      expect(needsDocker(path)).toBe(true);
+    }
+  });
+
+  test("a stack named after an exempt endpoint does not slip past the guard", () => {
+    // Suffix matching would read PUT /api/compose/stacks/file as the exempt "…/file"
+    // endpoint and let a redeploy through unchecked. Whole-path matching does not.
+    expect(needsDocker("/api/compose/stacks/file")).toBe(true);
+    expect(needsDocker("/api/compose/stacks/tags")).toBe(true);
+    expect(needsDocker("/api/compose/stacks/envfile")).toBe(true);
+    // The genuine per-stack endpoint is still exempt.
+    expect(needsDocker("/api/compose/stacks/file/file")).toBe(false);
+  });
+
+  test("nested paths below an exempt endpoint are not exempt", () => {
+    expect(needsDocker("/api/compose/stacks/plex/file/extra")).toBe(true);
+    expect(needsDocker("/api/compose/stacks/plex/containers/abc/logs")).toBe(true);
   });
 });

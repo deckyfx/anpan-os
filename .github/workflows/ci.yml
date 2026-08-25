@@ -16,6 +16,12 @@ on:
   push:
     branches: [main]
 
+# Least privilege: this workflow only reads the tree. Without an explicit block the token
+# inherits whatever the repository default happens to be, which is broader than anything
+# here needs.
+permissions:
+  contents: read
+
 # A new push makes the previous run's answer irrelevant.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -35,6 +41,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          # checkout writes GITHUB_TOKEN into .git/config by default, where any dependency
+          # lifecycle script run by `bun install` could read it. Nothing here pushes.
+          persist-credentials: false
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -59,6 +69,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          # checkout writes GITHUB_TOKEN into .git/config by default, where any dependency
+          # lifecycle script run by `bun install` could read it. Nothing here pushes.
+          persist-credentials: false
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2

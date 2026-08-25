@@ -1,6 +1,7 @@
 import { Elysia } from "elysia";
 import { dirname, join } from "node:path";
 import { chmod, rename, rm } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { authGuard } from "./authGuard";
 import { metrics, ports, service, shareProvider } from "../lib/providers";
 import {
@@ -24,6 +25,20 @@ const APP_VERSION: string =
   (process.env.APP_VERSION as string | undefined) ??
   ((await Bun.file("package.json").json()) as { version?: string }).version ??
   "0.0.0";
+
+/**
+ * True while a self-update is running.
+ *
+ * /update downloads ~70 MB, stages it beside the target and renames over it. Two of those
+ * at once interleave: one request can still be writing its staged file while the other
+ * renames, and the binary the service launches from ends up partial. A double-click on the
+ * update button is enough to produce it, so the second caller is refused rather than
+ * allowed to race the first.
+ *
+ * Process-local, which is the right scope: the lock exists to protect this process's own
+ * write, and only one anpan-os owns a given install.
+ */
+let updateInFlight = false;
 
 export function systemPlugin(jwtSecret: string) {
   return new Elysia({ prefix: "/api/system" })
@@ -142,6 +157,27 @@ export function systemPlugin(jwtSecret: string) {
         return { error: "Self-update is only available for an installed binary, not a source-mode run." };
       }
 
+      if (updateInFlight) {
+        set.status = 409;
+        return { error: "An update is already in progress." };
+      }
+      updateInFlight = true;
+      try {
+        return await runUpdate(set);
+      } finally {
+        updateInFlight = false;
+      }
+    });
+}
+
+/**
+ * Download the latest release and replace the running binary.
+ *
+ * Split out of the route so the in-flight guard can wrap it in a try/finally without the
+ * early returns below leaking the lock.
+ */
+async function runUpdate(set: { status?: number | string }): Promise<Record<string, unknown>> {
+
       // Re-fetch latest release to get download URLs
       const releaseRes = await fetch(
         "https://api.github.com/repos/deckyfx/anpan-os/releases/latest",
@@ -196,7 +232,7 @@ export function systemPlugin(jwtSecret: string) {
        * is unique and dotted so a partial file is neither picked up nor mistaken for the
        * real binary if this process dies before the rename.
        */
-      const staged = join(dirname(target), `.anpan-os-update-${process.pid}`);
+      const staged = join(dirname(target), `.anpan-os-update-${process.pid}-${randomUUID()}`);
 
       try {
         await Bun.write(staged, binaryBuffer);
@@ -214,8 +250,7 @@ export function systemPlugin(jwtSecret: string) {
       const restart = service.restartSelfCommand();
       if (restart) void Bun.$`${restart}`.quiet().nothrow();
 
-      return { ok: true, restarted: restart !== null };
-    });
+  return { ok: true, restarted: restart !== null };
 }
 
 // ─── Power control ───────────────────────────────────────────────────────────
