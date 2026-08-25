@@ -1,22 +1,27 @@
 import { test, expect, describe, beforeAll, afterAll } from "bun:test";
 import { judgeBindPath } from "../src/lib/bind-paths";
 import { mkdtempSync, mkdirSync, symlinkSync, rmSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { realpathSync } from "node:fs";
 
 /**
- * Scratch directories live under the home directory, not the OS temp directory.
+ * Scratch directories live under /tmp — literally, not via tmpdir() or homedir().
  *
- * tmpdir() is not a neutral location for these tests. On macOS it is /var/folders/…, which
- * canonicalises to /private/var/… and is therefore inside a protected system root — so
- * every "this path is deletable" case was refused for the wrong reason and the whole
- * allowed-suite failed on macOS while passing on Linux. A directory in $HOME is what real
- * stack data actually looks like on both platforms, so the guards judge it on the rule
- * under test rather than on where the test happened to put it.
+ * Both of the obvious choices are wrong on one platform:
+ *
+ *   tmpdir() is /var/folders/… on macOS, which canonicalises under /private/var and is
+ *   therefore inside a protected system root, so every "this is deletable" case was
+ *   refused for the wrong reason.
+ *
+ *   homedir() is /root when the suite runs as root on Linux — which is itself a protected
+ *   system root, producing the same failure with the platforms swapped.
+ *
+ * "/tmp" is neither. On Linux it is protected only as an exact match, so paths beneath it
+ * are judged on the rule under test; on macOS it resolves to /private/tmp, which is the
+ * same exact-match case. The guards then answer the question the test is actually asking.
  */
 function scratch(prefix: string): string {
-  return realpathSync(mkdtempSync(join(homedir(), prefix)));
+  return realpathSync(mkdtempSync(join("/tmp", prefix)));
 }
 
 /**

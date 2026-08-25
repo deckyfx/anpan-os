@@ -152,6 +152,17 @@ overlay          103081248  41203160  56600264      43% /var/lib/docker/overlay2
     expect(rows).toHaveLength(2);
     expect(dedupeByDevice(rows)).toHaveLength(1);
   });
+
+  test("the shortest mount labels the device, whatever order df used", () => {
+    // A bind mount listed first must not become the label for the root filesystem —
+    // observed in a container, where /dev/vda1 appears only as /etc/hosts.
+    const rows = parseDf(`Filesystem 1024-blocks Used Available Capacity Mounted on
+/dev/sda1  100 50 50 50% /mnt/bind/deep/path
+/dev/sda1  100 50 50 50% /
+`);
+    const [only] = dedupeByDevice(rows);
+    expect(only!.mount).toBe("/");
+  });
 });
 
 // ─── APFS container grouping ─────────────────────────────────────────────────

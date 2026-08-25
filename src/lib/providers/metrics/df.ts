@@ -27,8 +27,22 @@ export function parseDf(raw: string): DiskMount[] {
   return rows;
 }
 
-/** One entry per device. A device mounted twice is one disk, not two. */
+/**
+ * One entry per device. A device mounted twice is one disk, not two.
+ *
+ * The shortest mount path wins rather than whichever `df` happened to list first. A device
+ * mounted at both "/" and a bind path underneath it is one disk, and reporting it by the
+ * bind path labels the root filesystem with an incidental mount point — which is what a
+ * container shows, where /dev/vda1 surfaces as /etc/hosts. Ordering from `df` is not a
+ * guarantee, and the shortest path is the one the others hang off.
+ */
 export function dedupeByDevice(rows: DiskMount[]): DiskMount[] {
-  const seen = new Set<string>();
-  return rows.filter(d => !seen.has(d.device) && seen.add(d.device));
+  const best = new Map<string, DiskMount>();
+  for (const row of rows) {
+    const existing = best.get(row.device);
+    if (!existing || row.mount.length < existing.mount.length) best.set(row.device, row);
+  }
+  // Preserve the order devices first appeared, so the list does not reshuffle per call.
+  const order = [...new Set(rows.map(r => r.device))];
+  return order.map(d => best.get(d)!);
 }

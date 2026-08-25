@@ -74,17 +74,6 @@ export function composePlugin(jwtSecret: string) {
 
   return new Elysia({ prefix: "/api/compose" })
     .use(authGuard(jwtSecret))
-    // `bins.docker` being set means only that Docker is possible on this OS. Whether it is
-    // installed is a separate question, and on macOS the common case is that it is not:
-    // Docker Desktop, OrbStack and Colima are all third-party. Cached in the registry, so
-    // this is a map lookup after the first request rather than a `which` per call.
-    .onBeforeHandle(async ({ set }) => {
-      if (!docker || !(await commands.isAvailable("docker"))) {
-        set.status = 503;
-        return { error: "Docker is not installed or not running — see System Doctor" };
-      }
-    })
-
     /**
      * Rejects a bad stack name with a real status before the stream opens.
      *
@@ -104,6 +93,25 @@ export function composePlugin(jwtSecret: string) {
       if (!stackDir.startsWith(config.composeFolder)) {
         set.status = 422;
         return { error: "Invalid stack name" };
+      }
+    })
+
+    /**
+     * Refuse everything when Docker cannot be reached.
+     *
+     * `bins.docker` being set means only that Docker is possible on this OS; whether it is
+     * installed is a separate question, and on macOS the common case is that it is not —
+     * Docker Desktop, OrbStack and Colima are all third-party. Cached in the registry, so
+     * this is a map lookup after the first request rather than a `which` per call.
+     *
+     * Registered after the name check on purpose. A malformed stack name is wrong whatever
+     * state the daemon is in, and 422 tells the caller something they can act on, where a
+     * 503 would send them to look at Docker over a typo.
+     */
+    .onBeforeHandle(async ({ set }) => {
+      if (!docker || !(await commands.isAvailable("docker"))) {
+        set.status = 503;
+        return { error: "Docker is not installed or not running — see System Doctor" };
       }
     })
 
