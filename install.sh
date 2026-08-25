@@ -315,7 +315,17 @@ choose_port() {
 
   taken="$(listening_ports)"
   for p in $(seq "$FALLBACK_RANGE_START" "$FALLBACK_RANGE_END"); do
-    printf '%s\n' "$taken" | grep -qx "$p" || { echo "$p"; return 0; }
+    if printf '%s\n' "$taken" | grep -qx "$p"; then
+      # Listening — but our own listener is not a conflict here either, for the same
+      # reason it is not in the preferred list above: this installer restarts that very
+      # process. Skipping it would move a service already running on a fallback port to a
+      # different one, which is the migration the exemption exists to prevent.
+      #
+      # port_holder is only consulted for ports actually in use, so the bulk scan above
+      # still does the work and this costs one extra call at most.
+      [ "$(port_holder "$p")" = "$SERVICE_BIN_NAME" ] || continue
+    fi
+    echo "$p"; return 0
   done
 
   echo ""
