@@ -206,6 +206,60 @@ host_ip() {
   fi
 }
 
+# ── Port selection ────────────────────────────────────────────────────────────
+#
+# 5000 is not a safe default on macOS. AirPlay Receiver — part of Control Center, on by
+# default on Apple Silicon — listens on 5000 and 7000, and its port cannot be configured.
+# A fresh install that hardcoded 5000 therefore failed to bind, the service never came up,
+# and the first thing a Mac user did reported failure for a reason nothing explained.
+#
+# Probing keeps 5000 as the default everywhere it is actually free, which is the normal
+# case on Linux, and picks something usable where it is not — rather than silently failing
+# or telling people to switch off a feature of their operating system.
+
+DEFAULT_PORT=5000
+# Tried in order. All are outside the range macOS assigns to AirPlay and AirDrop.
+PORT_CANDIDATES="5000 5080 5001 8080 8000 9000"
+
+# True when something is already listening on $1.
+#
+# Three tools because no single one is present everywhere: lsof ships with macOS, ss with
+# modern Linux, netstat with almost everything older. If none of them can answer, the port
+# is treated as free — a wrong guess there produces a clear bind error at startup, which is
+# better than refusing to install over a question we could not resolve.
+port_in_use() {
+  local p="$1"
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -nP -iTCP:"$p" -sTCP:LISTEN >/dev/null 2>&1 && return 0
+    return 1
+  fi
+  if command -v ss >/dev/null 2>&1; then
+    ss -Htln "sport = :$p" 2>/dev/null | grep -q . && return 0
+    return 1
+  fi
+  if command -v netstat >/dev/null 2>&1; then
+    netstat -an 2>/dev/null | grep -qE "[.:]$p[[:space:]].*LISTEN" && return 0
+    return 1
+  fi
+  return 1
+}
+
+# Names the process holding $1, for the message explaining why we moved.
+port_holder() {
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -nP -iTCP:"$1" -sTCP:LISTEN -Fc 2>/dev/null | grep '^c' | head -n1 | cut -c2-
+  fi
+}
+
+# Echoes the first free candidate. Empty when every one of them is taken.
+choose_port() {
+  local p
+  for p in $PORT_CANDIDATES; do
+    port_in_use "$p" || { echo "$p"; return 0; }
+  done
+  echo ""
+}
+
 ASSUME_YES="${ASSUME_YES:-0}"
 FORCE=0
 LIST=0
@@ -480,12 +534,37 @@ if [ -f "${CONFIG_DIR}/config.toml" ]; then
   warn "Config ${CONFIG_DIR}/config.toml already exists — skipping creation."
 else
   mkdir -p "${CONFIG_DIR}/certs"
-  cat > "${CONFIG_DIR}/config.toml" <<'EOF'
+
+  CHOSEN_PORT="$(choose_port)"
+  PORT_NOTE=""
+  if [ -z "$CHOSEN_PORT" ]; then
+    # Every candidate taken. Write the default and let the service report the bind error,
+    # which names the port — more useful than an installer refusing to finish.
+    CHOSEN_PORT="$DEFAULT_PORT"
+    warn "Ports ${PORT_CANDIDATES} are all in use; defaulting to ${DEFAULT_PORT}."
+    warn "Edit ${CONFIG_DIR}/config.toml before starting, or the service will fail to bind."
+  elif [ "$CHOSEN_PORT" != "$DEFAULT_PORT" ]; then
+    HOLDER="$(port_holder "$DEFAULT_PORT")"
+    PORT_NOTE="# Port ${DEFAULT_PORT} was already in use${HOLDER:+ by ${HOLDER}} at install time, so ${CHOSEN_PORT} was chosen."
+    warn "Port ${DEFAULT_PORT} is in use${HOLDER:+ by ${HOLDER}} — using ${CHOSEN_PORT} instead."
+    if [ "$PLATFORM" = "darwin" ] && [ "$DEFAULT_PORT" = "5000" ]; then
+      # Worth naming: this is the default configuration of the OS, not something the user
+      # did, and it is not obvious that Control Center is a network service.
+      warn "On macOS, ports 5000 and 7000 belong to AirPlay Receiver (System Settings →"
+      warn "General → AirDrop & Handoff). Turn it off to free them, or keep ${CHOSEN_PORT}."
+    fi
+  fi
+
+  {
+    cat <<EOF
 # anpan-os configuration
 # Edit this file to change server settings.
 
 [server]
-port = 5000
+${PORT_NOTE:+${PORT_NOTE}
+}port = ${CHOSEN_PORT}
+EOF
+    cat <<'EOF'
 bind = "public"   # "local" = 127.0.0.1 only | "public" = 0.0.0.0 (all interfaces)
 # tls_cert = "certs/cert.pem"
 # tls_key  = "certs/key.pem"
@@ -502,7 +581,8 @@ root = "/"
 
 [samba]
 EOF
-  success "Config created at ${CONFIG_DIR}/config.toml"
+  } > "${CONFIG_DIR}/config.toml"
+  success "Config created at ${CONFIG_DIR}/config.toml (port ${CHOSEN_PORT})"
 fi
 
 # ── Service unit ──────────────────────────────────────────────────────────────
