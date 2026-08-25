@@ -1,0 +1,83 @@
+# Tests and type checking on every pull request.
+#
+# Until now the only workflow ran on release publish, so nothing exercised the suite before
+# a merge. That was survivable while anpan-os targeted one platform. It is not now: the code
+# branches on the host OS in four places, and a change that is correct on the machine it was
+# written on can be wrong on the other one — which is exactly what happened during the macOS
+# work, where eight tests passed on a Mac and failed as root on Linux for a reason neither
+# platform could show on its own.
+#
+# Both runners are therefore the point, not redundancy.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A new push makes the previous run's answer irrelevant.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Report both platforms even when one fails; "it broke on Linux" and "it broke
+      # everywhere" call for different responses.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Type check
+        run: bun run typecheck
+
+      # No Docker on the macOS runner, and the suite must pass without it: every route that
+      # needs the daemon reports it as unavailable rather than failing, and that behaviour
+      # is worth holding to.
+      - name: Test
+        run: bun test tests/
+
+  build:
+    name: Build all targets
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # Bun cross-compiles every target from one runner, so a macOS binary that fails to
+      # compile is caught here rather than at release time.
+      - name: Build
+        run: bun run build.ts
+
+      - name: Verify every published target exists
+        run: |
+          set -eu
+          for t in linux-x64 linux-arm64 darwin-arm64 darwin-x64; do
+            f="binaries/anpan-os-$t"
+            [ -s "$f" ] || { echo "missing or empty: $f"; exit 1; }
+            echo "ok: $f ($(du -h "$f" | cut -f1))"
+          done
