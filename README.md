@@ -90,7 +90,9 @@ them natively.
 holds ports **5000 and 7000** through Control Center. Its port cannot be changed. The
 installer therefore probes 5000 before writing the config: where it is free — the normal
 case on Linux — nothing changes, and where it is not, the next free port is used and the
-reason is recorded both in the installer output and as a comment in `config.toml`. To use
+reason is recorded both in the installer output and as a comment in `config.toml`. If every
+preferred port is taken the search widens rather than guessing; if nothing at all is free
+the install stops instead of writing a port it knows cannot bind. To use
 5000 on a Mac, turn AirPlay Receiver off in System Settings → General → AirDrop & Handoff
 and edit the port back.
 

@@ -103,12 +103,47 @@ port_in_use() {
   return 0
 }
 
-# Echoes the first free candidate. Empty when every one of them is taken.
+# Every port currently being listened on, one per line.
+#
+# Used only for the fallback scan below: asking about a hundred ports one at a time would
+# mean a hundred lsof invocations, where one call answers for all of them.
+listening_ports() {
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -nP -iTCP -sTCP:LISTEN -Fn 2>/dev/null | sed -n 's/^n.*:\([0-9][0-9]*\)$/\1/p'
+    return
+  fi
+  if command -v ss >/dev/null 2>&1; then
+    ss -Htln 2>/dev/null | awk '{print $4}' | sed -n 's/.*[.:]\([0-9][0-9]*\)$/\1/p'
+    return
+  fi
+  if command -v netstat >/dev/null 2>&1; then
+    netstat -an 2>/dev/null | awk '/LISTEN/{print $4}' | sed -n 's/.*[.:]\([0-9][0-9]*\)$/\1/p'
+    return
+  fi
+  echo ""
+}
+
+# Echoes a free port. Empty only when nothing in the scanned range is available.
+#
+# The preferred list is tried first because those numbers are memorable and documented.
+# When all of them are taken the search widens rather than giving up: writing a port
+# already known to be occupied would produce an installation that cannot start, which is a
+# worse outcome than an unfamiliar port number. Only an exhausted scan is a real failure,
+# and the caller stops rather than writing something it knows will not bind.
+FALLBACK_RANGE_START=5100
+FALLBACK_RANGE_END=5199
+
 choose_port() {
-  local p
+  local p taken
   for p in $PORT_CANDIDATES; do
     port_in_use "$p" || { echo "$p"; return 0; }
   done
+
+  taken="$(listening_ports)"
+  for p in $(seq "$FALLBACK_RANGE_START" "$FALLBACK_RANGE_END"); do
+    printf '%s\n' "$taken" | grep -qx "$p" || { echo "$p"; return 0; }
+  done
+
   echo ""
 }
 
@@ -293,11 +328,13 @@ else
   CHOSEN_PORT="$(choose_port)"
   PORT_NOTE=""
   if [ -z "$CHOSEN_PORT" ]; then
-    # Every candidate taken. Write the default and let the service report the bind error,
-    # which names the port — more useful than an installer refusing to finish.
-    CHOSEN_PORT="$DEFAULT_PORT"
-    warn "Ports ${PORT_CANDIDATES} are all in use; defaulting to ${DEFAULT_PORT}."
-    warn "Edit ${CONFIG_DIR}/config.toml before starting, or the service will fail to bind."
+    # Nothing free in the preferred list or the fallback range. Writing the default here
+    # would be writing a port already known to be occupied, producing an installation that
+    # cannot start and a config the user has to repair by hand before anything works.
+    # Stopping leaves the machine as it was found and says exactly what to do.
+    die "No free port found in ${PORT_CANDIDATES} or ${FALLBACK_RANGE_START}-${FALLBACK_RANGE_END}.
+       Free one of them, or create ${CONFIG_DIR}/config.toml with a [server] port of your
+       choosing and run this again — an existing config is never overwritten."
   elif [ "$CHOSEN_PORT" != "$DEFAULT_PORT" ]; then
     HOLDER="$(port_holder "$DEFAULT_PORT")"
     PORT_NOTE="# Port ${DEFAULT_PORT} was already in use${HOLDER:+ by ${HOLDER}} at install time, so ${CHOSEN_PORT} was chosen."
