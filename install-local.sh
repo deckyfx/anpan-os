@@ -47,13 +47,16 @@ DEFAULT_PORT=5000
 # Tried in order. All are outside the range macOS assigns to AirPlay and AirDrop.
 PORT_CANDIDATES="5000 5080 5001 8080 8000 9000"
 
-# True when something is already listening on $1.
+# The command name our own service runs as, used to tell our listener from a conflict.
+SERVICE_BIN_NAME="anpan-os"
+
+# True when anything at all is listening on $1.
 #
 # Three tools because no single one is present everywhere: lsof ships with macOS, ss with
 # modern Linux, netstat with almost everything older. If none of them can answer, the port
 # is treated as free — a wrong guess there produces a clear bind error at startup, which is
 # better than refusing to install over a question we could not resolve.
-port_in_use() {
+port_listening() {
   local p="$1"
   if command -v lsof >/dev/null 2>&1; then
     lsof -nP -iTCP:"$p" -sTCP:LISTEN >/dev/null 2>&1 && return 0
@@ -70,11 +73,34 @@ port_in_use() {
   return 1
 }
 
-# Names the process holding $1, for the message explaining why we moved.
+# Names the process holding $1, or "" when it cannot be determined.
 port_holder() {
+  local p="$1"
   if command -v lsof >/dev/null 2>&1; then
-    lsof -nP -iTCP:"$1" -sTCP:LISTEN -Fc 2>/dev/null | grep '^c' | head -n1 | cut -c2-
+    lsof -nP -iTCP:"$p" -sTCP:LISTEN -Fc 2>/dev/null | grep '^c' | head -n1 | cut -c2-
+    return
   fi
+  if command -v ss >/dev/null 2>&1; then
+    # users:(("anpan-os",pid=123,fd=4))
+    ss -Htlnp "sport = :$p" 2>/dev/null | sed -n 's/.*users:((\"\([^\"]*\)\".*/\1/p' | head -n1
+    return
+  fi
+  echo ""
+}
+
+# True when $1 is taken by something that is not us.
+#
+# Our own listener does not count. This installer stops and restarts the service, so a port
+# anpan-os currently holds will be free by the time it starts again — and treating it as
+# occupied would be actively harmful: re-running the installer after the config file was
+# removed would find our own process on 5000, move the service to a different port, and
+# leave anything pointing at the old one broken. That path is reachable, because the
+# service is only stopped when the binary actually changes.
+port_in_use() {
+  local p="$1"
+  port_listening "$p" || return 1
+  [ "$(port_holder "$p")" = "$SERVICE_BIN_NAME" ] && return 1
+  return 0
 }
 
 # Echoes the first free candidate. Empty when every one of them is taken.
