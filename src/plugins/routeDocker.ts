@@ -219,6 +219,16 @@ export function dockerPlugin(jwtSecret: string) {
       const containers = await DockerClient.listProjectContainers(params.name);
       if (!containers.ok) { set.status = 502; return { error: containers.error }; }
 
+      // Nothing matched. Previously this fell through the whole handler, removed nothing,
+      // and answered 200 — so a delete that could not work was indistinguishable from one
+      // that did. A stack with no containers is still legitimate when anpan-os holds
+      // metadata for it (its containers may have been removed by hand, and the row should
+      // go), so the row is what decides between "already gone" and "never existed".
+      if (containers.data.length === 0 && !(await StackStore.findById(params.name))) {
+        set.status = 404;
+        return { error: `No stack or container named "${params.name}"` };
+      }
+
       // Judge the bind paths before removing containers — inspecting them afterwards is
       // impossible, and the verdicts are needed both for the response and for step 5.
       const bindVerdicts = await judgeStackBindPaths(params.name);

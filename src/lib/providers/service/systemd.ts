@@ -14,14 +14,19 @@ export class SystemdServiceProvider implements ServiceProvider {
 
   async state(name: string): Promise<ServiceState> {
     const systemctl = await commands.which("systemctl");
-    if (!systemctl) return { active: false, enabled: false };
-    const [active, enabled] = await Promise.all([
+    if (!systemctl) return { active: false, enabled: false, pid: null };
+    const [active, enabled, mainPid] = await Promise.all([
       Bun.$`${systemctl} is-active ${name}`.quiet().nothrow(),
       Bun.$`${systemctl} is-enabled ${name}`.quiet().nothrow(),
+      // systemd knows the unit's main process, so there is no name matching to get wrong.
+      Bun.$`${systemctl} show -p MainPID --value ${name}`.quiet().nothrow(),
     ]);
+    const pid = parseInt(mainPid.stdout.toString().trim(), 10);
     return {
       active:  active.stdout.toString().trim()  === "active",
       enabled: enabled.stdout.toString().trim() === "enabled",
+      // systemd reports 0 for "no main process".
+      pid:     Number.isInteger(pid) && pid > 0 ? pid : null,
     };
   }
 

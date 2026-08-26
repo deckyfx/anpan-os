@@ -42,7 +42,19 @@ export class LaunchdServiceProvider implements ServiceProvider {
       Bun.$`pgrep -x ${name}`.quiet().nothrow(),
       Bun.$`launchctl print system/${label}`.quiet().nothrow(),
     ]);
-    return { active: running.exitCode === 0, enabled: loaded.exitCode === 0 };
+
+    // Exclude ourselves. `anpan-os --doctor` asking about the anpan-os service is a name
+    // match against its own process, which would report the daemon as running whether or
+    // not it is — precisely inverting the question the caller asked.
+    const pids = running.stdout.toString().trim().split(/\s+/)
+      .map(Number)
+      .filter(n => Number.isInteger(n) && n > 0 && n !== process.pid);
+
+    return {
+      active:  pids.length > 0,
+      enabled: loaded.exitCode === 0,
+      pid:     pids[0] ?? null,
+    };
   }
 
   async restart(name: string): Promise<boolean> {

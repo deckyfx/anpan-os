@@ -15,6 +15,14 @@ export interface ServiceState {
   active:  boolean;
   /** It is configured to start at boot. */
   enabled: boolean;
+  /**
+   * Process id of the running service, where the manager will say.
+   *
+   * Null when it is not running, or when the manager reports state without a pid. Never
+   * the id of the process doing the asking: anpan-os can ask about its own service, and a
+   * name match against itself would report "running" for a daemon that is not.
+   */
+  pid:     number | null;
 }
 
 export interface ServiceCapabilities {

@@ -383,15 +383,34 @@ export class DockerClient {
   }
 
   /** List all containers (including stopped) that belong to a compose project. */
+  /**
+   * Containers belonging to a stack, by the same rule that listed it.
+   *
+   * A "stack" is either a compose project or a single standalone container — listStacks()
+   * groups by the compose label where there is one and by container Id where there is not,
+   * naming the latter after the container itself. Resolving only the compose case here
+   * meant those standalone entries matched nothing: deleting one removed zero containers
+   * and reported success, so a container without a compose label could be shown in the UI
+   * and never removed through it.
+   *
+   * The name fallback is restricted to containers with no compose project. A container
+   * that belongs to a project must only be reachable through that project, or deleting by
+   * container name could quietly take out one service of a running stack.
+   */
   static async listProjectContainers(projectName: string): Promise<DockerResult<DockerContainer[]>> {
     // Fetch all and filter client-side — same pattern as listStacks().
     // Docker's server-side label filter syntax is unreliable over the Unix socket.
     const result = await dockerFetch<DockerContainer[]>("/containers/json?all=1");
     if (!result.ok) return result;
-    return {
-      ok: true,
-      data: result.data.filter(c => c.Labels?.["com.docker.compose.project"] === projectName),
-    };
+
+    const byProject = result.data.filter(c => c.Labels?.["com.docker.compose.project"] === projectName);
+    if (byProject.length > 0) return { ok: true, data: byProject };
+
+    const standalone = result.data.filter(c =>
+      c.Labels?.["com.docker.compose.project"] === undefined &&
+      c.Names.some(n => n.replace(/^\//, "") === projectName),
+    );
+    return { ok: true, data: standalone };
   }
 
   /**
