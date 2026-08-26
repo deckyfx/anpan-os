@@ -21,10 +21,13 @@ function runningAs(): string {
 
 interface ConfiguredServer {
   /** Absolute path to config.toml, whether or not it exists. */
-  path:   string;
-  exists: boolean;
-  port:   number | null;
-  bind:   string | null;
+  path:    string;
+  exists:  boolean;
+  /** A usable port, or null when the file gives none we can serve on. */
+  port:    number | null;
+  bind:    string | null;
+  /** Why `port` is null, when the file exists. Shown verbatim. */
+  problem: string | null;
 }
 
 /**
@@ -37,14 +40,36 @@ interface ConfiguredServer {
 async function readConfiguredServer(): Promise<ConfiguredServer> {
   const path = join(envConfig.RUNTIME_CONFIG_DIR, "config.toml");
   const file = Bun.file(path);
-  if (!(await file.exists())) return { path, exists: false, port: null, bind: null };
-  try {
-    const data = Bun.TOML.parse(await file.text()) as { server?: { port?: number; bind?: string } };
-    // Mirrors the defaults in config.ts, so the doctor agrees with what the server does.
-    return { path, exists: true, port: data.server?.port ?? 3000, bind: data.server?.bind ?? "local" };
-  } catch {
-    return { path, exists: true, port: null, bind: null };
+  if (!(await file.exists())) {
+    return { path, exists: false, port: null, bind: null, problem: null };
   }
+
+  let data: { server?: { port?: unknown; bind?: unknown } };
+  try {
+    data = Bun.TOML.parse(await file.text()) as typeof data;
+  } catch (e) {
+    return { path, exists: true, port: null, bind: null, problem: `not valid TOML (${(e as Error).message})` };
+  }
+
+  // Mirrors the default in config.ts, so the doctor agrees with what the server does.
+  const raw = data.server?.port ?? 3000;
+
+  // Nothing validates this on the way in — config.load() casts the parsed TOML and
+  // config.port passes the value through — so a hand-edited `port = "8080"` or
+  // `port = 70000` reaches here intact. Printing an address built from it would send
+  // someone to an endpoint that cannot exist, and quietly imply the config was fine.
+  const port =
+    typeof raw === "number" && Number.isInteger(raw) && raw >= 1 && raw <= 65535 ? raw : null;
+
+  const bind = data.server?.bind === "public" ? "public" : "local";
+
+  return {
+    path,
+    exists:  true,
+    port,
+    bind,
+    problem: port === null ? `port must be a whole number from 1 to 65535, found ${JSON.stringify(raw)}` : null,
+  };
 }
 
 /** First non-internal IPv4 address, for a URL someone can actually open. */
@@ -95,7 +120,8 @@ export async function runDoctor(): Promise<never> {
   if (!server.exists) {
     console.log(`  ${BOLD}Config ${RESET}  ${YELLOW}none yet${RESET}  ${DIM}${server.path}${RESET}`);
   } else if (server.port === null) {
-    console.log(`  ${BOLD}Config ${RESET}  ${RED}unreadable${RESET}  ${DIM}${server.path}${RESET}`);
+    console.log(`  ${BOLD}Config ${RESET}  ${RED}invalid${RESET}  ${DIM}${server.path}${RESET}`);
+    console.log(`           ${DIM}└─ ${server.problem}${RESET}`);
   } else {
     console.log(`  ${BOLD}Config ${RESET}  ${DIM}${server.path}${RESET}`);
     // A "local" bind is only reachable from this machine, so offering a LAN URL would be

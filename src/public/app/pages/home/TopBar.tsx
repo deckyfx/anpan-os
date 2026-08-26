@@ -203,7 +203,11 @@ export function TopBar({ username, version, hasPasskey, onLogout, onNavigate, on
         {shortOs && <span className="hidden md:inline text-gray-600">{shortOs}</span>}
         {shortOs && username && <span className="hidden md:inline text-gray-700"> · </span>}
         {username && <span className="hidden sm:inline text-gray-600">{username}</span>}
-        {(shortOs || username) && <span className="hidden sm:inline text-gray-700"> · </span>}
+        {/* The separator has to hide with whatever precedes it. Between the sm and md
+            breakpoints the OS label is hidden, so with no username a shared `sm` rule
+            would leave a leading " · " in front of the version. */}
+        {username && <span className="hidden sm:inline text-gray-700"> · </span>}
+        {shortOs && !username && <span className="hidden md:inline text-gray-700"> · </span>}
         v{version}
       </button>
 
