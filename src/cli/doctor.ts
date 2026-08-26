@@ -44,9 +44,20 @@ async function readConfiguredServer(): Promise<ConfiguredServer> {
     return { path, exists: false, port: null, bind: null, problem: null };
   }
 
+  // Reading and parsing are separate failures with separate fixes. exists() succeeding
+  // does not mean the read will: the config is root-owned, so an unprivileged --doctor
+  // can be refused it — and sharing one catch reported that as malformed TOML, sending
+  // the user to inspect a file that was never the problem.
+  let text: string;
+  try {
+    text = await file.text();
+  } catch (e) {
+    return { path, exists: true, port: null, bind: null, problem: `could not be read (${(e as Error).message})` };
+  }
+
   let data: { server?: { port?: unknown; bind?: unknown } };
   try {
-    data = Bun.TOML.parse(await file.text()) as typeof data;
+    data = Bun.TOML.parse(text) as typeof data;
   } catch (e) {
     return { path, exists: true, port: null, bind: null, problem: `not valid TOML (${(e as Error).message})` };
   }
