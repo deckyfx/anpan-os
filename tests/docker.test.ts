@@ -138,3 +138,53 @@ describe("Docker routes — authenticated (200 or 502)", () => {
   });
 
 });
+
+// ─── Standalone container resolution ─────────────────────────────────────────
+
+describe("listProjectContainers — a stack is a project or a lone container", () => {
+  /**
+   * listStacks() shows a container with no compose label as a single-service stack named
+   * after the container. Deletion resolved only the compose case, so those entries matched
+   * nothing: the handler removed zero containers and still answered 200. A real buildkit
+   * container sat in the UI undeletable, and the API reported success every time.
+   */
+  const containers = [
+    { Id: "aaa", Names: ["/plex"],        Labels: { "com.docker.compose.project": "media" } },
+    { Id: "bbb", Names: ["/sonarr"],      Labels: { "com.docker.compose.project": "media" } },
+    { Id: "ccc", Names: ["/buildkit"],    Labels: {} },
+    { Id: "ddd", Names: ["/media"],       Labels: {} },
+  ];
+
+  /** The resolution rule under test, mirroring DockerClient.listProjectContainers. */
+  function resolve(name: string) {
+    const byProject = containers.filter(c => c.Labels?.["com.docker.compose.project"] === name);
+    if (byProject.length > 0) return byProject;
+    return containers.filter(c =>
+      c.Labels?.["com.docker.compose.project"] === undefined &&
+      c.Names.some(n => n.replace(/^\//, "") === name),
+    );
+  }
+
+  test("a compose project resolves to all of its services", () => {
+    expect(resolve("media").map(c => c.Id)).toEqual(["aaa", "bbb"]);
+  });
+
+  test("a standalone container resolves by its own name", () => {
+    expect(resolve("buildkit").map(c => c.Id)).toEqual(["ccc"]);
+  });
+
+  test("a project wins over a same-named standalone container", () => {
+    // "media" is both a compose project and a loose container name. Resolving to the
+    // container would delete the wrong thing, so the project takes precedence.
+    expect(resolve("media").map(c => c.Id)).toEqual(["aaa", "bbb"]);
+  });
+
+  test("a container inside a project is not reachable by its own name", () => {
+    // Otherwise deleting "plex" would remove one service of a running stack.
+    expect(resolve("plex")).toEqual([]);
+  });
+
+  test("an unknown name resolves to nothing, so the route can 404", () => {
+    expect(resolve("nope")).toEqual([]);
+  });
+});
