@@ -59,7 +59,11 @@ export function TopBar({ username, version, hasPasskey, onLogout, onNavigate, on
   /** Docker image update checker. Off on pages that have nothing to do with stacks. */
   showUpdates?: boolean;
 }) {
-  const { isRoot, hasBin } = useSystemStore();
+  const { isRoot, hasBin, platformLabel } = useSystemStore();
+
+  // "macOS (Apple Silicon)" is more than the bar has room for; the parenthetical is the
+  // part a glance does not need, and the full string stays in the tooltip.
+  const shortOs = platformLabel.replace(/\s*\(.*\)\s*$/, "");
   const canPowerCtl = isRoot && hasBin("systemctl");
   const passkeyEnabled = useAuthStore(s => s.loginMethods.passkey);
 
@@ -191,8 +195,15 @@ export function TopBar({ username, version, hasPasskey, onLogout, onNavigate, on
       <button
         onClick={() => setVersionOpen(true)}
         className="ml-auto text-xs text-gray-500 font-mono hover:text-gray-300 px-2 py-1 rounded-lg hover:bg-gray-800 transition-colors shrink-0"
-        aria-label="Show version and update info"
+        aria-label={`Show version and update info — anpan-os ${version}${shortOs ? ` on ${platformLabel}` : ""}${username ? `, signed in as ${username}` : ""}`}
+        title={[platformLabel, username && `signed in as ${username}`, `v${version}`].filter(Boolean).join(" · ")}
       >
+        {/* Host and account are context, not the subject — dimmer than the version, and
+            the first to go when the bar runs out of room on a narrow screen. */}
+        {shortOs && <span className="hidden md:inline text-gray-600">{shortOs}</span>}
+        {shortOs && username && <span className="hidden md:inline text-gray-700"> · </span>}
+        {username && <span className="hidden sm:inline text-gray-600">{username}</span>}
+        {(shortOs || username) && <span className="hidden sm:inline text-gray-700"> · </span>}
         v{version}
       </button>
 
