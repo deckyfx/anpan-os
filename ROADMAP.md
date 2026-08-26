@@ -1,5 +1,40 @@
 # Roadmap
 
+## v0.11.0 — 2026-08-26
+
+macOS and Apple Silicon become a supported platform. Everywhere the host OS genuinely
+changes the implementation now sits behind a provider, rather than a `process.platform`
+check at the call site.
+
+### New features
+- **macOS support, Apple Silicon and Intel.** Four binaries are published — `darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64` — and Bun cross-compiles all of them from one runner. The installers detect the platform and install a LaunchDaemon or a systemd unit accordingly. macOS reports `arm64` where Linux reports `aarch64`, which is where both installers previously died
+- **Provider paradigm.** `src/lib/providers/` holds the four places the OS changes the mechanism, not merely the binary name: **shares** (smb.conf / Open Directory), **service** (systemd / launchd), **ports** (`ss` / `lsof`), **metrics** (`/proc` / `os.cpus` + `vm_stat`). `zip`, `unzip`, `rsync`, `ffmpeg`, `cp`, `mv`, `du` and `docker` are deliberately *not* providers — identical flags on both platforms, so a wrapper would remove no decision. What they needed was a check that they are installed at all
+- **Native macOS file sharing.** macOS ships `/usr/sbin/smbd`, but it is Apple's SMBX, **not Samba**: it never reads `smb.conf`. `which smbd` succeeded, so shares were written, reported as created, and silently served nothing. `AppleShareProvider` drives `/usr/sbin/sharing` instead, so nobody installs Homebrew Samba to share a folder. Providers report a `capabilities` set and the UI renders against it, rather than accepting a value the backend will drop
+- **`--doctor` reports the host, the service and the address** — platform, kernel, cores, RAM, run mode, privilege, then the service with its pid and boot state, then the URL to open. Installed as a service the binary offered no other way to ask whether it was running
+
+### Bug fixes
+- **Docker was unreachable on macOS.** The socket path was hardcoded to `/var/run/docker.sock`, and Docker Desktop, OrbStack, Colima and Rancher each put it under the user's home. It is now discovered: as a root daemon anpan-os scans `/Users` and connects to a socket it does not own — root bypasses the mode-0660 check — and exports `DOCKER_HOST` so `docker compose` uses the same socket the API client found, rather than doing its own lookup and failing
+- **The stats endpoint threw on macOS**, which has no `/proc`. CPU now comes from `os.cpus()` tick deltas and memory from `vm_stat`. `os.freemem()` is unusable there: macOS treats nearly all unallocated memory as file cache, so the gauge would sit at 95% permanently
+- **`df` was silently misparsed.** macOS appends inode columns, so the mount point was being read from the `%iused` field. `-P` fixes the format at six columns on both platforms. APFS volumes are also grouped by container — a stock Mac reported twelve rows for one disk, each claiming the full total
+- **A container without a compose label could not be deleted, and the API said it worked.** Stacks are listed by compose project *or* by container Id, but deletion resolved only the compose case — so those entries matched nothing, removed nothing, and returned `200`. Resolution now mirrors the listing, and an empty match is a `404` unless anpan-os holds a metadata row
+- **The database opened at import time**, before its directory existed, taking down even `--version`. It never surfaced on Linux because the installer creates `/var/lib/anpan-os` first
+- **The doctor counted Linux-only tools as missing on macOS**, reporting a healthy Mac as three tools short and exiting non-zero. Not-applicable is now distinct from missing
+- **Tool availability asked the wrong question** — whether a tool was *defined for this OS*, never whether it was installed. On macOS, Docker, ffmpeg and Samba are all third-party and commonly absent. Results are cached; `rsync` was previously probed on every file copy
+- **Self-update would have overwritten Bun.** It replaces `process.execPath`, which under `bun run src/index.ts` is the Bun runtime. Now gated on build mode — not on the executable's name, since a compiled binary can be renamed and `bun` cannot. The replacement is also atomic: the download is staged beside the target and renamed, because `mv` across filesystems is copy-then-unlink and a crash part-way left a half-written executable where the service starts from
+- **Port 5000 collides with AirPlay Receiver**, which is on by default on Apple Silicon and holds 5000 and 7000 through Control Center. Its port cannot be changed, so a fresh macOS install could never bind. The installers probe before writing the config, keep 5000 wherever it is free, and record why in both the output and `config.toml`. A port held by anpan-os itself is not treated as a conflict — otherwise re-running the installer would migrate a running service to a different port
+
+### Tooling
+- **CI runs the test suite for the first time.** The only workflow fired on release publish and ran typecheck and build, never the tests — which is why eleven Linux regressions introduced during this work went unnoticed until the suite was run by hand in a container. `ci.yml` runs typecheck and tests on `ubuntu-latest` **and** `macos-latest` for every pull request, plus a build job checking all four targets exist. The macOS runner has no Docker, which is deliberate: the suite must pass without it
+- **The Docker image had never built.** `COPY --from=builder /build/dist ./dist` has been in the Dockerfile since the initial commit, but `build.ts` has never produced a `dist` directory, so every `docker build` failed at that line. Nothing noticed because the compiled binary embeds the frontend. With that fixed the image built and immediately died — architecture was read from `TARGETARCH`, which resolved to its `amd64` default, so an arm64 image shipped the x86-64 binary. Selection now comes from `uname -m`, which cannot disagree with the image it is building
+
+### Notes
+- Test suite **150 → 200**, passing on macOS and Linux. Eight bind-path tests had been failing on macOS before any of this work: their scratch directory sat under the OS temp dir, which canonicalises inside `/private/var` and is correctly refused as a system root
+- The parsers are now pure functions over captured output, which is the point of the split — previously they sat behind `if (IS_LINUX)` and the untaken branch could not be exercised at all. Four classes of bug are covered by the new tests: `MemAvailable` vs `MemFree` (a 15 GB error), `vm_stat` page size (16 KB on Apple Silicon against 4 KB on Intel — a 4× error), APFS snapshot double-counting (16 GB), and `lsof` command names containing spaces
+- CasaOS migration is hidden and refused off Linux; CasaOS does not run there, so there is never anything to migrate from
+- Verified on M-series hardware: all four targets build, disk totals match `diskutil` byte-for-byte, the share API round-trips against real Open Directory, and the installer was run end to end — which is how the AirPlay collision and the delete bug were found
+
+---
+
 ## v0.10.0 — 2026-08-23
 
 ### Bug fixes
