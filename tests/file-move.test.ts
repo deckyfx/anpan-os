@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeAll, afterAll } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTestClient, loginAs } from "./helpers";
@@ -49,7 +49,7 @@ describe("move", () => {
     const src = join(root, "ok-src");
     const dst = join(root, "ok-dst");
     Bun.spawnSync(["mkdir", "-p", src, dst]);
-    writeFileSync(join(src, "song.mp3"), "audio");
+    await Bun.write(join(src, "song.mp3"), "audio");
 
     const { errors, sawOk } = await runMove([join(src, "song.mp3")], dst);
 
@@ -77,8 +77,8 @@ describe("move", () => {
     const src = join(root, "batch-src");
     const dst = join(root, "batch-dst");
     Bun.spawnSync(["mkdir", "-p", src, dst]);
-    writeFileSync(join(src, "first.mp3"), "a");
-    writeFileSync(join(src, "third.mp3"), "c");
+    await Bun.write(join(src, "first.mp3"), "a");
+    await Bun.write(join(src, "third.mp3"), "c");
 
     const { errors, sawOk } = await runMove(
       [join(src, "first.mp3"), join(src, "second-gone.mp3"), join(src, "third.mp3")],
