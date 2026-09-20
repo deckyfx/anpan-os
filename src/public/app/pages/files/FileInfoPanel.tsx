@@ -2,16 +2,10 @@ import { useEffect, useState } from "react";
 import { X, ClipboardList, FolderSearch } from "lucide-react";
 import { api } from "../../lib/api";
 import { useFileStore } from "../../stores/fileStore";
-import type { DiskMount, SystemStats } from "../home/types";
+import { DrivesPanel } from "./DrivesPanel";
 import type { FileEntry } from "./types";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-
-function toGB(bytes: number): string {
-  if (bytes >= 1_073_741_824) return `${(bytes / 1_073_741_824).toFixed(1)} GB`;
-  if (bytes >= 1_048_576)     return `${(bytes / 1_048_576).toFixed(0)} MB`;
-  return `${Math.round(bytes / 1_024)} KB`;
-}
 
 function formatSize(bytes: number): string {
   if (bytes >= 1_073_741_824) return `${(bytes / 1_073_741_824).toFixed(2)} GB`;
@@ -32,59 +26,6 @@ const labelClass = "text-[10px] font-semibold text-gray-600 uppercase tracking-w
 const rowClass = "flex items-start justify-between gap-2 text-xs";
 const keyClass = "text-gray-500 shrink-0";
 const valClass = "text-gray-300 break-all text-right";
-
-// ─── Disk Usage Widget ────────────────────────────────────────────────────────
-
-/** Shows disk usage for the mount point that best matches the current directory. */
-function DiskUsageWidget({ currentPath }: { currentPath: string }) {
-  const [disks, setDisks] = useState<DiskMount[] | null>(null);
-
-  useEffect(() => {
-    api.api.system.stats.get()
-      .then(({ data }) => {
-        const d = data as SystemStats | null;
-        if (d?.disks) setDisks(d.disks);
-      })
-      .catch(() => {});
-  }, []);
-
-  if (!disks) {
-    return (
-      <div className={`${cardClass} animate-pulse`}>
-        <p className={labelClass}>Disk</p>
-        <div className="h-3 bg-gray-800 rounded w-3/4" />
-      </div>
-    );
-  }
-
-  // Find the disk whose mount is the longest prefix of currentPath.
-  const relevant = disks
-    .filter(d => currentPath === d.mount || currentPath.startsWith(d.mount === "/" ? "/" : d.mount + "/"))
-    .sort((a, b) => b.mount.length - a.mount.length)[0] ?? disks[0];
-
-  if (!relevant) return null;
-  const pct = relevant.total > 0 ? Math.min(100, Math.round((relevant.used / relevant.total) * 100)) : 0;
-  const barColor = pct > 85 ? "bg-red-500" : pct > 65 ? "bg-yellow-400" : "bg-violet-500";
-
-  return (
-    <div className={cardClass}>
-      <p className={labelClass}>Disk</p>
-      <div className="space-y-1">
-        <div className={rowClass}>
-          <span className={keyClass} title={relevant.device}>{relevant.device.replace("/dev/", "")}</span>
-          <span className="text-gray-600 truncate text-right">{relevant.mount}</span>
-        </div>
-        <div className={rowClass}>
-          <span className={keyClass}>{toGB(relevant.used)} used</span>
-          <span className="text-gray-600">{toGB(relevant.total)} total</span>
-        </div>
-        <div className="h-1.5 bg-gray-800 rounded-full overflow-hidden mt-1">
-          <div className={`h-full rounded-full transition-all ${barColor}`} style={{ width: `${pct}%` }} />
-        </div>
-      </div>
-    </div>
-  );
-}
 
 // ─── Clipboard Widget ─────────────────────────────────────────────────────────
 
@@ -229,7 +170,7 @@ export function FileInfoPanel({ currentPath, entries, selectedPaths }: FileInfoP
 
   return (
     <div className="space-y-3 p-3">
-      <DiskUsageWidget currentPath={currentPath} />
+      <DrivesPanel currentPath={currentPath} />
       {clipboard && <ClipboardWidget />}
       {selectedPaths.size > 0 && (
         <SelectionWidget

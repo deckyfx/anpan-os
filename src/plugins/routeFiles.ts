@@ -1008,8 +1008,26 @@ export function filesPlugin(jwtSecret: string) {
 
         void (async () => {
           try {
+            /**
+             * Whether any source reported a problem.
+             *
+             * The batch must not end in `ok` when one did. The client treats `ok` as
+             * completion -- for a move it clears the cut clipboard, which after a failed
+             * cleanup would drop the clipboard while the source is still on disk, so a
+             * duplicate is presented as a completed move. Continuing the loop is still
+             * right, so this is tracked rather than returned on.
+             */
+            let hadError = false;
+
             for (const src of sources) {
               if (aborted) return;
+              // Same stale-clipboard case as move: name the missing file rather than
+              // letting rsync report it as an opaque exit code.
+              if (!(await stat(src).catch(() => null))) {
+                hadError = true;
+                await agg.push({ error: `Source no longer exists, skipped: ${src}` });
+                continue;
+              }
               const args = hasRsync && bins.rsync
                 ? [bins.rsync, "-av", src, destination]
                 : [bins.cp ?? "cp", "-rv", src, destination];
@@ -1030,7 +1048,7 @@ export function filesPlugin(jwtSecret: string) {
             }
             // Checked here as well as in the loop: an empty sources array never enters
             // the loop, so without this an aborted request would still report success.
-            if (!aborted) await agg.push({ ok: true });
+            if (!aborted && !hadError) await agg.push({ ok: true });
           } catch (err) {
             await agg.push({ error: err instanceof Error ? err.message : String(err) });
           } finally {
@@ -1077,6 +1095,17 @@ export function filesPlugin(jwtSecret: string) {
 
         void (async () => {
           try {
+            /**
+             * Whether any source reported a problem.
+             *
+             * The batch must not end in `ok` when one did. The client treats `ok` as
+             * completion -- for a move it clears the cut clipboard, which after a failed
+             * cleanup would drop the clipboard while the source is still on disk, so a
+             * duplicate is presented as a completed move. Continuing the loop is still
+             * right, so this is tracked rather than returned on.
+             */
+            let hadError = false;
+
             for (const src of sources) {
               if (aborted) return;
               const [srcStat, destStat] = await Promise.all([
@@ -1084,7 +1113,17 @@ export function filesPlugin(jwtSecret: string) {
                 stat(destination).catch(() => null),
               ]);
 
-              const sameDev = srcStat && destStat && srcStat.dev === destStat.dev;
+              // A clipboard can outlive the files it names: the entry was moved from
+              // another tab, or a previous paste already moved it. Without this the source
+              // falls through to rsync, which reports the truth as "exit code 23" and, with
+              // the batch abandoned, leaves the remaining items silently unmoved.
+              if (!srcStat) {
+                hadError = true;
+                await agg.push({ error: `Source no longer exists, skipped: ${src}` });
+                continue;
+              }
+
+              const sameDev = destStat && srcStat.dev === destStat.dev;
 
               // `current` is null while stat() above is pending, so an abort during it
               // leaves nothing to kill — the guard has to be here, not only in the listener.
@@ -1125,14 +1164,20 @@ export function filesPlugin(jwtSecret: string) {
                     agg.end();
                     return;
                   }
-                  // rsync --remove-source-files leaves empty directories behind; clean them up.
+                  // rsync --remove-source-files deletes the files it transferred but leaves
+                  // the directory tree behind, so this clears the leftovers. When the source
+                  // is a single file there is nothing left at all: without `force` that is an
+                  // ENOENT, reported as "cleanup failed" on a move that fully succeeded.
                   try {
-                    await rm(src, { recursive: true });
+                    await rm(src, { recursive: true, force: true });
                     await agg.push({ log: `Removed source: ${src}` });
                   } catch (cleanErr) {
+                    // A genuine failure (permissions, busy mount) leaves a duplicate: present
+                    // at the destination and still at the source. Report it and carry on —
+                    // returning here abandoned every remaining item in a multi-file move,
+                    // under a message that says the move succeeded.
+                    hadError = true;
                     await agg.push({ error: `Move succeeded but source cleanup failed: ${cleanErr instanceof Error ? cleanErr.message : String(cleanErr)}` });
-                    agg.end();
-                    return;
                   }
                 } else {
                   // cp then rm fallback
@@ -1152,14 +1197,23 @@ export function filesPlugin(jwtSecret: string) {
                     agg.end();
                     return;
                   }
-                  await rm(src, { recursive: true });
-                  await agg.push({ log: `Removed source: ${src}` });
+                  // No `force` here: cp leaves the source in place, so this rm is the
+                  // step that performs the move, and a missing path would be a real fault.
+                  // Guarded all the same -- unhandled it reached the batch catch, whose
+                  // finally ended the stream and took the remaining sources with it.
+                  try {
+                    await rm(src, { recursive: true });
+                    await agg.push({ log: `Removed source: ${src}` });
+                  } catch (cleanErr) {
+                    hadError = true;
+                    await agg.push({ error: `Move succeeded but source cleanup failed: ${cleanErr instanceof Error ? cleanErr.message : String(cleanErr)}` });
+                  }
                 }
               }
             }
             // Checked here as well as in the loop: an empty sources array never enters
             // the loop, so without this an aborted request would still report success.
-            if (!aborted) await agg.push({ ok: true });
+            if (!aborted && !hadError) await agg.push({ ok: true });
           } catch (err) {
             await agg.push({ error: err instanceof Error ? err.message : String(err) });
           } finally {
