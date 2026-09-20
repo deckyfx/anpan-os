@@ -1,5 +1,31 @@
 # Roadmap
 
+## v0.12.0 — 2026-09-20
+
+The file manager gets a way to reach the machine's other disks, a filter for the folder
+in front of you, and the end of a move that reported its own success as a failure.
+
+### Bug fixes
+- **A completed move was reported as a failure, and the next paste then really did fail.** `rsync --remove-source-files` deletes the files it transfers, so after a single-file move there was nothing left for the follow-up cleanup to remove; without `force` that `rm` threw `ENOENT` and the move was reported as "Move succeeded but source cleanup failed". The handler then returned, so no `ok` was ever sent — and the client clears the cut clipboard only on `ok`. The clipboard therefore survived a move that had in fact completed, and pasting again asked rsync for files that no longer existed, which surfaced as "Move failed with exit code 23". Two error messages, one successful move, the file at its destination the whole time
+- **A multi-file move stopped at the first problem** and reported success, leaving every later item unmoved. Copy and move now name a source that has gone missing — a clipboard can outlive the files it points at, through a second tab or a move made by other means — and carry on with the rest of the batch
+- **A failed batch no longer ends in `ok`.** Letting it through would clear the cut clipboard after a cleanup that failed, presenting a duplicate, still present at the source, as a completed move
+- **The `cp` fallback's cleanup was unguarded**, so its exception reached the batch-level handler, whose `finally` ended the stream and took the remaining sources with it
+
+### New features
+- **Drive quick-access in the file manager's right panel.** Every drive and partition, each with its own usage bar, the current one highlighted, and a click to go there. It replaces a widget that showed usage for one disk only — whichever held the current directory, which is a readout rather than a way to reach a second disk or a thumbdrive
+- **Filter for the current folder** — narrows the listing by name as you type, with a match count and Esc to clear. Deliberately not recursive: the listing is already in hand, so it stays instant, where descending would need the server and an unknown amount of walking
+
+### Notes
+- `df` alone could not back the drive list: it reports what is *mounted*, so a drive nothing auto-mounted would be absent exactly when someone went looking for the one they had just plugged in. Block devices are read from sysfs and merged with `df`, so an unmounted partition is listed and says so. Labels come from `/dev/disk/by-label` and removability from sysfs, so no new external tool was needed
+- Mounts outside `files.root` are listed but refused, with the reason, rather than offering navigation the server would reject. The EFI partition is withheld: it is not content, and it is a bad thing to hand someone a delete key for
+- Disk containment is decided from the parent recorded while walking sysfs, not from a name prefix. `nvme0n10` is the tenth namespace on a controller rather than a partition of `nvme0n1`, and `sdaa` is the 27th SCSI disk rather than a partition of `sda`; either would have hidden a real disk
+- An assembled `md` array is treated as the volume it is. On a home server it is often the largest one present, and so exactly the disk this panel exists to reach
+- The sysfs half is Linux-only. On macOS those reads fail and the list falls back to mounted volumes, which is the useful subset there, since `/Volumes` carries the volume name in the mount path
+- The folder filter lives in the store rather than the component because selection is shared: filtered-out entries drop out of the selection, the same guard the dotfile toggle already applied, so a bulk action cannot include something that is not on screen
+- Test suite **214 → 217**, including route-level tests for the move contract this area kept breaking: a success ends in `ok` with the file moved, a missing source is named and yields no `ok`, and a gap in the middle of a batch does not stop the items after it
+
+---
+
 ## v0.11.0 — 2026-08-26
 
 macOS and Apple Silicon become a supported platform. Everywhere the host OS genuinely
