@@ -172,7 +172,10 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
     () => visibleEntries(entries, showHidden).length,
     [entries, showHidden],
   );
-  const hiddenCount = entries.length - shownEntries.length;
+  // Measured against filterableCount, not shownEntries: this number labels the dotfile
+  // toggle, so counting entries the *filter* removed would offer to reveal files that
+  // are not dotfiles and would stay hidden if the toggle were flipped.
+  const hiddenCount = entries.length - filterableCount;
 
   const sharedRowProps = {
     entries: shownEntries, creatingFolder, newFolderName, renamingPath, renameValue, selectedPaths,
