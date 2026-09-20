@@ -9,12 +9,18 @@
  *
  * Nothing here shells out beyond the `df` the system page already runs: labels come from
  * /dev/disk/by-label and removability from sysfs, so no new external tool is required.
+ *
+ * The sysfs half is Linux-only. On macOS the readdir calls simply fail and the list falls
+ * back to what `df` mounted, which is the useful subset there anyway: /Volumes carries the
+ * volume name in the mount path, and an unmounted disk is the OS's business, not ours.
  */
 
 import { readdir, readFile, readlink, stat } from "node:fs/promises";
 import { basename, resolve } from "node:path";
 import { bins } from "./commands";
 import { config } from "../config";
+import { dedupeByDevice, parseDf } from "./providers/metrics/df";
+import type { DiskMount } from "./providers/metrics/types";
 
 /** A drive or partition offered in the quick-access list. */
 export interface Drive {
@@ -34,14 +40,6 @@ export interface Drive {
   browsable: boolean;
   /** Reason it is not browsable, for the UI to show instead of a dead link. */
   unavailable: string | null;
-}
-
-/** A mounted filesystem as `df` reports it. */
-export interface DfRow {
-  device: string;
-  mount: string;
-  used: number;
-  total: number;
 }
 
 /** A block device as sysfs describes it. */
@@ -66,25 +64,6 @@ const IGNORED_PREFIXES = ["loop", "ram", "zram", "sr", "fd", "md"];
  * offering it for browsing alongside the media disks invites someone to delete from it.
  */
 const HIDDEN_MOUNT_PREFIXES = ["/boot"];
-
-/** Parse `df -k` output into rows for real block devices, in bytes. */
-export function parseDf(stdout: string): DfRow[] {
-  const rows: DfRow[] = [];
-  for (const line of stdout.trim().split("\n").slice(1)) {
-    const parts = line.trim().split(/\s+/);
-    // A mount point may contain spaces, so it is everything from field 6 onward rather
-    // than field 6 alone -- splitting on whitespace would otherwise truncate "/mnt/my disk".
-    if (parts.length < 6) continue;
-    const device = parts[0]!;
-    if (!device.startsWith("/dev/")) continue;
-    const total = Number.parseInt(parts[1]!, 10) * 1024;
-    const used = Number.parseInt(parts[2]!, 10) * 1024;
-    const mount = parts.slice(5).join(" ");
-    if (!Number.isFinite(total) || !Number.isFinite(used)) continue;
-    rows.push({ device, mount, used, total });
-  }
-  return rows;
-}
 
 /** Whether a kernel device name is a pseudo-device we never show. */
 export function isIgnoredDevice(name: string): boolean {
@@ -212,7 +191,7 @@ export function decodeLabel(name: string): string {
  * sysfs so a drive that exists but is not mounted is visible rather than absent.
  */
 export function buildDrives(
-  df: DfRow[],
+  df: DiskMount[],
   blocks: BlockDevice[],
   labels: Map<string, string>,
   filesRoot: string,
@@ -224,13 +203,11 @@ export function buildDrives(
   // mounted" -- both listing it after we chose not to, and saying something untrue.
   const hidden = new Set(df.filter(r => isHiddenMount(r.mount)).map(r => r.device));
 
-  for (const row of df) {
+  // dedupeByDevice keeps one entry per device at its shallowest mount: a device mounted
+  // at both "/" and a bind path underneath is one drive, and the bind path is incidental.
+  for (const row of dedupeByDevice(df)) {
     if (isHiddenMount(row.mount)) continue;
     const within = isWithinRoot(row.mount, filesRoot);
-    // The same device can be mounted more than once (bind mounts, subvolumes). Keep the
-    // shallowest mount: it is the one that reaches the most content.
-    const existing = byDevice.get(row.device);
-    if (existing && existing.mount !== null && existing.mount.length <= row.mount.length) continue;
     byDevice.set(row.device, {
       device:      row.device,
       mount:       row.mount,
@@ -284,6 +261,6 @@ export async function listDrives(): Promise<Drive[]> {
 
 async function runDf(): Promise<string> {
   if (!bins.df) return "";
-  const result = await Bun.$`${bins.df} -k`.quiet().nothrow();
+  const result = await Bun.$`${bins.df} -Pk`.quiet().nothrow();
   return result.stdout.toString();
 }

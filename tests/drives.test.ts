@@ -1,8 +1,9 @@
 import { test, expect, describe } from "bun:test";
 import {
-  buildDrives, decodeLabel, isHiddenMount, isWithinRoot, parseDf,
-  type BlockDevice, type DfRow,
+  buildDrives, decodeLabel, isHiddenMount, isWithinRoot,
+  type BlockDevice,
 } from "../src/lib/drives";
+import type { DiskMount } from "../src/lib/providers/metrics/types";
 
 /**
  * The quick-access list is assembled from three sources that disagree with each other:
@@ -13,31 +14,6 @@ import {
  */
 
 const noLabels = new Map<string, string>();
-
-describe("parseDf", () => {
-  test("reads real block devices and converts 1K blocks to bytes", () => {
-    const rows = parseDf([
-      "Filesystem     1K-blocks      Used Available Use% Mounted on",
-      "/dev/nvme0n1p2   1966798   809721   1057096  44% /",
-      "tmpfs              65536        0     65536   0% /run",
-      "/dev/nvme1n1     3844572  2714180    935023  75% /mnt/ssd02",
-    ].join("\n"));
-
-    expect(rows).toHaveLength(2);                       // tmpfs dropped
-    expect(rows[0]).toEqual({
-      device: "/dev/nvme0n1p2", mount: "/", used: 809721 * 1024, total: 1966798 * 1024,
-    });
-  });
-
-  test("keeps a mount point containing spaces intact", () => {
-    // Splitting on whitespace and taking field 6 alone truncates this to "/mnt/my".
-    const rows = parseDf([
-      "Filesystem 1K-blocks Used Available Use% Mounted on",
-      "/dev/sdb1 1000 500 500 50% /mnt/my backup disk",
-    ].join("\n"));
-    expect(rows[0]!.mount).toBe("/mnt/my backup disk");
-  });
-});
 
 describe("isWithinRoot", () => {
   test("a sibling sharing a name prefix is not inside the root", () => {
@@ -73,7 +49,7 @@ describe("buildDrives", () => {
     // The EFI partition IS mounted, at /boot/efi. Withholding it from the df pass and then
     // letting the sysfs pass re-add it would both list it after we chose not to, and label
     // a mounted partition "Not mounted".
-    const df: DfRow[] = [
+    const df: DiskMount[] = [
       { device: "/dev/nvme0n1p2", mount: "/",         used: 1, total: 2 },
       { device: "/dev/nvme0n1p1", mount: "/boot/efi", used: 1, total: 2 },
     ];
@@ -99,14 +75,14 @@ describe("buildDrives", () => {
   });
 
   test("a mount outside the browsable root is shown but refused, with the reason", () => {
-    const df: DfRow[] = [{ device: "/dev/nvme1n1", mount: "/mnt/ssd02", used: 1, total: 2 }];
+    const df: DiskMount[] = [{ device: "/dev/nvme1n1", mount: "/mnt/ssd02", used: 1, total: 2 }];
     const drives = buildDrives(df, [], noLabels, "/DATA");
     expect(drives[0]!.browsable).toBe(false);
     expect(drives[0]!.unavailable).toContain("/DATA");
   });
 
   test("a device mounted twice is listed once, at its shallowest mount", () => {
-    const df: DfRow[] = [
+    const df: DiskMount[] = [
       { device: "/dev/sdb1", mount: "/mnt/data/sub/deep", used: 1, total: 2 },
       { device: "/dev/sdb1", mount: "/mnt/data",          used: 1, total: 2 },
     ];
@@ -117,7 +93,7 @@ describe("buildDrives", () => {
 
   test("labels and usage come through, and root sorts first", () => {
     const labels = new Map([["/dev/nvme1n1", "Team4TB02"]]);
-    const df: DfRow[] = [
+    const df: DiskMount[] = [
       { device: "/dev/nvme1n1",   mount: "/mnt/ssd02", used: 75, total: 100 },
       { device: "/dev/nvme0n1p2", mount: "/",          used: 41, total: 100 },
     ];
@@ -129,7 +105,7 @@ describe("buildDrives", () => {
   });
 
   test("removable media sorts after fixed disks", () => {
-    const df: DfRow[] = [
+    const df: DiskMount[] = [
       { device: "/dev/sda",       mount: "/media/usb0", used: 1, total: 2 },
       { device: "/dev/nvme0n1p2", mount: "/mnt/ssd01",  used: 1, total: 2 },
     ];
