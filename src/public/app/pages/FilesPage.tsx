@@ -8,7 +8,7 @@ import { ChevronLeft, ChevronRight, FolderUp, House, LayoutGrid, List,
          FolderOpen, Pencil, Download, Archive, PackageOpen, ShieldCheck, Info,
          Trash2, FolderPlus, Upload, Network, Share2, FolderMinus,
          Copy, Scissors, ClipboardPaste, PanelRight, FolderSearch, RefreshCw,
-         Bookmark, X, Settings, Settings2, Check, Eye, EyeOff, AudioLines } from "lucide-react";
+         Bookmark, X, Settings, Settings2, Check, Eye, EyeOff, AudioLines, Search } from "lucide-react";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { Dialog }        from "../components/Dialog";
 import type { FileEntry } from "./files/types";
@@ -51,6 +51,7 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
     // View / selection
     viewMode, setViewMode, selectedPaths, toggleSelect, toggleSelectAll,
     showHidden, toggleShowHidden,
+    filterQuery, setFilterQuery,
     // Convert
     convertFlac, convertFlacFolder,
     // Context menu
@@ -162,7 +163,13 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
   // Dotfiles are filtered here rather than server-side: the listing is already fetched,
   // and toggling stays instant instead of costing a round trip.
   const shownEntries = useMemo(
-    () => visibleEntries(entries, showHidden),
+    () => visibleEntries(entries, showHidden, filterQuery),
+    [entries, showHidden, filterQuery],
+  );
+  // Counted against what the dotfile toggle already allows, so the readout describes the
+  // filter's own effect rather than blaming it for hidden files.
+  const filterableCount = useMemo(
+    () => visibleEntries(entries, showHidden).length,
     [entries, showHidden],
   );
   const hiddenCount = entries.length - shownEntries.length;
@@ -307,6 +314,38 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
           <Network size={13} />
           Samba
         </button>
+
+        {/* Filter the current directory. Not recursive: it narrows the listing already
+            on screen, so it stays instant and never walks into unknown directories. */}
+        <div className="relative shrink-0">
+          <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-500 pointer-events-none" />
+          <input
+            type="text"
+            value={filterQuery}
+            onChange={(e) => setFilterQuery(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Escape") setFilterQuery(""); }}
+            placeholder="Filter this folder…"
+            aria-label="Filter files and folders in the current directory"
+            className="w-44 pl-8 pr-7 py-1.5 rounded-lg bg-gray-800 border border-gray-700 text-xs text-gray-200
+                       placeholder:text-gray-600 focus:outline-none focus:border-violet-500/60 transition-colors"
+          />
+          {filterQuery !== "" && (
+            <button
+              onClick={() => setFilterQuery("")}
+              title="Clear filter (Esc)"
+              aria-label="Clear filter"
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-200 transition-colors"
+            >
+              <X size={12} />
+            </button>
+          )}
+        </div>
+
+        {filterQuery !== "" && (
+          <span className="text-[11px] text-gray-500 shrink-0 tabular-nums" aria-live="polite">
+            {shownEntries.length} of {filterableCount}
+          </span>
+        )}
 
         <button onClick={() => setViewMode(viewMode === "list" ? "grid" : "list")}
           title={viewMode === "list" ? "Grid view" : "List view"}

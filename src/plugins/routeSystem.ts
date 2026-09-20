@@ -10,6 +10,7 @@ import {
 } from "../lib/platform";
 import { bins, commands } from "../lib/commands";
 import { envConfig } from "../env-config";
+import { listDrives } from "../lib/drives";
 
 function semverGt(a: string, b: string): boolean {
   const parse = (v: string) => v.replace(/^v/, "").split(".").map(n => parseInt(n, 10) || 0);
@@ -72,6 +73,13 @@ export function systemPlugin(jwtSecret: string) {
       const [cpu, ram, disks] = await Promise.all([metrics.cpu(), metrics.ram(), metrics.disks()]);
       return { cpu, ...ram, disks };
     })
+    /**
+     * Drives and partitions for the file manager's quick-access list.
+     *
+     * Separate from /stats, which the dashboard polls for CPU and RAM: this one walks
+     * sysfs, and there is no reason to pay for that on every dashboard tick.
+     */
+    .get("/drives", () => listDrives())
     .get("/doctor", () => commands.doctor())
     .post("/restart",  ({ set }) => power(set, service.rebootCommand()))
     .post("/shutdown", ({ set }) => power(set, service.poweroffCommand()))

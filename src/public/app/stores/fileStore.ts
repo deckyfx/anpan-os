@@ -29,8 +29,19 @@ function readShowHidden(): boolean {
  * Everything acting on "all files" — select-all above all — has to go through this, or it
  * would reach dotfiles that are not on screen and cannot be deselected.
  */
-export function visibleEntries(entries: FileEntry[], showHidden: boolean): FileEntry[] {
-  return showHidden ? entries : entries.filter(e => !e.name.startsWith("."));
+export function visibleEntries(
+  entries: FileEntry[],
+  showHidden: boolean,
+  filterQuery = "",
+): FileEntry[] {
+  const q = filterQuery.trim().toLocaleLowerCase();
+  return entries.filter(e =>
+    (showHidden || !e.name.startsWith(".")) &&
+    // Matching is on the current directory's own entries only -- the listing is already
+    // in hand, so filtering costs nothing and stays instant as the user types. It is
+    // deliberately not recursive: a search that descends would need the server and would
+    // turn a filter into a crawl of an unknown number of directories.
+    (q === "" || e.name.toLocaleLowerCase().includes(q)));
 }
 
 interface NavHistory {
@@ -78,6 +89,8 @@ interface FileState {
   viewMode:      ViewMode;
   /** Show dotfiles. Off by default, and remembered across sessions. */
   showHidden:    boolean;
+  /** Name filter applied to the current directory's listing. */
+  filterQuery:   string;
   selectedPaths: Set<string>;
 
   // ── Context menu ──────────────────────────────────────────────────────────
@@ -187,6 +200,7 @@ interface FileState {
   toggleSelect:    (path: string) => void;
   toggleSelectAll: () => void;
   toggleShowHidden: () => void;
+  setFilterQuery: (v: string) => void;
 
   // Setters
   setAddressValue:      (v: string) => void;
@@ -241,6 +255,7 @@ export const useFileStore = create<FileState>((set, get) => ({
 
   viewMode:      "list",
   showHidden:    readShowHidden(),
+  filterQuery:   "",
   selectedPaths: new Set<string>(),
 
   ctxMenu: null,
@@ -333,7 +348,15 @@ export const useFileStore = create<FileState>((set, get) => ({
         if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
         return a.name.localeCompare(b.name);
       });
-      set({ entries: data2, currentPath: trimmed, addressValue: trimmed, selectedPaths: new Set() });
+      // A filter belongs to the directory it was typed in, so changing directory clears
+      // it -- otherwise the next listing arrives silently filtered. Re-reading the *same*
+      // directory (after a rename or a delete) keeps it, since the user is still using it.
+      const samePath = get().currentPath === trimmed;
+      set({
+        entries: data2, currentPath: trimmed, addressValue: trimmed,
+        selectedPaths: new Set(),
+        ...(samePath ? {} : { filterQuery: "" }),
+      });
       return true;
     } catch (e) {
       set({ navError: String(e) });
@@ -853,7 +876,7 @@ export const useFileStore = create<FileState>((set, get) => ({
     set((s) => {
       // Scoped to visible entries: selecting a dotfile the user cannot see would leave
       // them holding a selection they have no way to inspect or clear.
-      const visible = visibleEntries(s.entries, s.showHidden);
+      const visible = visibleEntries(s.entries, s.showHidden, s.filterQuery);
       const allSelected = visible.length > 0 && visible.every(e => s.selectedPaths.has(e.path));
       return { selectedPaths: allSelected ? new Set<string>() : new Set(visible.map(e => e.path)) };
     });
@@ -864,9 +887,26 @@ export const useFileStore = create<FileState>((set, get) => ({
       const showHidden = !s.showHidden;
       try { localStorage.setItem(SHOW_HIDDEN_KEY, showHidden ? "1" : "0"); } catch { /* storage disabled */ }
       // Drop any selected dotfile on the way out, so hiding cannot strand a selection.
-      const keep = new Set(visibleEntries(s.entries, showHidden).map(e => e.path));
+      const keep = new Set(visibleEntries(s.entries, showHidden, s.filterQuery).map(e => e.path));
       return {
         showHidden,
+        selectedPaths: new Set([...s.selectedPaths].filter(p => keep.has(p))),
+      };
+    });
+  },
+
+  /**
+   * Filter the current directory's listing by name.
+   *
+   * Selection is pruned to what survives the filter, for the same reason hiding dotfiles
+   * prunes it: a selected entry the user cannot see is one they cannot inspect or clear,
+   * and the next bulk action would silently include it.
+   */
+  setFilterQuery: (filterQuery) => {
+    set((s) => {
+      const keep = new Set(visibleEntries(s.entries, s.showHidden, filterQuery).map(e => e.path));
+      return {
+        filterQuery,
         selectedPaths: new Set([...s.selectedPaths].filter(p => keep.has(p))),
       };
     });
