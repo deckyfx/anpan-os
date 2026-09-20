@@ -49,13 +49,23 @@ export interface BlockDevice {
   /** Size in bytes. */
   total: number;
   removable: boolean;
+  /**
+   * The disk this partition belongs to, or null for a whole disk.
+   *
+   * Recorded while walking sysfs, where the relationship is explicit. Inferring it from
+   * the name instead — "does another device start with mine?" — makes nvme0n10 look like
+   * a partition of nvme0n1, and sdaa like one of sda, and hides the real disk.
+   */
+  parent: string | null;
 }
 
 /**
  * Pseudo-devices that are never user-facing storage. `loop` backs snap packages (a host
- * with snaps has dozens), `ram`/`zram` are memory-backed, and `sr` is optical.
+ * with snaps has dozens), `ram`/`zram` are memory-backed, `sr` is optical and `fd` is a
+ * floppy. `md` is deliberately absent: an assembled mdadm array is a real volume, and on
+ * a home server it is likely to be the largest one there.
  */
-const IGNORED_PREFIXES = ["loop", "ram", "zram", "sr", "fd", "md"];
+const IGNORED_PREFIXES = ["loop", "ram", "zram", "sr", "fd"];
 
 /**
  * Mounts deliberately withheld from the list.
@@ -109,7 +119,7 @@ export async function listBlockDevices(sysBlock = "/sys/block"): Promise<BlockDe
 
     const removable = await isRemovable(sysBlock, disk);
     const diskSize = await readSectors(`${sysBlock}/${disk}/size`);
-    if (diskSize > 0) out.push({ name: disk, total: diskSize, removable });
+    if (diskSize > 0) out.push({ name: disk, total: diskSize, removable, parent: null });
 
     // Partitions are subdirectories of the disk carrying their own `partition` file.
     let children: string[];
@@ -126,7 +136,7 @@ export async function listBlockDevices(sysBlock = "/sys/block"): Promise<BlockDe
         continue; // not a partition
       }
       const size = await readSectors(`${sysBlock}/${disk}/${child}/size`);
-      if (size > 0) out.push({ name: child, total: size, removable });
+      if (size > 0) out.push({ name: child, total: size, removable, parent: disk });
     }
   }
   return out;
@@ -224,8 +234,9 @@ export function buildDrives(
     const device = `/dev/${block.name}`;
     if (byDevice.has(device) || hidden.has(device)) continue;
     // A whole disk that is merely the container for its partitions is not itself a place
-    // to go. Listing it would put "nvme0n1" beside the partitions it holds.
-    if (blocks.some(b => b.name !== block.name && b.name.startsWith(block.name))) continue;
+    // to go. Listing it would put "nvme0n1" beside the partitions it holds. Decided from
+    // the recorded parent, so a disk is hidden only by something that really is its child.
+    if (blocks.some(b => b.parent === block.name)) continue;
     byDevice.set(device, {
       device,
       mount:       null,

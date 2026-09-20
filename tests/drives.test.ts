@@ -1,6 +1,6 @@
 import { test, expect, describe } from "bun:test";
 import {
-  buildDrives, decodeLabel, isHiddenMount, isWithinRoot,
+  buildDrives, decodeLabel, isHiddenMount, isIgnoredDevice, isWithinRoot,
   type BlockDevice,
 } from "../src/lib/drives";
 import type { DiskMount } from "../src/lib/providers/metrics/types";
@@ -33,16 +33,25 @@ test("isHiddenMount covers the EFI partition but not lookalikes", () => {
   expect(isHiddenMount("/bootstrap")).toBe(false);
 });
 
+test("isIgnoredDevice skips pseudo-devices but keeps mdadm arrays", () => {
+  // buildDrives never consults this, so the md case has to be asserted here or adding
+  // "md" back to the ignore list would pass every other test in this file.
+  expect(isIgnoredDevice("loop3")).toBe(true);
+  expect(isIgnoredDevice("zram0")).toBe(true);
+  expect(isIgnoredDevice("md0")).toBe(false);
+  expect(isIgnoredDevice("nvme0n1")).toBe(false);
+});
+
 test("decodeLabel turns by-label escapes back into characters", () => {
   expect(decodeLabel("My\\x20Drive")).toBe("My Drive");
 });
 
 describe("buildDrives", () => {
   const blocks: BlockDevice[] = [
-    { name: "nvme0n1",   total: 2_000_000_000_000, removable: false },
-    { name: "nvme0n1p1", total: 1_000_000_000,     removable: false },
-    { name: "nvme0n1p2", total: 1_999_000_000_000, removable: false },
-    { name: "sda",       total: 32_000_000_000,    removable: true  },
+    { name: "nvme0n1",   total: 2_000_000_000_000, removable: false, parent: null      },
+    { name: "nvme0n1p1", total: 1_000_000_000,     removable: false, parent: "nvme0n1" },
+    { name: "nvme0n1p2", total: 1_999_000_000_000, removable: false, parent: "nvme0n1" },
+    { name: "sda",       total: 32_000_000_000,    removable: true,  parent: null      },
   ];
 
   test("a device hidden by its mount point is not resurrected as unmounted", () => {
@@ -72,6 +81,31 @@ describe("buildDrives", () => {
     const drives = buildDrives([], blocks, noLabels, "/");
     expect(drives.map(d => d.device)).not.toContain("/dev/nvme0n1");
     expect(drives.map(d => d.device)).toContain("/dev/nvme0n1p2");
+  });
+
+  test("a disk is not hidden by an unrelated device whose name extends its own", () => {
+    // nvme0n10 is the tenth namespace on the controller, not a partition of nvme0n1 --
+    // and sdaa is the 27th SCSI disk, not a partition of sda. Deciding by name prefix
+    // makes each of these swallow a real disk.
+    const lookalikes: BlockDevice[] = [
+      { name: "nvme0n1",  total: 1_000, removable: false, parent: null },
+      { name: "nvme0n10", total: 2_000, removable: false, parent: null },
+      { name: "sda",      total: 3_000, removable: false, parent: null },
+      { name: "sdaa",     total: 4_000, removable: false, parent: null },
+    ];
+    const devices = buildDrives([], lookalikes, noLabels, "/").map(d => d.device);
+    expect(devices).toEqual(
+      expect.arrayContaining(["/dev/nvme0n1", "/dev/nvme0n10", "/dev/sda", "/dev/sdaa"]),
+    );
+  });
+
+  test("an assembled mdadm array is offered like any other volume", () => {
+    // On a home server the RAID array is often the largest volume present, and is exactly
+    // the "second disk" this panel exists to reach.
+    const df: DiskMount[] = [{ device: "/dev/md0", mount: "/mnt/raid", used: 1, total: 2 }];
+    const drives = buildDrives(df, [{ name: "md0", total: 8_000, removable: false, parent: null }],
+      noLabels, "/");
+    expect(drives.find(d => d.device === "/dev/md0")?.browsable).toBe(true);
   });
 
   test("a mount outside the browsable root is shown but refused, with the reason", () => {
