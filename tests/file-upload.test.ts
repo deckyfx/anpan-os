@@ -109,6 +109,39 @@ describe("chunked upload", () => {
     expect((await put("ok.txt", "../../etc", 0, 1, "x")).status).toBe(400);
   });
 
+  test("abandoning an upload refuses the same names the upload does", async () => {
+    // The abandon route once checked only for a separator, so "." and ".." passed it.
+    for (const name of ["..", ".", "a/b.txt", ""]) {
+      const res = await app.handle(new Request(url(root, name, crypto.randomUUID()), {
+        method: "DELETE", headers: { cookie },
+      }));
+      expect(res.status).toBe(400);
+    }
+  });
+
+  test("offset and total must be whole numbers", async () => {
+    // A fractional total could never be reached, so the upload could never finish.
+    expect((await put("frac.txt", crypto.randomUUID(), 0, 10.5, "x")).status).toBe(400);
+    expect((await put("frac.txt", crypto.randomUUID(), 0.5, 10, "x")).status).toBe(400);
+    expect(parts().filter(n => n.includes("frac.txt"))).toEqual([]);
+  });
+
+  test("a missing Content-Length is 411, a malformed one is 400", async () => {
+    const send = (headers: Record<string, string>) =>
+      app.handle(new Request(url(root, "len.txt", crypto.randomUUID(), "&offset=0&total=1"), {
+        method: "PUT", body: "x", headers: { cookie, ...headers },
+      }));
+    expect((await send({})).status).toBe(411);
+    for (const bad of ["-1", "1.5", "abc"]) {
+      const res = await send({ "content-length": bad });
+      expect(res.status).toBe(400);
+      // The reason, not only the status: before, a negative or fractional length also got a
+      // 400, but as "Upload was interrupted", after the temp file had been opened and cut.
+      expect(((await res.json()) as { error: string }).error).toContain("Content-Length");
+    }
+    expect(parts().filter(n => n.startsWith(".len.txt."))).toEqual([]);
+  });
+
   test("without a session nothing is written", async () => {
     const res = await app.handle(new Request(url(root, "anon.txt", crypto.randomUUID(), "&offset=0&total=1"), {
       method: "PUT", body: "x",
@@ -160,7 +193,9 @@ describe("chunked upload", () => {
       headers: { cookie, "content-length": String(total) },
     } as RequestInit));
     feed.enqueue(data.slice(0, total / 2));
-    const held = await waitFor(() => parts().length === 1 && statSync(join(root, parts()[0]!)).size === total / 2, 2000);
+    // Only this upload's temp file: another test's leftovers must not decide this one.
+    const mine = () => parts().filter(n => n.startsWith(`.${name}.`));
+    const held = await waitFor(() => mine().length === 1 && statSync(join(root, mine()[0]!)).size === total / 2, 2000);
     expect(held).toBe(true);
 
     // The client's retry of the same chunk, complete. Unserialised it finishes at once.
@@ -175,7 +210,7 @@ describe("chunked upload", () => {
     const landed = await Bun.file(dest).bytes();
     expect(landed.byteLength).toBe(total);
     expect(Buffer.from(landed).equals(Buffer.from(data))).toBe(true);
-    expect(parts()).toEqual([]);
+    expect(mine()).toEqual([]);
     rmSync(dest);
   });
 });
