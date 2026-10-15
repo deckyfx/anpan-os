@@ -643,7 +643,14 @@ export const useFileStore = create<FileState>((set, get) => ({
       void get().loadDirContent(uploadPath);
       // Close on its own only when everything went through; otherwise leave the reasons on
       // screen until the user dismisses them.
-      if (get().uploadItems.every(it => !it.error)) setTimeout(() => set({ uploadItems: [] }), 800);
+      const finished = get().uploadItems;
+      if (finished.every(it => !it.error)) {
+        // Clear only this batch. A new upload started inside the 800 ms window installs its
+        // own array, and an unconditional clear would wipe its progress rows mid-upload.
+        // Reference identity is enough: a finished batch receives no more updates, so its
+        // array is unchanged until the timer fires unless another batch has replaced it.
+        setTimeout(() => { if (get().uploadItems === finished) set({ uploadItems: [] }); }, 800);
+      }
     })();
   },
 
