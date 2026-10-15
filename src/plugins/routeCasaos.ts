@@ -79,7 +79,8 @@ export function casaosPlugin(jwtSecret: string) {
         // from the request it would bypass a narrowed files root. Hold it to the boundary the
         // file manager already enforces, plus CasaOS's app folder -- which usually lies
         // outside a root narrowed to, say, /DATA.
-        const requested = (body as { composePath?: string }).composePath;
+        // Optional chaining: the body itself may be omitted, and reading through it crashed.
+        const requested = body?.composePath;
         let composePath: string;
         if (requested) {
           if (!isWithinAny(requested, [CASAOS_APPS_DIR, config.filesRoot])) {
