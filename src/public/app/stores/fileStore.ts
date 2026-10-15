@@ -3,6 +3,7 @@ import { api } from "../lib/api";
 import type { FileEntry, ViewMode, UploadItem, CtxMenu, SambaShare, ShareBackend, FileBrowserConfig } from "../pages/files/types";
 import { normalizePath, parentPath } from "../pages/files/helpers";
 import { useToastStore } from "./toastStore";
+import { UPLOAD_CHUNK_SIZE } from "../../../constants/http";
 
 function debounce<T extends unknown[]>(fn: (...args: T) => void, ms: number) {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -171,6 +172,8 @@ interface FileState {
   setDeleteTargets: (entries: FileEntry[]) => void;
   commitNewFolder:  () => Promise<void>;
   handleUpload:     (files: FileList | null) => void;
+  /** Abort the file in flight and skip the rest of the batch. */
+  cancelUpload:     () => void;
   handleChmod:      () => Promise<void>;
   handleArchive:    () => Promise<void>;
   handleExtract:    (entry: FileEntry) => Promise<void>;
@@ -228,6 +231,96 @@ interface FileState {
   setNewShare:          (s: NewShare) => void;
   setSambaError:        (v: string) => void;
   setPendingPath:       (path: string | null) => void;
+}
+
+// ─── Upload state outside the store: an XHR is not state to render ────────────
+
+/** No upload progress for this long means the connection is gone, even if nothing said so. */
+const UPLOAD_STALL_MS = 60_000;
+/** Tries per chunk before the file is given up; the wait between them doubles from 1 s. */
+const UPLOAD_ATTEMPTS = 4;
+let activeUpload: XMLHttpRequest | null = null;
+let uploadCancelled = false;
+
+type ChunkResult =
+  | { kind: "ok";        received: number }
+  | { kind: "resync";    received: number }  // 409: the server holds less than we sent
+  | { kind: "retry";     message: string }   // lost, stalled or a server error — worth another try
+  | { kind: "fail";      message: string }   // a refusal that another try would get again
+  | { kind: "cancelled" };
+
+/**
+ * PUT one chunk. Every way an XHR can end resolves the promise, and a watchdog aborts one
+ * that stops making progress: a dropped connection does not always raise an error, and
+ * before this the dialog waited on it forever.
+ */
+function sendChunk(url: string, body: Blob, onProgress: (loaded: number) => void): Promise<ChunkResult> {
+  return new Promise(resolve => {
+    const xhr = new XMLHttpRequest();
+    activeUpload = xhr;
+    let stalled = false;
+    let watchdog: ReturnType<typeof setTimeout> | undefined;
+    const arm  = () => { clearTimeout(watchdog); watchdog = setTimeout(() => { stalled = true; xhr.abort(); }, UPLOAD_STALL_MS); };
+    const done = (result: ChunkResult) => { clearTimeout(watchdog); activeUpload = null; resolve(result); };
+
+    xhr.upload.onprogress = (e) => { arm(); onProgress(e.loaded); };
+    xhr.onload = () => {
+      let reply: { error?: string; received?: number } = {};
+      try { reply = JSON.parse(xhr.responseText); } catch { /* not JSON */ }
+      if (xhr.status >= 200 && xhr.status < 300 && typeof reply.received === "number") {
+        return done({ kind: "ok", received: reply.received });
+      }
+      if (xhr.status === 409 && typeof reply.received === "number") return done({ kind: "resync", received: reply.received });
+      const message = reply.error ?? `Upload failed (HTTP ${xhr.status})`;
+      // Writing a chunk is idempotent, so a server error is worth retrying; a full disk is not.
+      done(xhr.status >= 500 && xhr.status !== 507 ? { kind: "retry", message } : { kind: "fail", message });
+    };
+    xhr.onerror = () => done({ kind: "retry", message: "Connection lost" });
+    xhr.onabort = () => done(stalled
+      ? { kind: "retry", message: `Stalled — no progress for ${UPLOAD_STALL_MS / 1000} s` }
+      : { kind: "cancelled" });
+    xhr.open("PUT", url);
+    xhr.setRequestHeader("Content-Type", "application/octet-stream");
+    arm();
+    xhr.send(body);
+  });
+}
+
+/**
+ * Upload one file chunk by chunk. Resolves with null once it is in place, or with the reason
+ * it stopped — in which case the server's partial copy has been asked to go.
+ */
+async function uploadFile(dir: string, file: File, onProgress: (loaded: number) => void): Promise<string | null> {
+  const base = `/api/files/upload?path=${encodeURIComponent(dir)}&name=${encodeURIComponent(file.name)}&id=${crypto.randomUUID()}`;
+  const abandon = async (reason: string) => {
+    await fetch(base, { method: "DELETE" }).catch(() => {});
+    return reason;
+  };
+
+  let offset   = 0;
+  let failures = 0;
+  do {
+    if (uploadCancelled) return abandon("Cancelled");
+    const end    = Math.min(offset + UPLOAD_CHUNK_SIZE, file.size);
+    const start  = offset;
+    const result = await sendChunk(`${base}&offset=${start}&total=${file.size}`, file.slice(start, end), loaded => onProgress(start + loaded));
+
+    if (result.kind === "cancelled") return abandon("Cancelled");
+    if (result.kind === "fail")      return abandon(result.message);
+    if (result.kind === "ok" && (result.received > start || file.size === 0)) {
+      offset = result.received;
+      failures = 0;
+      onProgress(offset);
+      continue;
+    }
+    // A retry, a resync, or a reply that made no progress: each counts against the budget,
+    // so a server that keeps answering 409 cannot hold the dialog open forever.
+    const message = result.kind === "retry" ? result.message : "The server did not accept the data";
+    if (++failures >= UPLOAD_ATTEMPTS) return abandon(message);
+    if (result.kind === "resync") offset = result.received;
+    else await new Promise(r => setTimeout(r, 1000 * 2 ** (failures - 1)));
+  } while (offset < file.size);
+  return null;
 }
 
 export const useFileStore = create<FileState>((set, get) => ({
@@ -508,7 +601,14 @@ export const useFileStore = create<FileState>((set, get) => ({
   confirmDelete: async () => {
     const { deleteTargets, currentPath, loadDirContent } = get();
     if (!deleteTargets.length) return;
-    await Promise.allSettled(deleteTargets.map(e => api.api.files.delete.delete({ path: e.path })));
+    const results: (string | null)[] = await Promise.all(deleteTargets.map(e => api.api.files.delete.delete({ path: e.path })
+      .then(r => r.error ? ((r.error.value as { error?: string })?.error ?? `Could not delete ${e.name}`) : null)
+      .catch(() => "Connection lost")));
+    const failures = results.filter((m): m is string => m !== null);
+    if (failures.length) {
+      const detail = failures.length === 1 ? failures[0]! : `${failures.length} items were not deleted. ${failures[0]}`;
+      useToastStore.getState().push(detail, "error");
+    }
     await loadDirContent(currentPath);
     set({ deleteTargets: [], selectedPaths: new Set() });
   },
@@ -529,35 +629,34 @@ export const useFileStore = create<FileState>((set, get) => ({
     const fileArray  = Array.from(files);
     const uploadPath = get().currentPath;
     set({ uploadItems: fileArray.map(f => ({ name: f.name, loaded: 0, total: f.size, done: false, error: false })) });
-    let idx = 0;
-    const next = () => {
-      if (idx >= fileArray.length) {
-        setTimeout(() => {
-          void get().loadDirContent(uploadPath);
-          set({ uploadItems: [] });
-        }, 800);
-        return;
+    uploadCancelled = false;
+
+    const update = (i: number, patch: Partial<UploadItem>) =>
+      set((s) => ({ uploadItems: s.uploadItems.map((it, j) => j === i ? { ...it, ...patch } : it) }));
+
+    void (async () => {
+      for (const [i, file] of fileArray.entries()) {
+        if (uploadCancelled) { update(i, { done: true, error: true, message: "Cancelled" }); continue; }
+        const failure = await uploadFile(uploadPath, file, loaded => update(i, { loaded }));
+        update(i, failure ? { done: true, error: true, message: failure } : { done: true, loaded: file.size });
       }
-      const file = fileArray[idx]!; const i = idx++;
-      const xhr = new XMLHttpRequest(); const fd = new FormData();
-      fd.append("file", file);
-      xhr.upload.onprogress = (e) => {
-        if (!e.lengthComputable) return;
-        set((s) => ({ uploadItems: s.uploadItems.map((it, j) => j === i ? { ...it, loaded: e.loaded, total: e.total } : it) }));
-      };
-      xhr.onload = () => {
-        const ok = xhr.status >= 200 && xhr.status < 300;
-        set((s) => ({ uploadItems: s.uploadItems.map((it, j) => j === i ? { ...it, loaded: it.total, done: true, error: !ok } : it) }));
-        next();
-      };
-      xhr.onerror = () => {
-        set((s) => ({ uploadItems: s.uploadItems.map((it, j) => j === i ? { ...it, done: true, error: true } : it) }));
-        next();
-      };
-      xhr.open("POST", `/api/files/upload?path=${encodeURIComponent(uploadPath)}`);
-      xhr.send(fd);
-    };
-    next();
+      void get().loadDirContent(uploadPath);
+      // Close on its own only when everything went through; otherwise leave the reasons on
+      // screen until the user dismisses them.
+      const finished = get().uploadItems;
+      if (finished.every(it => !it.error)) {
+        // Clear only this batch. A new upload started inside the 800 ms window installs its
+        // own array, and an unconditional clear would wipe its progress rows mid-upload.
+        // Reference identity is enough: a finished batch receives no more updates, so its
+        // array is unchanged until the timer fires unless another batch has replaced it.
+        setTimeout(() => { if (get().uploadItems === finished) set({ uploadItems: [] }); }, 800);
+      }
+    })();
+  },
+
+  cancelUpload: () => {
+    uploadCancelled = true;
+    activeUpload?.abort();
   },
 
   handleChmod: async () => {

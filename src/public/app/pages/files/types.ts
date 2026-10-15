@@ -18,6 +18,8 @@ export interface UploadItem {
   total:  number;
   done:   boolean;
   error:  boolean;
+  /** Why it failed or stopped, shown under the item. */
+  message?: string;
 }
 
 export interface CtxMenu {

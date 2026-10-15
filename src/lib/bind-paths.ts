@@ -12,7 +12,7 @@
  */
 
 import { realpath } from "node:fs/promises";
-import { resolve, sep } from "node:path";
+import { resolve, sep, dirname, basename, join } from "node:path";
 import { homedir } from "node:os";
 import { config } from "../config";
 import { DockerClient } from "./docker";
@@ -134,6 +134,52 @@ async function canonicalise(path: string): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+/**
+ * Whether `path` is itself one of the roots above: a directory whose removal takes the OS,
+ * every account or every disk with it.
+ *
+ * Used by the file manager, which unlike stack cleanup may delete *below* these — someone
+ * removing /opt/old-app means it — so only the roots themselves are refused. The parent is
+ * canonicalised but the last segment is not: deleting a symlink removes the link, so a link
+ * that happens to point at /etc is not /etc.
+ */
+/**
+ * Where a path really points, for deciding what deleting it would destroy.
+ *
+ * The parent is canonicalised and the last segment kept as written. Deleting a symlink
+ * removes only the link, so the link's own name is what gets deleted -- but every directory
+ * above it is followed, which is how `/var/x` and `/private/var/x` on macOS, or a symlinked
+ * parent anywhere, turn out to be the same place. Falls back to the resolved literal when
+ * the parent cannot be canonicalised (it does not exist yet).
+ */
+export async function canonicalTarget(path: string): Promise<string> {
+  const resolved = resolve(path);
+  const parent = dirname(resolved);
+  if (parent === resolved) return resolved;            // "/"
+  const canonicalParent = await canonicalise(parent);
+  return canonicalParent ? join(canonicalParent, basename(resolved)) : resolved;
+}
+
+/** Fully canonical form of a directory that must exist, or its resolved literal if it does not. */
+export async function canonicalDir(path: string): Promise<string> {
+  return (await canonicalise(path)) ?? resolve(path);
+}
+
+export async function isProtectedRoot(path: string): Promise<boolean> {
+  const resolved = resolve(path);
+  // The lists are canonicalised, and on macOS /etc, /tmp and /var are themselves links into
+  // /private — so "/etc" never equals the canonical "/private/etc". Match the literal roots
+  // first; that also covers a root whose parent cannot be canonicalised.
+  if (PROTECTED.includes(resolved) || SYSTEM_ROOTS.includes(resolved)) return true;
+
+  const parent   = dirname(resolved);
+  const canonicalParent = parent === resolved ? resolved : await canonicalise(parent);
+  if (!canonicalParent) return false;
+  const canonical = parent === resolved ? resolved : join(canonicalParent, basename(resolved));
+  const { protectedPaths, systemRoots } = await protectedRoots();
+  return protectedPaths.includes(canonical) || systemRoots.includes(canonical);
 }
 
 /**
