@@ -212,6 +212,16 @@ function serverError() { return Response.json({ error: "Internal server error" }
 // ─── Upload temp files ────────────────────────────────────────────────────────
 
 /** Hidden, beside the destination: same filesystem, so the final rename is atomic. */
+/**
+ * A name that is one plain path segment: not empty, no separator, not "." or "..".
+ *
+ * Shared by every upload route so they cannot drift apart. The abandon route once checked
+ * only the separator, so "." and ".." passed it while the chunk route refused them.
+ */
+function isPlainFileName(name: string): boolean {
+  return name !== "" && name === basename(name) && name !== "." && name !== "..";
+}
+
 function uploadTempPath(dest: string, id: string): string {
   return join(dirname(dest), `.${basename(dest)}.${id}.part`);
 }
@@ -503,9 +513,7 @@ export function filesPlugin(jwtSecret: string) {
     // and the size actually held, so the client resumes from what the server has.
     .put("/upload", async ({ query, request }) => {
       const { name, id, offset, total } = query;
-      if (!name || name !== basename(name) || name === "." || name === "..") {
-        return Response.json({ error: "Invalid file name" }, { status: 400 });
-      }
+      if (!isPlainFileName(name)) return Response.json({ error: "Invalid file name" }, { status: 400 });
       if (!UPLOAD_ID_RE.test(id)) return Response.json({ error: "Invalid upload id" }, { status: 400 });
 
       let dest: string;
@@ -577,7 +585,7 @@ export function filesPlugin(jwtSecret: string) {
     .delete("/upload", async ({ query }) => {
       if (!UPLOAD_ID_RE.test(query.id)) return Response.json({ error: "Invalid upload id" }, { status: 400 });
       const name = query.name;
-      if (!name || name !== basename(name)) return Response.json({ error: "Invalid file name" }, { status: 400 });
+      if (!isPlainFileName(name)) return Response.json({ error: "Invalid file name" }, { status: 400 });
       let dest: string;
       try { dest = guardPath(join(guardPath(query.path), name)); } catch { return forbidden(); }
       // Under the same lock as the chunks: removing the file under an in-flight write leaves

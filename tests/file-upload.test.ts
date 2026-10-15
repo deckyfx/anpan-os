@@ -109,6 +109,16 @@ describe("chunked upload", () => {
     expect((await put("ok.txt", "../../etc", 0, 1, "x")).status).toBe(400);
   });
 
+  test("abandoning an upload refuses the same names the upload does", async () => {
+    // The abandon route once checked only for a separator, so "." and ".." passed it.
+    for (const name of ["..", ".", "a/b.txt", ""]) {
+      const res = await app.handle(new Request(url(root, name, crypto.randomUUID()), {
+        method: "DELETE", headers: { cookie },
+      }));
+      expect(res.status).toBe(400);
+    }
+  });
+
   test("without a session nothing is written", async () => {
     const res = await app.handle(new Request(url(root, "anon.txt", crypto.randomUUID(), "&offset=0&total=1"), {
       method: "PUT", body: "x",
