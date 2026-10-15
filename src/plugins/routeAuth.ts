@@ -329,6 +329,9 @@ export function authPlugin(jwtSecret: string) {
         const key  = `password|${session.sid}`;
         const wait = passwordThrottle.acquire(key);
         if (wait > 0) return tooManyAttempts(set, wait);
+        // Held until the change is complete, not just verified. Released after the check, a
+        // second request from this session could verify against the still-current password
+        // and race the first through the update, the revocation and the reissue.
         try {
           const pErr = validatePassword(body.newPassword);
           if (pErr)   { set.status = 422; return { error: pErr }; }
@@ -339,21 +342,21 @@ export function authPlugin(jwtSecret: string) {
             return { error: "Current password is incorrect" };
           }
           passwordThrottle.recordSuccess(key);
+
+          const hash = await Bun.password.hash(body.newPassword);
+          await UserStore.updatePassword(user.id, hash);
+
+          // A new password ends every session: the bumped tokenVersion already refuses their
+          // tokens, and their rows go too. This browser then gets a fresh session, so the
+          // user who just changed it stays signed in.
+          await SessionStore.revokeAllFor(user.id);
+          const updated = await UserStore.findById(user.id);
+          if (updated) await issueSession(jwtCtx, anpan_session, updated, request);
+
+          return { ok: true };
         } finally {
           passwordThrottle.release(key);
         }
-
-        const hash = await Bun.password.hash(body.newPassword);
-        await UserStore.updatePassword(user.id, hash);
-
-        // A new password ends every session: the bumped tokenVersion already refuses their
-        // tokens, and their rows go too. This browser then gets a fresh session, so the
-        // user who just changed it stays signed in.
-        await SessionStore.revokeAllFor(user.id);
-        const updated = await UserStore.findById(user.id);
-        if (updated) await issueSession(jwtCtx, anpan_session, updated, request);
-
-        return { ok: true };
       },
       {
         body: t.Object({

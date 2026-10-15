@@ -1,4 +1,4 @@
-import { test, expect, describe, beforeAll, afterAll } from "bun:test";
+import { test, expect, describe, beforeAll, afterAll, spyOn } from "bun:test";
 import { eq } from "drizzle-orm";
 import { createApp } from "../src/app";
 import { db } from "../src/db/index";
@@ -150,5 +150,55 @@ describe("a burst of concurrent wrong passwords", () => {
     const statuses = (await Promise.all(Array.from({ length: 20 }, (_, i) => attempt(i)))).map(r => r.status);
     expect(statuses.filter(s => s === 401)).toHaveLength(1);
     expect(statuses.filter(s => s === 429)).toHaveLength(19);
+  });
+});
+
+describe("two password changes from one session", () => {
+  const app = createApp(TEST_JWT);
+  const username = `race-${crypto.randomUUID().slice(0, 8)}`;
+  beforeAll(async () => { await UserStore.create(username, "starting-pass-1"); });
+  afterAll(async () => { await db.delete(users).where(eq(users.username, username)); });
+
+  test("the second is refused while the first is mid-change, past its check", async () => {
+    // The race needs the second request to arrive after the first has verified the current
+    // password but before it has stored the new one. Sending both at once does not reach it:
+    // the second then lands during the first's verification, which was reserved either way.
+    // So the first is held inside the hash of the new password -- reached only after
+    // verification -- while the second is sent.
+    const signIn = await app.handle(new Request("http://localhost/api/auth/login", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ username, password: "starting-pass-1" }),
+    }));
+    const cookie = extractCookie(signIn).cookie;
+    const change = (next: string) => app.handle(new Request("http://localhost/api/auth/password", {
+      method: "PUT", headers: { cookie, "content-type": "application/json" },
+      body: JSON.stringify({ currentPassword: "starting-pass-1", newPassword: next }),
+    }));
+
+    const realHash = Bun.password.hash.bind(Bun.password);
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let hashing = 0;
+    const spy = spyOn(Bun.password, "hash").mockImplementation((async (...args: Parameters<typeof Bun.password.hash>) => {
+      hashing++;
+      await gate;
+      return realHash(...args);
+    }) as typeof Bun.password.hash);
+
+    try {
+      const first = change("first-choice-1");
+      for (const end = Date.now() + 3000; hashing === 0 && Date.now() < end;) await Bun.sleep(5);
+      expect(hashing).toBe(1);                       // the first is past its check
+
+      const second = change("second-choice-2");
+      await Bun.sleep(400);                          // time to be refused -- or to get through
+      release();
+
+      const statuses = (await Promise.all([first, second])).map(r => r.status).sort();
+      expect(statuses).toEqual([200, 429]);
+    } finally {
+      release();
+      spy.mockRestore();
+    }
   });
 });
