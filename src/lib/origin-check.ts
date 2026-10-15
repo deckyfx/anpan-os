@@ -17,14 +17,30 @@
 /** Methods that must not change state, and so need no provenance. */
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
-/** `host[:port]`, lowercase, without the port a scheme implies. */
-function normaliseHost(host: string): string {
-  return host.trim().toLowerCase().replace(/:(80|443)$/, "");
+/**
+ * `scheme://host[:port]` in canonical form, or null if it is not an origin.
+ *
+ * Built by URL, which lowercases and drops only the port the scheme implies — so
+ * `https://h:443` and `https://h` are one origin, while `http://h:443` stays distinct.
+ */
+function normaliseOrigin(origin: string): string | null {
+  try {
+    const url = new URL(origin.trim());
+    return `${url.protocol}//${url.host}`;
+  } catch {
+    return null;
+  }
 }
 
-/** `scheme://host[:port]`, lowercase, no trailing slash — the form `Origin` takes. */
-function normaliseOrigin(origin: string): string {
-  return origin.trim().toLowerCase().replace(/\/+$/, "");
+/**
+ * The scheme the client used. A reverse proxy that terminates TLS talks plain HTTP to this
+ * server while the browser's Origin says https, so the proxy's X-Forwarded-Proto comes first
+ * — the same rule the session cookie's Secure flag follows.
+ */
+function clientScheme(request: Request): string {
+  const forwarded = request.headers.get("x-forwarded-proto")?.split(",")[0]?.trim().toLowerCase();
+  if (forwarded === "http" || forwarded === "https") return forwarded;
+  try { return new URL(request.url).protocol.replace(/:$/, ""); } catch { return "http"; }
 }
 
 /** The origin a Referer URL belongs to, or null if it is absent or unparseable. */
@@ -36,9 +52,9 @@ function originOfReferer(referer: string | null): string | null {
 /**
  * Why this request must be refused as cross-site, or null to let it through.
  *
- * It passes when its origin's host is the one the request was addressed to — `Host`, or
- * `X-Forwarded-Host` from a reverse proxy that rewrites `Host` — or when its origin appears
- * in `allowedOrigins`. Trusting `X-Forwarded-Host` here is safe: a cross-site page cannot set
+ * It passes when its origin — scheme, host and port — is the one the request was addressed
+ * to: the client's scheme with `Host`, or with `X-Forwarded-Host` from a reverse proxy that
+ * rewrites `Host`. Or when its origin appears in `allowedOrigins`. Trusting `X-Forwarded-Host` here is safe: a cross-site page cannot set
  * a custom header without a CORS preflight, and this server answers none.
  */
 export function crossSiteRefusal(request: Request, allowedOrigins: readonly string[]): string | null {
@@ -48,17 +64,18 @@ export function crossSiteRefusal(request: Request, allowedOrigins: readonly stri
   if (origin === null) return null;                    // not sent by a browser page
   if (origin === "null") return "Request refused: it came from an opaque origin";
 
-  let host: string;
-  try { host = normaliseHost(new URL(origin).host); } catch {
-    return "Request refused: its Origin header is not a valid origin";
-  }
+  const source = normaliseOrigin(origin);
+  if (!source) return "Request refused: its Origin header is not a valid origin";
 
+  // The whole origin, not the host alone: an http page on this hostname is a different
+  // origin from the https server, even on the same port number.
+  const scheme = clientScheme(request);
   const addressedTo = [request.headers.get("host"), request.headers.get("x-forwarded-host")?.split(",")[0]]
-    .filter((h): h is string => !!h)
-    .map(normaliseHost);
-  if (addressedTo.includes(host)) return null;
+    .filter((h): h is string => !!h?.trim())
+    .map(h => normaliseOrigin(`${scheme}://${h.trim()}`));
+  if (addressedTo.includes(source)) return null;
 
-  if (allowedOrigins.some(allowed => normaliseOrigin(allowed) === normaliseOrigin(origin))) return null;
+  if (allowedOrigins.some(allowed => normaliseOrigin(allowed) === source)) return null;
 
   return `Request refused: it came from ${origin}, which is not this server. `
     + "If that is an address you use for anpan-os, add it to server.allowed_origins.";

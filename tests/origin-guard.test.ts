@@ -36,12 +36,25 @@ describe("crossSiteRefusal", () => {
   });
 
   test("a page served by this host passes, including with the scheme's default port spelled out", () => {
-    expect(crossSiteRefusal(req("POST", { host: "anpan.local:5000", origin: "https://anpan.local:5000" }), [])).toBeNull();
-    expect(crossSiteRefusal(req("PUT", { host: "anpan.example:443", origin: "https://anpan.example" }), [])).toBeNull();
+    // req() addresses http://anpan.local:5000, so that is this server's origin.
+    expect(crossSiteRefusal(req("POST", { host: "anpan.local:5000", origin: "http://anpan.local:5000" }), [])).toBeNull();
+    const https = { host: "anpan.example:443", "x-forwarded-proto": "https", origin: "https://anpan.example" };
+    expect(crossSiteRefusal(req("PUT", https), [])).toBeNull();
+  });
+
+  test("the scheme is part of the origin: an http page is not the https server", () => {
+    // Same hostname and port number, different origin. Comparing hosts alone let these pass.
+    const httpsServer = { host: "anpan.example:443", "x-forwarded-proto": "https" };
+    expect(crossSiteRefusal(req("POST", { ...httpsServer, origin: "http://anpan.example:443" }), [])).not.toBeNull();
+    expect(crossSiteRefusal(req("POST", { host: "anpan.local:5000", origin: "https://anpan.local:5000" }), [])).not.toBeNull();
   });
 
   test("behind a proxy that rewrites Host, X-Forwarded-Host decides", () => {
-    const viaProxy = { host: "127.0.0.1:5000", "x-forwarded-host": "anpan.example", origin: "https://anpan.example" };
+    // The proxy terminates TLS: this server sees plain HTTP, X-Forwarded-Proto says https.
+    const viaProxy = {
+      host: "127.0.0.1:5000", "x-forwarded-host": "anpan.example", "x-forwarded-proto": "https",
+      origin: "https://anpan.example",
+    };
     expect(crossSiteRefusal(req("POST", viaProxy), [])).toBeNull();
   });
 
@@ -53,7 +66,7 @@ describe("crossSiteRefusal", () => {
 
   test("Referer stands in for a missing Origin", () => {
     expect(crossSiteRefusal(req("DELETE", { host: "anpan.local:5000", referer: `${EVIL}/page` }), [])).not.toBeNull();
-    expect(crossSiteRefusal(req("DELETE", { host: "anpan.local:5000", referer: "https://anpan.local:5000/files" }), [])).toBeNull();
+    expect(crossSiteRefusal(req("DELETE", { host: "anpan.local:5000", referer: "http://anpan.local:5000/files" }), [])).toBeNull();
   });
 
   test("an Origin that is not a valid origin is refused", () => {
@@ -109,7 +122,7 @@ describe("a signed-in browser", () => {
   test("still works from a page this server served", async () => {
     // The positive control: the guard must not refuse the UI itself.
     const target = join(scratch, "genuine");
-    expect((await mkdir(target, "https://anpan.local:5000")).status).toBe(200);
+    expect((await mkdir(target, "http://anpan.local:5000")).status).toBe(200);
     expect(existsSync(target)).toBe(true);
   });
 
