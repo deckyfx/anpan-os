@@ -10,7 +10,7 @@
 # Usage:
 #   ./install-local.sh                 # build host arch, install, restart, follow logs
 #   ./install-local.sh --skip-build    # reinstall the binary already in ./binaries
-#   ./install-local.sh --no-typecheck  # skip `tsc --noEmit` (faster iteration)
+#   ./install-local.sh --no-typecheck  # skip `bun check` (faster iteration)
 #   ./install-local.sh --no-follow     # do not tail the service logs at the end
 #
 # Run as your normal user — it calls sudo only for the privileged steps.
