@@ -1,5 +1,6 @@
 import { test, expect, describe, beforeAll } from "bun:test";
 import { createApp } from "../src/app";
+import { FEATURES } from "../src/lib/platform";
 import { TEST_JWT, loginAs } from "./helpers";
 
 /**
@@ -7,6 +8,9 @@ import { TEST_JWT, loginAs } from "./helpers";
  * always as an error event on the stream, never as a crash. Whether the run would then
  * succeed depends on root and Docker, which tests do not assume — so they assert only on
  * the refusals, which come before either.
+ *
+ * CasaOS exists only on Linux, and elsewhere the plugin answers 501 before anything else —
+ * so the route's own behaviour is tested where it is enabled, and the 501 where it is not.
  */
 
 const app = createApp(TEST_JWT);
@@ -23,7 +27,7 @@ async function migrate(name: string, body?: unknown) {
   return { status: res.status, stream: await res.text() };
 }
 
-describe("CasaOS migrate", () => {
+describe.skipIf(!FEATURES.casaosMigration)("CasaOS migrate", () => {
   test("a request with no body is answered on the stream, not with a crash", async () => {
     // Reading `composePath` through an omitted body threw before the default path was chosen.
     const { status, stream } = await migrate("some-app");
@@ -41,6 +45,9 @@ describe("CasaOS migrate", () => {
     expect(stream).not.toContain('"step"');              // refused before the first step
   });
 
+});
+
+describe("CasaOS migrate, on any platform", () => {
   test("a dot-segment name never reaches the route", async () => {
     // URLs collapse ".." and its encodings before routing, so the stack-folder escape a
     // ".." name would be cannot arrive this way. Pinned so that stays true.
@@ -50,5 +57,10 @@ describe("CasaOS migrate", () => {
       }));
       expect(res.status).toBe(404);
     }
+  });
+
+  test.skipIf(FEATURES.casaosMigration)("where CasaOS cannot exist, the route says so with 501", async () => {
+    const { status } = await migrate("some-app", {});
+    expect(status).toBe(501);
   });
 });
