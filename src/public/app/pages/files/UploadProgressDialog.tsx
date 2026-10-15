@@ -1,10 +1,13 @@
+
 import { useFileStore } from "../../stores/fileStore";
 
 // ─── Upload Progress Dialog ───────────────────────────────────────────────────
 
 export function UploadProgressDialog() {
-  const { uploadItems, setUploadItems } = useFileStore();
+  const { uploadItems, setUploadItems, cancelUpload } = useFileStore();
   if (!uploadItems.length) return null;
+
+  const finished = uploadItems.every(it => it.done);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
@@ -27,14 +30,17 @@ export function UploadProgressDialog() {
                   style={{ width: `${Math.round((item.loaded / Math.max(item.total, 1)) * 100)}%` }}
                 />
               </div>
+              {item.message && <p className="text-xs text-red-400">{item.message}</p>}
             </div>
           ))}
         </div>
-        {uploadItems.every(it => it.done) && (
-          <div className="px-5 py-3 border-t border-gray-800 flex justify-end">
+        <div className="px-5 py-3 border-t border-gray-800 flex justify-end">
+          {finished ? (
             <button onClick={() => setUploadItems([])} className="px-4 py-2 rounded-lg text-sm bg-gray-700 hover:bg-gray-600 text-white transition-colors">Done</button>
-          </div>
-        )}
+          ) : (
+            <button onClick={cancelUpload} className="px-4 py-2 rounded-lg text-sm bg-gray-800 hover:bg-gray-700 text-gray-300 transition-colors">Cancel</button>
+          )}
+        </div>
       </div>
     </div>
   );

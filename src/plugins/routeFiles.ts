@@ -1,6 +1,6 @@
 import { Elysia, t, sse } from "elysia";
-import { resolve, join, basename, extname } from "node:path";
-import { readdir, stat, mkdir, rename, rm, chmod, chown } from "node:fs/promises";
+import { resolve, join, basename, dirname, extname } from "node:path";
+import { readdir, stat, mkdir, rename, rm, chmod, chown, open } from "node:fs/promises";
 import { homedir } from "node:os";
 import { authGuard } from "./authGuard";
 import { config } from "../config";
@@ -10,6 +10,7 @@ import NodeID3 from "node-id3";
 import { StreamAggregator, drainStream } from "../lib/sse";
 import type { SSEMsg } from "../lib/sse";
 import { SettingsStore } from "../stores/settings-store";
+import { UPLOAD_CHUNK_MAX, UPLOAD_ID_RE } from "../constants/http";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -167,6 +168,34 @@ function forbidden()   { return Response.json({ error: "Access denied" },     { 
 function notFound()    { return Response.json({ error: "Not found" },          { status: 404 }); }
 function tooLarge()    { return Response.json({ error: "File too large" },     { status: 413 }); }
 function serverError() { return Response.json({ error: "Internal server error" }, { status: 500 }); }
+
+// ─── Upload temp files ────────────────────────────────────────────────────────
+
+/** Hidden, beside the destination: same filesystem, so the final rename is atomic. */
+function uploadTempPath(dest: string, id: string): string {
+  return join(dirname(dest), `.${basename(dest)}.${id}.part`);
+}
+
+/** A temp file nobody has written to for this long belongs to an upload that is not coming back. */
+const STALE_UPLOAD_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Remove abandoned temp files for `name` in `dir`. A closed tab or a dead laptop never sends
+ * the DELETE, so without this every abandoned upload would leave its partial copy behind.
+ * Only files matching the temp-name pattern exactly are touched.
+ */
+async function sweepStaleUploads(dir: string, name: string): Promise<void> {
+  const prefix = `.${name}.`;
+  const entries = await readdir(dir).catch(() => [] as string[]);
+  const cutoff = Date.now() - STALE_UPLOAD_MS;
+  await Promise.all(entries.map(async entry => {
+    if (!entry.startsWith(prefix) || !entry.endsWith(".part")) return;
+    if (!UPLOAD_ID_RE.test(entry.slice(prefix.length, -".part".length))) return;
+    const path = join(dir, entry);
+    const info = await stat(path).catch(() => null);
+    if (info && info.mtimeMs < cutoff) await rm(path, { force: true }).catch(() => {});
+  }));
+}
 
 // ─── Binary detection ─────────────────────────────────────────────────────────
 
@@ -392,21 +421,103 @@ export function filesPlugin(jwtSecret: string) {
       });
     }, { query: t.Object({ path: t.String(), inline: t.Optional(t.String()) }) })
 
-    // POST /api/files/upload?path=
-    .post("/upload", async ({ query, body }) => {
-      let dir: string;
-      try { dir = guardPath(query.path); } catch { return forbidden(); }
+    // PUT /api/files/upload?path=<dir>&name=<file>&id=<uuid>&offset=<n>&total=<n>
+    //
+    // One chunk of a file, as the raw body (see UPLOAD_CHUNK_SIZE for why chunks). The
+    // multipart POST this replaces was cut off by Bun's 128 MB body limit, so a 4 GB ISO
+    // never arrived and the dialog waited forever. A new method rather than a changed POST,
+    // so a tab still running the old SPA gets a 404 instead of a corrupted file.
+    //
+    // Chunks accumulate in a hidden temp file named by the upload id, beside the destination,
+    // which is renamed into place only when the last byte has arrived — an interrupted upload
+    // never leaves a truncated file under the real name, or replaces a good one with it.
+    //
+    // Chunks must arrive in order. One at an offset the temp file already covers is a retry
+    // and overwrites from there; one past its end would leave a gap, and is refused with 409
+    // and the size actually held, so the client resumes from what the server has.
+    .put("/upload", async ({ query, request }) => {
+      const { name, id, offset, total } = query;
+      if (!name || name !== basename(name) || name === "." || name === "..") {
+        return Response.json({ error: "Invalid file name" }, { status: 400 });
+      }
+      if (!UPLOAD_ID_RE.test(id)) return Response.json({ error: "Invalid upload id" }, { status: 400 });
+
+      let dest: string;
+      try { dest = guardPath(join(guardPath(query.path), name)); } catch { return forbidden(); }
+      const tmp = uploadTempPath(dest, id);
+
+      const declared = Number(request.headers.get("content-length") ?? NaN);
+      if (!Number.isFinite(declared)) return Response.json({ error: "Content-Length is required" }, { status: 411 });
+      if (declared > UPLOAD_CHUNK_MAX) return tooLarge();
+      if (offset + declared > total) return Response.json({ error: "Chunk runs past the end of the file" }, { status: 400 });
+
       try {
-        const file = body.file as File;
-        const dest = guardPath(`${dir}/${file.name}`);
-        await Bun.write(dest, file);
-        return { ok: true };
-      } catch {
+        if (offset === 0) {
+          await sweepStaleUploads(dirname(dest), name);
+        } else {
+          const held = await stat(tmp).then(s => s.size, () => 0);
+          if (held < offset) return Response.json({ error: "Upload is out of step", received: held }, { status: 409 });
+        }
+
+        // Written as it arrives rather than buffered: reading each chunk whole put the
+        // server's memory at ~320 MB during a 4 GB upload, which a Raspberry Pi feels.
+        let written = 0;
+        const fh = await open(tmp, offset === 0 ? "w" : "r+");
+        try {
+          if (request.body) {
+            for await (const part of request.body) {
+              if (written + part.byteLength > declared) break;
+              await fh.write(part, 0, part.byteLength, offset + written);
+              written += part.byteLength;
+            }
+          }
+          // A dropped connection can end the body early without an error; the declared
+          // length is the only way to tell a short read from a short chunk. Cut the file
+          // back to what was held before, so a retry of this chunk starts clean.
+          if (written !== declared) await fh.truncate(offset);
+          else await fh.truncate(offset + written);
+        } finally {
+          await fh.close();
+        }
+        if (written !== declared) {
+          if (offset === 0) await rm(tmp, { force: true });
+          return Response.json({ error: "Upload was interrupted", received: offset }, { status: 400 });
+        }
+
+        const received = offset + written;
+        if (received < total) return { ok: true, done: false, received };
+        await rename(tmp, dest);
+        return { ok: true, done: true, received };
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === "ENOSPC") {
+          await rm(tmp, { force: true }).catch(() => {});
+          return Response.json({ error: "Not enough space on the destination drive" }, { status: 507 });
+        }
         return serverError();
       }
     }, {
-      query: t.Object({ path: t.String() }),
-      body:  t.Object({ file: t.File() }),
+      // Read the body ourselves, after the auth guard.
+      parse: "none",
+      query: t.Object({
+        path:   t.String(),
+        name:   t.String(),
+        id:     t.String(),
+        offset: t.Numeric({ minimum: 0 }),
+        total:  t.Numeric({ minimum: 0 }),
+      }),
+    })
+
+    // DELETE /api/files/upload?path=<dir>&name=<file>&id=<uuid> — abandon an upload
+    .delete("/upload", async ({ query }) => {
+      if (!UPLOAD_ID_RE.test(query.id)) return Response.json({ error: "Invalid upload id" }, { status: 400 });
+      const name = query.name;
+      if (!name || name !== basename(name)) return Response.json({ error: "Invalid file name" }, { status: 400 });
+      let dest: string;
+      try { dest = guardPath(join(guardPath(query.path), name)); } catch { return forbidden(); }
+      await rm(uploadTempPath(dest, query.id), { force: true });
+      return { ok: true };
+    }, {
+      query: t.Object({ path: t.String(), name: t.String(), id: t.String() }),
     })
 
     // POST /api/files/chmod
