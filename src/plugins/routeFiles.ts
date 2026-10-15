@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { authGuard } from "./authGuard";
 import { config } from "../config";
 import { envConfig } from "../env-config";
-import { isProtectedRoot } from "../lib/bind-paths";
+import { canonicalDir, canonicalTarget, isProtectedRoot } from "../lib/bind-paths";
 import { bins, commands } from "../lib/commands";
 import { parseFile } from "music-metadata";
 import NodeID3 from "node-id3";
@@ -171,14 +171,33 @@ async function lookupMusicBrainz(q: string, limit = 5): Promise<LookupCandidate[
  * system or shared root, and anything holding anpan-os's own config and database; what lies
  * below them is the user's to delete.
  */
+/** Whether `dir` is `target` itself or lies somewhere beneath it. */
+function isAtOrBelow(dir: string, target: string): boolean {
+  // "/" holds everything; the generic prefix test would look for "//" and miss it.
+  return target === "/" || dir === target || dir.startsWith(`${target}/`);
+}
+
+/**
+ * Why deleting `path` must be refused, or null when it may go ahead.
+ *
+ * Every comparison is made on canonical paths as well as the spellings given. `rm` follows
+ * symlinks in the parent components, so a guard that compares spellings alone can be walked
+ * around: with RUNTIME_CONFIG_DIR=/opt/anpan symlinked to /DATA/AppData/anpan, deleting
+ * /DATA/AppData/anpan matched nothing and removed the database as root. macOS does the same
+ * on its own, since /var is a link into /private/var. The literal comparisons stay too, so
+ * a path that cannot be canonicalised is still caught by its spelling.
+ */
 async function deleteRefusal(path: string): Promise<string | null> {
-  const root = config.filesRoot.endsWith("/") && config.filesRoot !== "/"
-    ? config.filesRoot.slice(0, -1)
-    : config.filesRoot;
-  if (path === root) return "The file manager's root folder cannot be deleted";
+  const target = await canonicalTarget(path);
+
+  const root = resolve(config.filesRoot);
+  if (path === root || target === await canonicalDir(root)) {
+    return "The file manager's root folder cannot be deleted";
+  }
   if (await isProtectedRoot(path)) return `${path} is a system or shared folder and cannot be deleted`;
+
   const configDir = resolve(envConfig.RUNTIME_CONFIG_DIR);
-  if (configDir === path || configDir.startsWith(`${path}/`)) {
+  if (isAtOrBelow(configDir, path) || isAtOrBelow(await canonicalDir(configDir), target)) {
     return `${path} holds anpan-os's own configuration and database`;
   }
   return null;

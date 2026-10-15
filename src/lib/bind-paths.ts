@@ -145,6 +145,28 @@ async function canonicalise(path: string): Promise<string | null> {
  * canonicalised but the last segment is not: deleting a symlink removes the link, so a link
  * that happens to point at /etc is not /etc.
  */
+/**
+ * Where a path really points, for deciding what deleting it would destroy.
+ *
+ * The parent is canonicalised and the last segment kept as written. Deleting a symlink
+ * removes only the link, so the link's own name is what gets deleted -- but every directory
+ * above it is followed, which is how `/var/x` and `/private/var/x` on macOS, or a symlinked
+ * parent anywhere, turn out to be the same place. Falls back to the resolved literal when
+ * the parent cannot be canonicalised (it does not exist yet).
+ */
+export async function canonicalTarget(path: string): Promise<string> {
+  const resolved = resolve(path);
+  const parent = dirname(resolved);
+  if (parent === resolved) return resolved;            // "/"
+  const canonicalParent = await canonicalise(parent);
+  return canonicalParent ? join(canonicalParent, basename(resolved)) : resolved;
+}
+
+/** Fully canonical form of a directory that must exist, or its resolved literal if it does not. */
+export async function canonicalDir(path: string): Promise<string> {
+  return (await canonicalise(path)) ?? resolve(path);
+}
+
 export async function isProtectedRoot(path: string): Promise<boolean> {
   const resolved = resolve(path);
   // The lists are canonicalised, and on macOS /etc, /tmp and /var are themselves links into

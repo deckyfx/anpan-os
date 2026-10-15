@@ -91,6 +91,60 @@ describe("delete route", () => {
       Bun.env.RUNTIME_CONFIG_DIR = previous;
     }
   });
+
+  /** Run `fn` with the config dir pointed at `dir`, restoring it afterwards. */
+  async function withConfigDir(dir: string, fn: () => Promise<void>) {
+    const previous = Bun.env.RUNTIME_CONFIG_DIR;
+    Bun.env.RUNTIME_CONFIG_DIR = dir;
+    try { await fn(); } finally { Bun.env.RUNTIME_CONFIG_DIR = previous; }
+  }
+
+  test("the config dir is protected when RUNTIME_CONFIG_DIR is a symlink to it", async () => {
+    // RUNTIME_CONFIG_DIR=/opt/anpan, a link to /DATA/AppData/anpan. Deleting the real
+    // directory by its own name matched no spelling of the config path, and went ahead.
+    const real = join(root, "sym-data", "AppData", "anpan");
+    const link = join(root, "sym-opt-anpan");
+    mkdirSync(real, { recursive: true });
+    symlinkSync(real, link);
+
+    await withConfigDir(link, async () => {
+      for (const path of [real, join(root, "sym-data", "AppData"), join(root, "sym-data")]) {
+        expect((await del(path)).status).toBe(403);
+      }
+    });
+    expect(existsSync(real)).toBe(true);
+  });
+
+  test("the config dir is protected when reached through a symlinked parent", async () => {
+    // macOS's shape: /var is a link into /private/var, so the same directory has two names
+    // and the config dir may have been set using the other one.
+    const realParent  = join(root, "private-var");
+    const aliasParent = join(root, "var-alias");
+    mkdirSync(join(realParent, "anpan"), { recursive: true });
+    symlinkSync(realParent, aliasParent);
+
+    await withConfigDir(join(aliasParent, "anpan"), async () => {
+      for (const path of [join(realParent, "anpan"), realParent]) {
+        expect((await del(path)).status).toBe(403);
+      }
+    });
+    expect(existsSync(join(realParent, "anpan"))).toBe(true);
+  });
+
+  test("a symlink pointing at the config dir can still be deleted, removing only the link", async () => {
+    // Canonicalising must stop at the parent: the link's own name is what rm removes, so
+    // refusing it would be over-cautious and resolving it fully would be wrong.
+    const real = join(root, "cfg-real");
+    const link = join(root, "cfg-shortcut");
+    mkdirSync(real, { recursive: true });
+    symlinkSync(real, link);
+
+    await withConfigDir(real, async () => {
+      expect((await del(link)).status).toBe(200);
+    });
+    expect(existsSync(link)).toBe(false);
+    expect(existsSync(real)).toBe(true);
+  });
 });
 
 describe("isProtectedRoot", () => {
