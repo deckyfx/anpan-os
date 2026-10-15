@@ -122,8 +122,20 @@ export function composePlugin(jwtSecret: string) {
         set.status = 422;
         return { error: "Stack name must be alphanumeric with dashes or underscores only" };
       }
-      const stackDir = join(config.composeFolder, name);
-      if (!stackDir.startsWith(config.composeFolder)) {
+    })
+
+    /**
+     * The same rule for every `/stacks/:name/...` route, where the name arrives in the path.
+     *
+     * Each route used to guard its directory with `stackDir.startsWith(composeFolder)`. With
+     * no separator in the comparison, `..%2Fcomposes-x` resolves to the sibling folder
+     * `composes-x` and passes — and down, restart and logs had no other check, so they would
+     * run `docker compose` in it. A name that matches STACK_NAME_RE cannot leave the folder
+     * at all, so the prefix checks are gone and this is the one place that decides.
+     */
+    .onBeforeHandle(({ params, set }) => {
+      const name = (params as { name?: string } | undefined)?.name;
+      if (name !== undefined && !STACK_NAME_RE.test(name)) {
         set.status = 422;
         return { error: "Invalid stack name" };
       }
@@ -216,10 +228,6 @@ export function composePlugin(jwtSecret: string) {
         }
 
         const stackDir = join(config.composeFolder, name);
-        if (!stackDir.startsWith(config.composeFolder)) {
-          yield sse({ data: { error: "Invalid stack name" } satisfies SSEMsg });
-          return;
-        }
 
         const composePath = join(stackDir, "docker-compose.yml");
         if (!(await Bun.file(composePath).exists())) {
@@ -272,7 +280,7 @@ export function composePlugin(jwtSecret: string) {
       // Resolve stack directory (managed or CasaOS)
       let stackDir: string | null = null;
       const managedCompose = join(config.composeFolder, name, "docker-compose.yml");
-      if (managedCompose.startsWith(config.composeFolder) && await Bun.file(managedCompose).exists()) {
+      if (await Bun.file(managedCompose).exists()) {
         stackDir = join(config.composeFolder, name);
       } else {
         // CasaOS — requires running as root
@@ -333,10 +341,6 @@ export function composePlugin(jwtSecret: string) {
 
     .post("/stacks/:name/down", async ({ params, set }) => {
       const stackDir = join(config.composeFolder, params.name);
-      if (!stackDir.startsWith(config.composeFolder)) {
-        set.status = 422;
-        return { error: "Invalid stack name" };
-      }
       const result = await Bun.$`${docker!} compose down`.cwd(stackDir).nothrow();
       if (result.exitCode !== 0) return { ok: false, error: result.stderr.toString() };
       return { ok: true };
@@ -344,10 +348,6 @@ export function composePlugin(jwtSecret: string) {
 
     .post("/stacks/:name/restart", async ({ params, set }) => {
       const stackDir = join(config.composeFolder, params.name);
-      if (!stackDir.startsWith(config.composeFolder)) {
-        set.status = 422;
-        return { error: "Invalid stack name" };
-      }
       const result = await Bun.$`${docker!} compose restart`.cwd(stackDir).nothrow();
       if (result.exitCode !== 0) return { ok: false, error: result.stderr.toString() };
       return { ok: true };
@@ -355,10 +355,6 @@ export function composePlugin(jwtSecret: string) {
 
     .get("/stacks/:name/logs", async ({ params, set }) => {
       const stackDir = join(config.composeFolder, params.name);
-      if (!stackDir.startsWith(config.composeFolder)) {
-        set.status = 422;
-        return { error: "Invalid stack name" };
-      }
       const result = await Bun.$`${docker!} compose logs --tail=100`.cwd(stackDir).nothrow();
       return { logs: result.stdout.toString() };
     })
@@ -392,12 +388,10 @@ export function composePlugin(jwtSecret: string) {
 
       // 1. Try managed compose folder
       const managedPath = join(config.composeFolder, name, "docker-compose.yml");
-      if (managedPath.startsWith(config.composeFolder)) {
-        try {
-          const content = await Bun.file(managedPath).text();
-          return new Response(content, { headers });
-        } catch { /* fall through */ }
-      }
+      try {
+        const content = await Bun.file(managedPath).text();
+        return new Response(content, { headers });
+      } catch { /* fall through */ }
 
       // 2. Try CasaOS apps directory (direct read)
       const casaosPath = `${CASAOS_APPS_DIR}/${name}/docker-compose.yml`;
@@ -458,10 +452,6 @@ export function composePlugin(jwtSecret: string) {
       }
 
       const stackDir = join(config.composeFolder, name);
-      if (!stackDir.startsWith(config.composeFolder)) {
-        yield sse({ data: { error: "Invalid stack name" } satisfies SSEMsg });
-        return;
-      }
 
       const report = await buildComposeSourceReport(name);
 
@@ -550,10 +540,6 @@ export function composePlugin(jwtSecret: string) {
         return { error: "Invalid stack name" };
       }
       const envPath = join(config.composeFolder, name, ".env");
-      if (!envPath.startsWith(config.composeFolder)) {
-        set.status = 422;
-        return { error: "Invalid stack name" };
-      }
       try {
         const content = await Bun.file(envPath).text();
         return { content };
@@ -572,10 +558,6 @@ export function composePlugin(jwtSecret: string) {
           return { error: "Invalid stack name" };
         }
         const envPath = join(config.composeFolder, name, ".env");
-        if (!envPath.startsWith(config.composeFolder)) {
-          set.status = 422;
-          return { error: "Invalid stack name" };
-        }
         try {
           await Bun.write(envPath, body.content);
           return { ok: true };
