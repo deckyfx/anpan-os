@@ -68,11 +68,16 @@ const cookieSchema = t.Cookie({
 /**
  * Repeated failed password checks slow down per key -- see LoginThrottle.
  *
- * Sign-in is keyed on the connection's own address and the username. X-Forwarded-For is
- * written by whoever sends the request, so trusting it would let a guesser present a fresh
- * key on every attempt. Behind a reverse proxy every client shares the proxy's address, so
- * the limit then applies per username: still a limit, and one whose worst case is a slower
- * sign-in through the proxy, never a lockout. A sign-in from the LAN keeps its own address.
+ * Sign-in is keyed on the connection's own address and the username, and separately on the
+ * address alone (addressThrottle, below). X-Forwarded-For is written by whoever sends the
+ * request, so trusting it would let a guesser present a fresh key on every attempt.
+ *
+ * Behind a reverse proxy every client shares the proxy's address, and so shares both keys'
+ * address part. Two people signing in through the proxy at the same moment can see the
+ * second told to retry in a second, and an attacker's repeated failures — under any
+ * username — delay everyone's sign-in through the proxy for as long as they keep failing,
+ * up to 30 s per attempt. That is the cost of a limit that cannot be shed by changing
+ * username. A sign-in from the LAN keeps its own address and is unaffected.
  */
 const passwordThrottle = new LoginThrottle();
 
