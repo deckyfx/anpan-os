@@ -57,7 +57,7 @@ Manage Docker Compose stacks, browse files, monitor system resources, and instal
 
 ## Requirements
 
-- [Bun](https://bun.sh) ≥ 1.1
+- [Bun](https://bun.sh) ≥ 1.4.3 — only to build from source (`install-local.sh`, `bun run build`), whose type check is `bun check`. The release binaries carry their own runtime and need no Bun.
 - Docker with the Compose plugin (`docker compose`)
 - **Must run as root (`sudo`)** — required for Docker management, full filesystem access, and CasaOS migration
 - Linux (systemd) or macOS 11+ (launchd), on x86-64 or arm64 — including Apple Silicon

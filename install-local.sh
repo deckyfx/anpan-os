@@ -32,6 +32,20 @@ success() { echo -e "${GREEN}[ OK ]${NC}  $*"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 die()     { echo -e "${RED}[FAIL]${NC}  $*" >&2; exit 1; }
 
+# version_ge A B -- true when dotted version A >= B. Pure bash 3.2, since macOS's stock
+# bash is 3.2 and `sort -V` is not guaranteed there. Missing parts count as 0.
+version_ge() {
+  local IFS=. i
+  local -a a b
+  read -r -a a <<< "$1"
+  read -r -a b <<< "$2"
+  for i in 0 1 2; do
+    if (( 10#${a[i]:-0} > 10#${b[i]:-0} )); then return 0; fi
+    if (( 10#${a[i]:-0} < 10#${b[i]:-0} )); then return 1; fi
+  done
+  return 0
+}
+
 # ── Port selection ────────────────────────────────────────────────────────────
 #
 # 5000 is not a safe default on macOS. AirPlay Receiver — part of Control Center, on by
@@ -298,6 +312,16 @@ else
   command -v bun >/dev/null || die "bun not found in PATH."
 
   if [ "$TYPECHECK" -eq 1 ]; then
+    # `bun run typecheck` is `bun check`, which first shipped in Bun 1.4.3. An older Bun
+    # fails it with `Script not found "check"`, which the die() below would report as
+    # "Type check failed. Fix errors" -- sending the user after type errors that do not
+    # exist. Checked here rather than for the whole build: --no-typecheck needs no `check`.
+    MIN_BUN_FOR_CHECK="1.4.3"
+    BUN_VERSION="$(bun --version 2>/dev/null)"
+    BUN_VERSION="${BUN_VERSION%%[-+]*}"   # 1.4.3-canary.1+abc -> 1.4.3
+    version_ge "$BUN_VERSION" "$MIN_BUN_FOR_CHECK" \
+      || die "The type check needs Bun >= ${MIN_BUN_FOR_CHECK} (found ${BUN_VERSION:-unknown}). Run \`bun upgrade\`, or rerun with --no-typecheck."
+
     info "Type checking..."
     ( cd "$REPO_DIR" && bun run typecheck ) || die "Type check failed. Fix errors or rerun with --no-typecheck."
     success "Type check passed."
