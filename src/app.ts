@@ -48,6 +48,9 @@ function errorPage(title: string, detail: string, stack?: string): Response {
 export function createApp(jwtSecret: string) {
   return new Elysia()
     .onError(({ error, code, request }) => {
+      // Without this an unknown route fell through to the 500 below, so a typo in a URL
+      // looked like a server crash.
+      if (code === "NOT_FOUND") return Response.json({ error: "Not found" }, { status: 404 });
       if (code === "VALIDATION") {
         const first = [...error.all][0];
         return Response.json(
@@ -79,7 +82,14 @@ export function createApp(jwtSecret: string) {
     .use(bookmarksPlugin(jwtSecret))
     .use(appStorePlugin(jwtSecret))
     .use(updateCheckPlugin(jwtSecret))
-    .get("/api/health", () => ({ status: "ok" }));
+    .get("/api/health", () => ({ status: "ok" }))
+    // The SPA's catch-all GET /* would otherwise answer an unknown API path with the app's
+    // HTML and a 200, so a client calling a removed endpoint got a page instead of an error.
+    // A static Response, not a function: the SPA bundle lives in Bun.serve's native route
+    // table, which is consulted before Elysia's router, so only a route registered there
+    // too can outrank /*. And a plain route, not a hook — a hook would stop the bundle being
+    // served natively at all.
+    .get("/api/*", Response.json({ error: "Not found" }, { status: 404 }));
 }
 
 export type App = ReturnType<typeof createApp>;
