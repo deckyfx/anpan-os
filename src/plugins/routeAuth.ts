@@ -207,21 +207,26 @@ export function authPlugin(jwtSecret: string) {
           return { error: "No admin configured — run setup first" };
         }
 
-        // Checked before the password is, so a guess made while waiting is not even tried.
+        // Reserved before the password is checked: a guess made while waiting is not even
+        // tried, and neither is one sent alongside a guess still being verified -- otherwise a
+        // burst of concurrent requests would all be tested before the first failure landed.
         const key  = `login|${clientAddress(server, request)}|${body.username.toLowerCase()}`;
-        const wait = passwordThrottle.retryAfterMs(key);
+        const wait = passwordThrottle.acquire(key);
         if (wait > 0) return tooManyAttempts(set, wait);
+        try {
+          const user = await UserStore.findByUsername(body.username);
+          if (!user || !(await UserStore.verifyPassword(user, body.password))) {
+            passwordThrottle.recordFailure(key);
+            set.status = 401;
+            return { error: "Invalid credentials" };
+          }
 
-        const user = await UserStore.findByUsername(body.username);
-        if (!user || !(await UserStore.verifyPassword(user, body.password))) {
-          passwordThrottle.recordFailure(key);
-          set.status = 401;
-          return { error: "Invalid credentials" };
+          passwordThrottle.recordSuccess(key);
+          await issueSession(jwtCtx, anpan_session, user, request);
+          return { ok: true, username: user.username };
+        } finally {
+          passwordThrottle.release(key);
         }
-
-        passwordThrottle.recordSuccess(key);
-        await issueSession(jwtCtx, anpan_session, user, request);
-        return { ok: true, username: user.username };
       },
       {
         body: t.Object({
@@ -322,18 +327,21 @@ export function authPlugin(jwtSecret: string) {
         // the session, not the user: keyed on the user, that session's wrong guesses would
         // also block the owner's password change -- the very step that evicts it.
         const key  = `password|${session.sid}`;
-        const wait = passwordThrottle.retryAfterMs(key);
+        const wait = passwordThrottle.acquire(key);
         if (wait > 0) return tooManyAttempts(set, wait);
+        try {
+          const pErr = validatePassword(body.newPassword);
+          if (pErr)   { set.status = 422; return { error: pErr }; }
 
-        const pErr = validatePassword(body.newPassword);
-        if (pErr)   { set.status = 422; return { error: pErr }; }
-
-        if (!(await UserStore.verifyPassword(user, body.currentPassword))) {
-          passwordThrottle.recordFailure(key);
-          set.status = 400;
-          return { error: "Current password is incorrect" };
+          if (!(await UserStore.verifyPassword(user, body.currentPassword))) {
+            passwordThrottle.recordFailure(key);
+            set.status = 400;
+            return { error: "Current password is incorrect" };
+          }
+          passwordThrottle.recordSuccess(key);
+        } finally {
+          passwordThrottle.release(key);
         }
-        passwordThrottle.recordSuccess(key);
 
         const hash = await Bun.password.hash(body.newPassword);
         await UserStore.updatePassword(user.id, hash);

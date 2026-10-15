@@ -8,7 +8,16 @@
  *
  * A key is forgotten once it has gone quiet for long enough, and the table is bounded, so an
  * attacker cycling through keys costs memory only up to that bound.
+ *
+ * A check is only as good as its timing. Password verification is deliberately slow, so a
+ * check made before it and a failure recorded after it leave a window: requests sent at once
+ * all pass the check, and every guess among them is tested before the first failure lands.
+ * {@link acquire} therefore reserves the key for the length of the verification, and a second
+ * attempt on the same key is refused while one is in flight.
  */
+
+/** How long a caller is told to wait while another attempt on its key is being verified. */
+const IN_FLIGHT_RETRY_MS = 1000;
 
 export interface LoginThrottleOptions {
   /** Failures allowed before any delay applies. */
@@ -31,6 +40,8 @@ interface Entry {
 
 export class LoginThrottle {
   private readonly entries = new Map<string, Entry>();
+  /** Keys with a verification in progress. At most one attempt per key is tested at a time. */
+  private readonly inFlight = new Set<string>();
   private readonly freeFailures: number;
   private readonly maxDelayMs: number;
   private readonly forgetAfterMs: number;
@@ -49,6 +60,24 @@ export class LoginThrottle {
   retryAfterMs(key: string): number {
     const entry = this.live(key);
     return entry ? Math.max(0, entry.nextAllowedAt - this.now()) : 0;
+  }
+
+  /**
+   * Reserve `key` for one attempt. Returns 0 when reserved — the caller must then call
+   * {@link release} when the attempt is decided — or the milliseconds to wait otherwise:
+   * while a delay is in force, or while another attempt on the key is being verified.
+   */
+  acquire(key: string): number {
+    const wait = this.retryAfterMs(key);
+    if (wait > 0) return wait;
+    if (this.inFlight.has(key)) return IN_FLIGHT_RETRY_MS;
+    this.inFlight.add(key);
+    return 0;
+  }
+
+  /** Release a key reserved by {@link acquire}. Call it however the attempt ended. */
+  release(key: string): void {
+    this.inFlight.delete(key);
   }
 
   /** Record a failed attempt, lengthening the wait once the free failures are used up. */

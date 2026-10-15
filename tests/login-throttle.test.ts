@@ -54,6 +54,21 @@ describe("LoginThrottle", () => {
     expect(throttle.retryAfterMs("k")).toBe(1000);
   });
 
+  test("acquire reserves a key: a second attempt waits until the first is decided", () => {
+    const { throttle } = clocked();
+    expect(throttle.acquire("k")).toBe(0);
+    expect(throttle.acquire("k")).toBeGreaterThan(0);   // one is being verified
+    expect(throttle.acquire("other")).toBe(0);          // other keys are unaffected
+    throttle.release("k");
+    expect(throttle.acquire("k")).toBe(0);
+  });
+
+  test("acquire refuses while a delay is in force", () => {
+    const { throttle } = clocked({ freeFailures: 0 });
+    throttle.recordFailure("k");
+    expect(throttle.acquire("k")).toBe(1000);
+  });
+
   test("the table is bounded: the oldest key is dropped beyond capacity", () => {
     const { throttle } = clocked({ freeFailures: 0, capacity: 3 });
     for (const k of ["a", "b", "c", "d"]) throttle.recordFailure(k);
@@ -114,5 +129,26 @@ describe("sign-in and password change routes", () => {
     expect((await change(thief, password, "never-applied-9")).status).toBe(429);    // the thief waits
 
     expect((await change(owner, password, "owner-chose-this-1")).status).toBe(200);  // the owner does not
+  });
+});
+
+describe("a burst of concurrent wrong passwords", () => {
+  const app = createApp(TEST_JWT);
+  const username = `burst-${crypto.randomUUID().slice(0, 8)}`;
+  beforeAll(async () => { await UserStore.create(username, "the-real-one-1"); });
+  afterAll(async () => { await db.delete(users).where(eq(users.username, username)); });
+
+  test("is tested one guess at a time, not all at once", async () => {
+    // Checking the delay before the (deliberately slow) verification and recording failures
+    // after it let every request sent together through: twenty guesses, twenty verified,
+    // before the first failure was recorded. With the key reserved, one is verified and the
+    // rest are told to wait.
+    const attempt = (i: number) => app.handle(new Request("http://localhost/api/auth/login", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ username, password: `guess-number-${i}` }),
+    }));
+    const statuses = (await Promise.all(Array.from({ length: 20 }, (_, i) => attempt(i)))).map(r => r.status);
+    expect(statuses.filter(s => s === 401)).toHaveLength(1);
+    expect(statuses.filter(s => s === 429)).toHaveLength(19);
   });
 });
