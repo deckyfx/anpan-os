@@ -601,7 +601,14 @@ export const useFileStore = create<FileState>((set, get) => ({
   confirmDelete: async () => {
     const { deleteTargets, currentPath, loadDirContent } = get();
     if (!deleteTargets.length) return;
-    await Promise.allSettled(deleteTargets.map(e => api.api.files.delete.delete({ path: e.path })));
+    const results: (string | null)[] = await Promise.all(deleteTargets.map(e => api.api.files.delete.delete({ path: e.path })
+      .then(r => r.error ? ((r.error.value as { error?: string })?.error ?? `Could not delete ${e.name}`) : null)
+      .catch(() => "Connection lost")));
+    const failures = results.filter((m): m is string => m !== null);
+    if (failures.length) {
+      const detail = failures.length === 1 ? failures[0]! : `${failures.length} items were not deleted. ${failures[0]}`;
+      useToastStore.getState().push(detail, "error");
+    }
     await loadDirContent(currentPath);
     set({ deleteTargets: [], selectedPaths: new Set() });
   },

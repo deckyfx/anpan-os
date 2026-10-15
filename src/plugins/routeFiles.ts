@@ -4,6 +4,8 @@ import { readdir, stat, mkdir, rename, rm, chmod, chown, open } from "node:fs/pr
 import { homedir } from "node:os";
 import { authGuard } from "./authGuard";
 import { config } from "../config";
+import { envConfig } from "../env-config";
+import { isProtectedRoot } from "../lib/bind-paths";
 import { bins, commands } from "../lib/commands";
 import { parseFile } from "music-metadata";
 import NodeID3 from "node-id3";
@@ -164,6 +166,24 @@ async function lookupMusicBrainz(q: string, limit = 5): Promise<LookupCandidate[
   }
 }
 
+/**
+ * Why `path` must not be deleted, or null. Only exact roots are refused — the files root, a
+ * system or shared root, and anything holding anpan-os's own config and database; what lies
+ * below them is the user's to delete.
+ */
+async function deleteRefusal(path: string): Promise<string | null> {
+  const root = config.filesRoot.endsWith("/") && config.filesRoot !== "/"
+    ? config.filesRoot.slice(0, -1)
+    : config.filesRoot;
+  if (path === root) return "The file manager's root folder cannot be deleted";
+  if (await isProtectedRoot(path)) return `${path} is a system or shared folder and cannot be deleted`;
+  const configDir = resolve(envConfig.RUNTIME_CONFIG_DIR);
+  if (configDir === path || configDir.startsWith(`${path}/`)) {
+    return `${path} holds anpan-os's own configuration and database`;
+  }
+  return null;
+}
+
 function forbidden()   { return Response.json({ error: "Access denied" },     { status: 403 }); }
 function notFound()    { return Response.json({ error: "Not found" },          { status: 404 }); }
 function tooLarge()    { return Response.json({ error: "File too large" },     { status: 413 }); }
@@ -313,13 +333,23 @@ export function filesPlugin(jwtSecret: string) {
     }, { body: t.Object({ path: t.String() }) })
 
     // DELETE /api/files/delete
+    //
+    // Folders are removed with their contents. This was `recursive: false`, which fails on
+    // every directory, empty or not, and the client ignored the error — so deleting a folder
+    // had never worked. Recursion makes the refusals below matter: the server runs as root
+    // and the files root defaults to "/".
     .delete("/delete", async ({ body }) => {
       let resolved: string;
       try { resolved = guardPath(body.path); } catch { return forbidden(); }
+
+      const refusal = await deleteRefusal(resolved);
+      if (refusal) return Response.json({ error: refusal }, { status: 403 });
+
       try {
-        await rm(resolved, { recursive: false });
+        await rm(resolved, { recursive: true });
         return { ok: true };
-      } catch {
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === "ENOENT") return notFound();
         return serverError();
       }
     }, { body: t.Object({ path: t.String() }) })
