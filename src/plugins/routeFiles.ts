@@ -6,6 +6,7 @@ import { authGuard } from "./authGuard";
 import { config } from "../config";
 import { envConfig } from "../env-config";
 import { canonicalDir, canonicalTarget, isProtectedRoot } from "../lib/bind-paths";
+import { resolveEntryWithin, resolveWithin } from "../lib/path-guard";
 import { bins, commands } from "../lib/commands";
 import { parseFile } from "music-metadata";
 import NodeID3 from "node-id3";
@@ -31,18 +32,19 @@ interface FileEntry {
 
 // ─── Path security ────────────────────────────────────────────────────────────
 
-/** Resolve inputPath and verify it stays within config.filesRoot. */
+/** Resolve a path to go into and verify it stays within config.filesRoot, through every symlink. */
 function guardPath(inputPath: string): string {
-  const root     = config.filesRoot;
-  const resolved = resolve(inputPath);
+  return resolveWithin(inputPath, config.filesRoot);
+}
 
-  if (root === "/") return resolved;
-
-  const normalRoot = root.endsWith("/") ? root.slice(0, -1) : root;
-  if (resolved !== normalRoot && !resolved.startsWith(`${normalRoot}/`)) {
-    throw new Error("Forbidden");
-  }
-  return resolved;
+/**
+ * Resolve a path acted on as an entry -- deleted, renamed, copied or moved -- and verify it
+ * lies within config.filesRoot. Only its parent is canonicalised: these operate on a symlink
+ * itself, and following it would make a link pointing outside the root impossible to remove.
+ * Single-argument, like guardPath, so it is safe to hand to `.map`.
+ */
+function guardEntry(inputPath: string): string {
+  return resolveEntryWithin(inputPath, config.filesRoot);
 }
 
 /**
@@ -386,7 +388,7 @@ export function filesPlugin(jwtSecret: string) {
     // and the files root defaults to "/".
     .delete("/delete", async ({ body }) => {
       let resolved: string;
-      try { resolved = guardPath(body.path); } catch { return forbidden(); }
+      try { resolved = guardEntry(body.path); } catch { return forbidden(); }
 
       const refusal = await deleteRefusal(resolved);
       if (refusal) return Response.json({ error: refusal }, { status: 403 });
@@ -404,8 +406,8 @@ export function filesPlugin(jwtSecret: string) {
     .post("/rename", async ({ body }) => {
       let from: string, to: string;
       try {
-        from = guardPath(body.from);
-        to   = guardPath(body.to);
+        from = guardEntry(body.from);
+        to   = guardEntry(body.to);
       } catch { return forbidden(); }
       try {
         await rename(from, to);
@@ -1173,7 +1175,7 @@ export function filesPlugin(jwtSecret: string) {
         let sources: string[];
         let destination: string;
         try {
-          sources     = body.sources.map(guardPath);
+          sources     = body.sources.map(guardEntry);
           destination = guardPath(body.destination);
         } catch {
           yield sse({ data: { error: "Access denied" } satisfies SSEMsg });
@@ -1267,7 +1269,7 @@ export function filesPlugin(jwtSecret: string) {
         let sources: string[];
         let destination: string;
         try {
-          sources     = body.sources.map(guardPath);
+          sources     = body.sources.map(guardEntry);
           destination = guardPath(body.destination);
         } catch {
           yield sse({ data: { error: "Access denied" } satisfies SSEMsg });
