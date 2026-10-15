@@ -8,6 +8,7 @@ import { issueSession, sessionIdOf, verifySession } from "../lib/session-auth";
 import type { JwtCtx } from "../lib/session-auth";
 import { SessionStore } from "../stores/session-store";
 import { LoginThrottle } from "../lib/login-throttle";
+import { SignInLimiter } from "../lib/sign-in-limiter";
 import { originGuard } from "./originGuard";
 import {
   usernameField,
@@ -66,35 +67,23 @@ const cookieSchema = t.Cookie({
 });
 
 /**
- * Repeated failed password checks slow down per key -- see LoginThrottle.
+ * Password sign-in draws on three budgets -- address and username, address alone, and
+ * account alone -- so none can be sidestepped through the others. See SignInLimiter.
  *
- * Sign-in is keyed on the connection's own address and the username, and separately on the
- * address alone (addressThrottle, below). X-Forwarded-For is written by whoever sends the
- * request, so trusting it would let a guesser present a fresh key on every attempt.
- *
- * Behind a reverse proxy every client shares the proxy's address, and so shares both keys'
- * address part. Two people signing in through the proxy at the same moment can see the
- * second told to retry in a second, and an attacker's repeated failures — under any
- * username — delay everyone's sign-in through the proxy for as long as they keep failing,
- * up to 30 s per attempt. That is the cost of a limit that cannot be shed by changing
- * username. A sign-in from the LAN keeps its own address and is unaffected.
+ * Addresses are the connection's own. X-Forwarded-For is written by whoever sends the
+ * request, so trusting it would let a guesser present a fresh address on every attempt.
+ * Behind a reverse proxy every client therefore shares the proxy's address: two people
+ * signing in through it at once can see the second told to retry in a second, and an
+ * attacker's repeated failures delay everyone's sign-in through the proxy, up to 30 s an
+ * attempt. A sign-in from the LAN keeps its own address.
  */
-const passwordThrottle = new LoginThrottle();
+const signInLimiter = new SignInLimiter();
 
 /**
- * Failed sign-ins per address, whatever username they name.
- *
- * The per-username key alone could be shed. The table is bounded and drops its oldest key,
- * so a guesser could fail under thousands of throwaway usernames — cheap, since an unknown
- * username skips the password hash — until the key holding its delay on the real account
- * was evicted. This key counts every failure from the address, and each failure re-inserts
- * it as the newest entry, so churning usernames builds its delay rather than escaping it.
- * It also gates concurrency: one guess in flight per address, across all usernames.
- *
- * More free failures than the per-username key, since several people may share an address.
- * A success clears it, so an address that signs in normally does not carry a penalty.
+ * Wrong current-password guesses on the password-change form, per session -- see the
+ * /password route for why the key is the session rather than the user.
  */
-const addressThrottle = new LoginThrottle({ freeFailures: 20 });
+const passwordThrottle = new LoginThrottle();
 
 /** The address of the connection itself, or "unknown" where there is none (in-process). */
 function clientAddress(
@@ -227,34 +216,23 @@ export function authPlugin(jwtSecret: string) {
           return { error: "No admin configured — run setup first" };
         }
 
-        // Two keys: this address with this username, for a precise delay, and this address
-        // alone, which username churn cannot shed. Checked before the password is, so a guess
-        // made while either is waiting is not even tried. The address key is also reserved
-        // for the length of the check, so a guess sent alongside one still being verified --
-        // under any username -- is refused too; otherwise a burst would all be tested before
-        // the first failure landed.
-        const address = clientAddress(server, request);
-        const userKey = `login|${address}|${body.username.toLowerCase()}`;
-        const addrKey = `login-address|${address}`;
-        const userWait = passwordThrottle.retryAfterMs(userKey);
-        if (userWait > 0) return tooManyAttempts(set, userWait);
-        const addrWait = addressThrottle.acquire(addrKey);
-        if (addrWait > 0) return tooManyAttempts(set, addrWait);
+        // Reserved before the password is checked, so a guess made while any budget is
+        // waiting -- or sent alongside one still being verified -- is not even tried.
+        const attempt = signInLimiter.begin(clientAddress(server, request), body.username);
+        if ("waitMs" in attempt) return tooManyAttempts(set, attempt.waitMs);
         try {
           const user = await UserStore.findByUsername(body.username);
           if (!user || !(await UserStore.verifyPassword(user, body.password))) {
-            passwordThrottle.recordFailure(userKey);
-            addressThrottle.recordFailure(addrKey);
+            signInLimiter.fail(attempt.ticket);
             set.status = 401;
             return { error: "Invalid credentials" };
           }
 
-          passwordThrottle.recordSuccess(userKey);
-          addressThrottle.recordSuccess(addrKey);
+          signInLimiter.succeed(attempt.ticket);
           await issueSession(jwtCtx, anpan_session, user, request);
           return { ok: true, username: user.username };
         } finally {
-          addressThrottle.release(addrKey);
+          signInLimiter.end(attempt.ticket);
         }
       },
       {
