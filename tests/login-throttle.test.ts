@@ -97,4 +97,22 @@ describe("sign-in and password change routes", () => {
     for (let i = 0; i < 6; i++) expect((await change("wrong-guess-2")).status).toBe(400);
     expect((await change(password)).status).toBe(429);
   });
+
+  test("one session's wrong guesses do not block another session's password change", async () => {
+    // A thief holding a stolen session must not be able to keep the owner from changing the
+    // password -- which is what ends the thief's session.
+    const signIn = async () => extractCookie(await login(password)).cookie;
+    const change = (cookie: string, current: string, next: string) =>
+      app.handle(new Request("http://localhost/api/auth/password", {
+        method: "PUT", headers: { cookie, "content-type": "application/json" },
+        body: JSON.stringify({ currentPassword: current, newPassword: next }),
+      }));
+    const thief = await signIn();
+    const owner = await signIn();
+
+    for (let i = 0; i < 6; i++) expect((await change(thief, "wrong-guess-3", "never-applied-9")).status).toBe(400);
+    expect((await change(thief, password, "never-applied-9")).status).toBe(429);    // the thief waits
+
+    expect((await change(owner, password, "owner-chose-this-1")).status).toBe(200);  // the owner does not
+  });
 });

@@ -318,8 +318,10 @@ export function authPlugin(jwtSecret: string) {
         const user = session.user;
 
         // A stolen session could otherwise test guesses at the current password here, and a
-        // right guess would let it set a new one and outlive the owner's next logout.
-        const key  = `password|${user.id}`;
+        // right guess would let it set a new one and outlive the owner's next logout. Keyed on
+        // the session, not the user: keyed on the user, that session's wrong guesses would
+        // also block the owner's password change -- the very step that evicts it.
+        const key  = `password|${session.sid}`;
         const wait = passwordThrottle.retryAfterMs(key);
         if (wait > 0) return tooManyAttempts(set, wait);
 
