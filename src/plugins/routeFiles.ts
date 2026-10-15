@@ -515,13 +515,24 @@ export function filesPlugin(jwtSecret: string) {
       const { name, id, offset, total } = query;
       if (!isPlainFileName(name)) return Response.json({ error: "Invalid file name" }, { status: 400 });
       if (!UPLOAD_ID_RE.test(id)) return Response.json({ error: "Invalid upload id" }, { status: 400 });
+      // Byte positions are whole numbers. The schema enforces only a minimum of 0, so a
+      // fractional total (10.5) passed, and could then never be reached: every chunk either
+      // left the upload short of it or was refused for running past it.
+      if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(total)) {
+        return Response.json({ error: "offset and total must be whole numbers" }, { status: 400 });
+      }
 
       let dest: string;
       try { dest = guardPath(join(guardPath(query.path), name)); } catch { return forbidden(); }
       const tmp = uploadTempPath(dest, id);
 
-      const declared = Number(request.headers.get("content-length") ?? NaN);
-      if (!Number.isFinite(declared)) return Response.json({ error: "Content-Length is required" }, { status: 411 });
+      const rawLength = request.headers.get("content-length");
+      if (rawLength === null) return Response.json({ error: "Content-Length is required" }, { status: 411 });
+      // Present but not a byte count is a different fault from absent: a 400, not a 411.
+      const declared = Number(rawLength);
+      if (!Number.isSafeInteger(declared) || declared < 0) {
+        return Response.json({ error: "Content-Length must be a whole number of bytes" }, { status: 400 });
+      }
       if (declared > UPLOAD_CHUNK_MAX) return tooLarge();
       if (offset + declared > total) return Response.json({ error: "Chunk runs past the end of the file" }, { status: 400 });
 
