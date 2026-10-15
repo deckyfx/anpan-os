@@ -31,4 +31,24 @@ describe("CasaOS migrate", () => {
     expect(stream).toContain('"error"');
     expect(stream).not.toContain("undefined is not an object");
   });
+
+  test("a dotted stack name is refused before anything is read or written", async () => {
+    // The route's own pattern allowed dots. The name becomes a Compose project name, which
+    // Compose rejects with a dot, and a stack folder the compose routes refuse to manage.
+    const { status, stream } = await migrate("a.b", {});
+    expect(status).toBe(200);
+    expect(stream).toContain("Invalid stack name");
+    expect(stream).not.toContain('"step"');              // refused before the first step
+  });
+
+  test("a dot-segment name never reaches the route", async () => {
+    // URLs collapse ".." and its encodings before routing, so the stack-folder escape a
+    // ".." name would be cannot arrive this way. Pinned so that stays true.
+    for (const segment of ["..", "%2e%2e", ".%2e"]) {
+      const res = await app.handle(new Request(`http://localhost/api/casaos/migrate/${segment}`, {
+        method: "POST", headers: { cookie },
+      }));
+      expect(res.status).toBe(404);
+    }
+  });
 });

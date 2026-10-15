@@ -12,6 +12,7 @@ import type { SSEMsg } from "../lib/sse";
 import { invalidateOriginCache } from "./routeDocker";
 import { CASAOS_APPS_DIR as PLATFORM_CASAOS_APPS_DIR, FEATURES } from "../lib/platform";
 import { isWithinAny } from "../lib/path-guard";
+import { STACK_NAME_RE } from "../constants/stack";
 
 /**
  * CasaOS keeps its stacks here. Imported from lib/platform rather than redeclared, so the
@@ -68,8 +69,11 @@ export function casaosPlugin(jwtSecret: string) {
       async function*({ params, body, request }) {
         const { name } = params;
 
-        // Reject names containing path traversal sequences or separators.
-        if (!/^[A-Za-z0-9._-]+$/.test(name)) {
+        // The name becomes anpan-os's own stack folder below, join(composeFolder, name). This
+        // route's own pattern allowed dots, so ".." named the compose folder's parent -- the
+        // runtime directory -- and the migration would have written a compose file there and
+        // run it. The shared rule allows no dots, as Compose project names do not either.
+        if (!STACK_NAME_RE.test(name)) {
           yield sse({ data: { error: "Invalid stack name" } satisfies SSEMsg });
           return;
         }
@@ -81,15 +85,14 @@ export function casaosPlugin(jwtSecret: string) {
         // outside a root narrowed to, say, /DATA.
         // Optional chaining: the body itself may be omitted, and reading through it crashed.
         const requested = body?.composePath;
-        let composePath: string;
-        if (requested) {
-          if (!isWithinAny(requested, [CASAOS_APPS_DIR, config.filesRoot])) {
-            yield sse({ data: { error: "That compose file is outside CasaOS's app folder and the file manager's root", needPath: true } as MigrateMsg });
-            return;
-          }
-          composePath = resolve(requested);
-        } else {
-          composePath = join(CASAOS_APPS_DIR, name, "docker-compose.yml");
+        const composePath = requested
+          ? resolve(requested)
+          : join(CASAOS_APPS_DIR, name, "docker-compose.yml");
+        // The default path is checked too: a symlink inside an app folder could otherwise
+        // redirect the read anywhere, and the default should not be trusted just for being one.
+        if (!isWithinAny(composePath, [CASAOS_APPS_DIR, config.filesRoot])) {
+          yield sse({ data: { error: "That compose file is outside CasaOS's app folder and the file manager's root", needPath: true } as MigrateMsg });
+          return;
         }
 
         // Root check — CasaOS app dir requires root access
