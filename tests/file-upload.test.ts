@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeAll, afterAll } from "bun:test";
-import { mkdtempSync, rmSync, readdirSync, utimesSync } from "node:fs";
+import { mkdtempSync, rmSync, readdirSync, utimesSync, statSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createApp } from "../src/app";
@@ -132,5 +132,50 @@ describe("chunked upload", () => {
     expect(await Bun.file(fresh).exists()).toBe(true);
     expect(await Bun.file(other).exists()).toBe(true);
     rmSync(fresh); rmSync(other);
+  });
+
+  test("a retry overlapping a stalled request cannot cut the committed file short", async () => {
+    // The client's watchdog gives up on a chunk after 60 s without progress and sends it
+    // again, while the server may still be inside the first request. Unserialised, the
+    // retry reopened the same temp file, finished and renamed it into place -- and the
+    // stalled request, when its connection finally died, truncated the inode it still held,
+    // which by then was the committed upload.
+    const name  = "overlap.bin";
+    const id    = crypto.randomUUID();
+    const data  = new Uint8Array(64 * 1024).map((_, i) => i % 251);
+    const total = data.byteLength;
+    const dest  = join(root, name);
+
+    /** Poll until `cond` holds, or give up after `ms`. */
+    const waitFor = async (cond: () => boolean, ms: number) => {
+      for (const end = Date.now() + ms; Date.now() < end; await Bun.sleep(5)) if (cond()) return true;
+      return false;
+    };
+
+    // The first request sends half its chunk and then stalls.
+    let feed!: ReadableStreamDefaultController<Uint8Array>;
+    const stalledBody = new ReadableStream<Uint8Array>({ start(c) { feed = c; } });
+    const first = app.handle(new Request(url(root, name, id, `&offset=0&total=${total}`), {
+      method: "PUT", body: stalledBody, duplex: "half",
+      headers: { cookie, "content-length": String(total) },
+    } as RequestInit));
+    feed.enqueue(data.slice(0, total / 2));
+    const held = await waitFor(() => parts().length === 1 && statSync(join(root, parts()[0]!)).size === total / 2, 2000);
+    expect(held).toBe(true);
+
+    // The client's retry of the same chunk, complete. Unserialised it finishes at once.
+    const retry = put(name, id, 0, total, data);
+    await waitFor(() => existsSync(dest), 300);
+
+    // The stalled connection dies.
+    feed.close();
+    expect((await first).status).toBe(400);
+    expect((await retry).status).toBe(200);
+
+    const landed = await Bun.file(dest).bytes();
+    expect(landed.byteLength).toBe(total);
+    expect(Buffer.from(landed).equals(Buffer.from(data))).toBe(true);
+    expect(parts()).toEqual([]);
+    rmSync(dest);
   });
 });

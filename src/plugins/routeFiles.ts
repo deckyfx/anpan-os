@@ -10,6 +10,7 @@ import { bins, commands } from "../lib/commands";
 import { parseFile } from "music-metadata";
 import NodeID3 from "node-id3";
 import { StreamAggregator, drainStream } from "../lib/sse";
+import { KeyedLock } from "../lib/keyed-lock";
 import type { SSEMsg } from "../lib/sse";
 import { SettingsStore } from "../stores/settings-store";
 import { UPLOAD_CHUNK_MAX, UPLOAD_ID_RE } from "../constants/http";
@@ -289,6 +290,22 @@ async function listDir(dirPath: string): Promise<FileEntry[]> {
 
 // ─── Plugin ───────────────────────────────────────────────────────────────────
 
+/**
+ * One upload's temp file is touched by one request at a time.
+ *
+ * Without this, a retry could overlap the stalled request it replaces. The client's watchdog
+ * aborts a chunk after 60 s without progress and resends it, while the server may still be
+ * inside the earlier request: an offset-0 retry reopened the file with "w" mid-write, and the
+ * earlier handler then truncated it -- after the retry had already renamed it into place,
+ * since a file handle follows its inode. The committed upload came out short.
+ *
+ * Holding the lock across the body read cannot hang a retry indefinitely: Bun.serve closes a
+ * connection idle for 10 s (its default, which nothing here overrides), including one whose
+ * request body has stalled. A retry therefore waits seconds behind a dead request, well inside
+ * the client's 60 s watchdog.
+ */
+const uploadLock = new KeyedLock();
+
 export function filesPlugin(jwtSecret: string) {
   return new Elysia({ prefix: "/api/files" })
     .use(authGuard(jwtSecret))
@@ -500,7 +517,7 @@ export function filesPlugin(jwtSecret: string) {
       if (declared > UPLOAD_CHUNK_MAX) return tooLarge();
       if (offset + declared > total) return Response.json({ error: "Chunk runs past the end of the file" }, { status: 400 });
 
-      try {
+      return uploadLock.run(tmp, async () => { try {
         if (offset === 0) {
           await sweepStaleUploads(dirname(dest), name);
         } else {
@@ -543,7 +560,7 @@ export function filesPlugin(jwtSecret: string) {
           return Response.json({ error: "Not enough space on the destination drive" }, { status: 507 });
         }
         return serverError();
-      }
+      } });
     }, {
       // Read the body ourselves, after the auth guard.
       parse: "none",
@@ -563,7 +580,10 @@ export function filesPlugin(jwtSecret: string) {
       if (!name || name !== basename(name)) return Response.json({ error: "Invalid file name" }, { status: 400 });
       let dest: string;
       try { dest = guardPath(join(guardPath(query.path), name)); } catch { return forbidden(); }
-      await rm(uploadTempPath(dest, query.id), { force: true });
+      // Under the same lock as the chunks: removing the file under an in-flight write leaves
+      // that request writing to an unlinked inode and failing its rename.
+      const tmp = uploadTempPath(dest, query.id);
+      await uploadLock.run(tmp, () => rm(tmp, { force: true }));
       return { ok: true };
     }, {
       query: t.Object({ path: t.String(), name: t.String(), id: t.String() }),
