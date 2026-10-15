@@ -73,3 +73,13 @@ export function resolveEntryWithin(input: string, root: string): string {
   if (!isUnder(entry, canonicalOf(literalRoot))) throw forbidden();
   return resolved;
 }
+
+/**
+ * Whether going into `input` stays inside at least one of `roots`, by {@link resolveWithin}'s
+ * rule. For routes that may read from more than one known place.
+ */
+export function isWithinAny(input: string, roots: readonly string[]): boolean {
+  return roots.some(root => {
+    try { resolveWithin(input, root); return true; } catch { return false; }
+  });
+}

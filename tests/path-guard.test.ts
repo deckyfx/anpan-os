@@ -2,7 +2,7 @@ import { test, expect, describe, beforeAll, afterAll } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { resolveEntryWithin, resolveWithin } from "../src/lib/path-guard";
+import { isWithinAny, resolveEntryWithin, resolveWithin } from "../src/lib/path-guard";
 
 /**
  * Once `files.root` is narrowed below "/", it is the boundary between what the file manager
@@ -101,5 +101,29 @@ describe("resolveEntryWithin — acting on an entry as itself", () => {
   test("ordinary entries and spelling escapes behave as for resolveWithin", () => {
     allowed(() => resolveEntryWithin(join(root, "inside", "a.txt"), root));
     refused(() => resolveEntryWithin(join(root, "..", "outside", "secret.txt"), root));
+  });
+});
+
+describe("isWithinAny — a path that may come from more than one known place", () => {
+  // The CasaOS migration reads a compose file the user can name. It may come from CasaOS's
+  // app folder or from anywhere the file manager may go, and nowhere else.
+  test("inside either root is allowed, outside both is refused", () => {
+    const casaos = join(base, "outside");          // stands in for CasaOS's app folder
+    expect(isWithinAny(join(root, "inside", "a.txt"), [casaos, root])).toBe(true);
+    expect(isWithinAny(join(casaos, "secret.txt"), [casaos, root])).toBe(true);
+    expect(isWithinAny("/etc/passwd", [casaos, root])).toBe(false);
+  });
+
+  test("a link out of one root does not count as being inside it", () => {
+    const unrelated = mkdtempSync(join(tmpdir(), "anpan-guard-other-"));
+    try {
+      expect(isWithinAny(join(root, "escape", "secret.txt"), [root, unrelated])).toBe(false);
+    } finally {
+      rmSync(unrelated, { recursive: true, force: true });
+    }
+  });
+
+  test("a files root of / admits anything, as the file manager does", () => {
+    expect(isWithinAny("/etc/hostname", [join(base, "outside"), "/"])).toBe(true);
   });
 });

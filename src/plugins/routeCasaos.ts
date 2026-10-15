@@ -1,5 +1,5 @@
 import { Elysia, t, sse } from "elysia";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { mkdirSync } from "node:fs";
 import { authGuard } from "./authGuard";
 import { readCasaOSApps, parseCasaOSMeta } from "../lib/casaos";
@@ -11,6 +11,7 @@ import { buildComposeSourceReport, findOrphanServices } from "../lib/compose-sou
 import type { SSEMsg } from "../lib/sse";
 import { invalidateOriginCache } from "./routeDocker";
 import { CASAOS_APPS_DIR as PLATFORM_CASAOS_APPS_DIR, FEATURES } from "../lib/platform";
+import { isWithinAny } from "../lib/path-guard";
 
 /**
  * CasaOS keeps its stacks here. Imported from lib/platform rather than redeclared, so the
@@ -73,8 +74,22 @@ export function casaosPlugin(jwtSecret: string) {
           return;
         }
 
-        const composePath: string = (body as { composePath?: string }).composePath
-          || join(CASAOS_APPS_DIR, name, "docker-compose.yml");
+        // A custom path is a real feature: when CasaOS's own copy cannot be read, the dialog
+        // asks for the file's actual location. But it is read as root, and taken straight
+        // from the request it would bypass a narrowed files root. Hold it to the boundary the
+        // file manager already enforces, plus CasaOS's app folder -- which usually lies
+        // outside a root narrowed to, say, /DATA.
+        const requested = (body as { composePath?: string }).composePath;
+        let composePath: string;
+        if (requested) {
+          if (!isWithinAny(requested, [CASAOS_APPS_DIR, config.filesRoot])) {
+            yield sse({ data: { error: "That compose file is outside CasaOS's app folder and the file manager's root", needPath: true } as MigrateMsg });
+            return;
+          }
+          composePath = resolve(requested);
+        } else {
+          composePath = join(CASAOS_APPS_DIR, name, "docker-compose.yml");
+        }
 
         // Root check — CasaOS app dir requires root access
         if (process.getuid?.() !== 0) {
