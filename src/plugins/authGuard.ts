@@ -1,10 +1,11 @@
 import { Elysia, t, status } from "elysia";
 import { jwt } from "@elysiajs/jwt";
-import { UserStore } from "../stores/user-store";
+import { verifySession } from "../lib/session-auth";
 
 /**
  * Auth guard factory — derives context with `user` (sub + username) from the
- * session cookie.  Yields 401 when the cookie is missing or the JWT is invalid.
+ * session cookie.  Yields 401 unless the session verifies in full: signature, user,
+ * tokenVersion, and a session row that has not been logged out.
  *
  * Usage:
  *   new Elysia()
@@ -20,21 +21,14 @@ export function authGuard(jwtSecret: string) {
       }),
     })
     .resolve(async ({ jwt: jwtCtx, cookie: { anpan_session } }) => {
-      const token = anpan_session.value;
-      if (!token) return status(401, "Unauthorized");
-
-      const payload = await jwtCtx.verify(token);
-      if (!payload) return status(401, "Unauthorized");
-
-      // Verify tokenVersion to invalidate old JWTs after password change
-      const userId = parseInt(String(payload.sub), 10);
-      const user = await UserStore.findById(userId);
-      if (!user || (payload.tokenVersion !== (user.tokenVersion ?? 0))) return status(401, "Unauthorized");
+      // Signature, user, tokenVersion and a live session row -- see verifySession.
+      const session = await verifySession(jwtCtx, anpan_session.value);
+      if (!session) return status(401, "Unauthorized");
 
       return {
         user: {
-          sub:      payload.sub as string,
-          username: payload.username as string,
+          sub:      String(session.user.id),
+          username: session.user.username,
         },
       };
     })

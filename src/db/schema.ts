@@ -63,11 +63,26 @@ export const passkeys = sqliteTable("passkeys", {
   lastUsedAt:   integer("last_used_at", { mode: "timestamp" }),
 });
 
+/**
+ * One row per signed-in browser. Its id travels in the session JWT as `sid`.
+ *
+ * Logging out deletes this row, which ends that device's session and no other. Without it a
+ * logout could only clear the cookie, leaving a copied token valid until it expired, or bump
+ * the user's tokenVersion and end every device's session at once.
+ */
+export const sessions = sqliteTable("sessions", {
+  id:        text("id").primaryKey(),
+  userId:    integer("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull().default(sql`(unixepoch())`),
+});
+
 export type User    = typeof users.$inferSelect;
 export type NewUser = typeof users.$inferInsert;
 
 export type Stack    = typeof stacks.$inferSelect;
 export type NewStack = typeof stacks.$inferInsert;
+
+export type Session = typeof sessions.$inferSelect;
 
 export type Passkey    = typeof passkeys.$inferSelect;
 export type NewPasskey = typeof passkeys.$inferInsert;
