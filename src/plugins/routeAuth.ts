@@ -7,6 +7,7 @@ import { commands } from "../lib/commands";
 import { issueSession, sessionIdOf, verifySession } from "../lib/session-auth";
 import type { JwtCtx } from "../lib/session-auth";
 import { SessionStore } from "../stores/session-store";
+import { LoginThrottle } from "../lib/login-throttle";
 import {
   usernameField,
   passwordField,
@@ -62,6 +63,36 @@ async function withDockerHubAuth<T>(
 const cookieSchema = t.Cookie({
   anpan_session: t.Optional(t.String()),
 });
+
+/**
+ * Repeated failed password checks slow down per key -- see LoginThrottle.
+ *
+ * Sign-in is keyed on the connection's own address and the username. X-Forwarded-For is
+ * written by whoever sends the request, so trusting it would let a guesser present a fresh
+ * key on every attempt. Behind a reverse proxy every client shares the proxy's address, so
+ * the limit then applies per username: still a limit, and one whose worst case is a slower
+ * sign-in through the proxy, never a lockout. A sign-in from the LAN keeps its own address.
+ */
+const passwordThrottle = new LoginThrottle();
+
+/** The address of the connection itself, or "unknown" where there is none (in-process). */
+function clientAddress(
+  server: { requestIP(request: Request): { address: string } | null } | null,
+  request: Request,
+): string {
+  return server?.requestIP(request)?.address ?? "unknown";
+}
+
+/** A 429 saying how long to wait, in the body and in Retry-After. */
+function tooManyAttempts(
+  set: { status?: number | string; headers: Record<string, string | number> },
+  waitMs: number,
+): { error: string } {
+  const seconds = Math.ceil(waitMs / 1000);
+  set.status = 429;
+  set.headers["retry-after"] = String(seconds);
+  return { error: `Too many failed attempts — try again in ${seconds} s` };
+}
 
 /** Returns a 422 JSON response with an `error` field, or null if valid. */
 function checkCredentials(
@@ -156,7 +187,7 @@ export function authPlugin(jwtSecret: string) {
 
     .post(
       "/login",
-      async ({ body, jwt: jwtCtx, cookie: { anpan_session }, set, request }) => {
+      async ({ body, jwt: jwtCtx, cookie: { anpan_session }, set, request, server }) => {
         if (config.disabledLoginMethods.has("form")) {
           set.status = 403;
           return { error: "Form login is disabled" };
@@ -173,12 +204,19 @@ export function authPlugin(jwtSecret: string) {
           return { error: "No admin configured — run setup first" };
         }
 
+        // Checked before the password is, so a guess made while waiting is not even tried.
+        const key  = `login|${clientAddress(server, request)}|${body.username.toLowerCase()}`;
+        const wait = passwordThrottle.retryAfterMs(key);
+        if (wait > 0) return tooManyAttempts(set, wait);
+
         const user = await UserStore.findByUsername(body.username);
         if (!user || !(await UserStore.verifyPassword(user, body.password))) {
+          passwordThrottle.recordFailure(key);
           set.status = 401;
           return { error: "Invalid credentials" };
         }
 
+        passwordThrottle.recordSuccess(key);
         await issueSession(jwtCtx, anpan_session, user, request);
         return { ok: true, username: user.username };
       },
@@ -276,13 +314,21 @@ export function authPlugin(jwtSecret: string) {
         if (!session) { set.status = 401; return { error: "Not authenticated" }; }
         const user = session.user;
 
+        // A stolen session could otherwise test guesses at the current password here, and a
+        // right guess would let it set a new one and outlive the owner's next logout.
+        const key  = `password|${user.id}`;
+        const wait = passwordThrottle.retryAfterMs(key);
+        if (wait > 0) return tooManyAttempts(set, wait);
+
         const pErr = validatePassword(body.newPassword);
         if (pErr)   { set.status = 422; return { error: pErr }; }
 
         if (!(await UserStore.verifyPassword(user, body.currentPassword))) {
+          passwordThrottle.recordFailure(key);
           set.status = 400;
           return { error: "Current password is incorrect" };
         }
+        passwordThrottle.recordSuccess(key);
 
         const hash = await Bun.password.hash(body.newPassword);
         await UserStore.updatePassword(user.id, hash);
