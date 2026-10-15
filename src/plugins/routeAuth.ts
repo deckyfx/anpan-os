@@ -76,6 +76,21 @@ const cookieSchema = t.Cookie({
  */
 const passwordThrottle = new LoginThrottle();
 
+/**
+ * Failed sign-ins per address, whatever username they name.
+ *
+ * The per-username key alone could be shed. The table is bounded and drops its oldest key,
+ * so a guesser could fail under thousands of throwaway usernames — cheap, since an unknown
+ * username skips the password hash — until the key holding its delay on the real account
+ * was evicted. This key counts every failure from the address, and each failure re-inserts
+ * it as the newest entry, so churning usernames builds its delay rather than escaping it.
+ * It also gates concurrency: one guess in flight per address, across all usernames.
+ *
+ * More free failures than the per-username key, since several people may share an address.
+ * A success clears it, so an address that signs in normally does not carry a penalty.
+ */
+const addressThrottle = new LoginThrottle({ freeFailures: 20 });
+
 /** The address of the connection itself, or "unknown" where there is none (in-process). */
 function clientAddress(
   server: { requestIP(request: Request): { address: string } | null } | null,
@@ -207,25 +222,34 @@ export function authPlugin(jwtSecret: string) {
           return { error: "No admin configured — run setup first" };
         }
 
-        // Reserved before the password is checked: a guess made while waiting is not even
-        // tried, and neither is one sent alongside a guess still being verified -- otherwise a
-        // burst of concurrent requests would all be tested before the first failure landed.
-        const key  = `login|${clientAddress(server, request)}|${body.username.toLowerCase()}`;
-        const wait = passwordThrottle.acquire(key);
-        if (wait > 0) return tooManyAttempts(set, wait);
+        // Two keys: this address with this username, for a precise delay, and this address
+        // alone, which username churn cannot shed. Checked before the password is, so a guess
+        // made while either is waiting is not even tried. The address key is also reserved
+        // for the length of the check, so a guess sent alongside one still being verified --
+        // under any username -- is refused too; otherwise a burst would all be tested before
+        // the first failure landed.
+        const address = clientAddress(server, request);
+        const userKey = `login|${address}|${body.username.toLowerCase()}`;
+        const addrKey = `login-address|${address}`;
+        const userWait = passwordThrottle.retryAfterMs(userKey);
+        if (userWait > 0) return tooManyAttempts(set, userWait);
+        const addrWait = addressThrottle.acquire(addrKey);
+        if (addrWait > 0) return tooManyAttempts(set, addrWait);
         try {
           const user = await UserStore.findByUsername(body.username);
           if (!user || !(await UserStore.verifyPassword(user, body.password))) {
-            passwordThrottle.recordFailure(key);
+            passwordThrottle.recordFailure(userKey);
+            addressThrottle.recordFailure(addrKey);
             set.status = 401;
             return { error: "Invalid credentials" };
           }
 
-          passwordThrottle.recordSuccess(key);
+          passwordThrottle.recordSuccess(userKey);
+          addressThrottle.recordSuccess(addrKey);
           await issueSession(jwtCtx, anpan_session, user, request);
           return { ok: true, username: user.username };
         } finally {
-          passwordThrottle.release(key);
+          addressThrottle.release(addrKey);
         }
       },
       {

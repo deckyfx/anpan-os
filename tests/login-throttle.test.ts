@@ -202,3 +202,32 @@ describe("two password changes from one session", () => {
     }
   });
 });
+
+describe("username churn from one address", () => {
+  const app = createApp(TEST_JWT);
+  const username = `churn-${crypto.randomUUID().slice(0, 8)}`;
+  const password = "the-real-one-2";
+  beforeAll(async () => { await UserStore.create(username, password); });
+  afterAll(async () => { await db.delete(users).where(eq(users.username, username)); });
+
+  const login = (name: string, pw: string) => app.handle(new Request("http://localhost/api/auth/login", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ username: name, password: pw }),
+  }));
+
+  test("cannot shed the delay by failing under throwaway usernames", async () => {
+    // The per-username table is bounded and drops its oldest key, so failing under enough
+    // throwaway usernames evicted the one holding the real account's delay. Every failure
+    // from an address now counts against the address as well.
+    expect((await login(username, password)).status).toBe(200);     // a clean start for this address
+
+    for (let i = 0; i < 21; i++) {
+      expect((await login(`throwaway-${crypto.randomUUID().slice(0, 8)}`, "x")).status).toBe(401);
+    }
+    // No failure has ever been recorded against this username, yet it must wait.
+    expect((await login(username, password)).status).toBe(429);
+
+    await Bun.sleep(1100);
+    expect((await login(username, password)).status).toBe(200);     // and a success clears it
+  });
+});
