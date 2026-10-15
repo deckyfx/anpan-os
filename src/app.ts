@@ -1,4 +1,4 @@
-import { Elysia } from "elysia";
+import { Elysia, ElysiaCustomStatusResponse } from "elysia";
 import { authPlugin } from "./plugins/routeAuth";
 import { passkeyPlugin } from "./plugins/routePasskey";
 import { apiPlugin } from "./plugins/routeApi";
@@ -48,6 +48,15 @@ function errorPage(title: string, detail: string, stack?: string): Response {
 export function createApp(jwtSecret: string) {
   return new Elysia()
     .onError(({ error, code, request }) => {
+      // A status thrown on purpose -- `throw status(403, …)`, as the cross-site guard does --
+      // is an answer, not a failure. Without this it fell through to the 500 below, so a
+      // refusal was reported as a server crash.
+      if (error instanceof ElysiaCustomStatusResponse) {
+        const body = error.response;
+        return typeof body === "string"
+          ? new Response(body, { status: error.code as number })
+          : Response.json(body, { status: error.code as number });
+      }
       // Without this an unknown route fell through to the 500 below, so a typo in a URL
       // looked like a server crash.
       if (code === "NOT_FOUND") return Response.json({ error: "Not found" }, { status: 404 });

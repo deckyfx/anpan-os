@@ -394,6 +394,7 @@ EOF
 bind = "public"   # "local" = 127.0.0.1 only | "public" = 0.0.0.0 (all interfaces)
 # tls_cert = "certs/cert.pem"
 # tls_key  = "certs/key.pem"
+# allowed_origins = []   # extra origins allowed to change things — for a proxy that rewrites Host
 
 [auth]
 passkey_allowed_origins = []

@@ -12,6 +12,7 @@ import type {
 } from "@simplewebauthn/server";
 import { config } from "../config";
 import { authGuard } from "./authGuard";
+import { originGuard } from "./originGuard";
 import { UserStore } from "../stores/user-store";
 import { issueSession } from "../lib/session-auth";
 import { PasskeyStore } from "../stores/passkey-store";
@@ -79,6 +80,8 @@ export function passkeyPlugin(jwtSecret: string) {
   const guard = authGuard(jwtSecret);
 
   return new Elysia({ prefix: "/api/auth/passkey" })
+    // Its login routes are public, so they take the cross-site check directly.
+    .use(originGuard())
     .use(jwt({ name: "jwt", secret: jwtSecret, exp: "7d" }))
 
     // ── Login options (public) ────────────────────────────────────────────────

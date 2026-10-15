@@ -8,6 +8,7 @@ import { issueSession, sessionIdOf, verifySession } from "../lib/session-auth";
 import type { JwtCtx } from "../lib/session-auth";
 import { SessionStore } from "../stores/session-store";
 import { LoginThrottle } from "../lib/login-throttle";
+import { originGuard } from "./originGuard";
 import {
   usernameField,
   passwordField,
@@ -138,6 +139,8 @@ async function dockerMissing(set: { status?: number | string }): Promise<boolean
 
 export function authPlugin(jwtSecret: string) {
   return new Elysia({ prefix: "/api/auth" })
+    // Public routes here change state too: a forged sign-in or logout is still forged.
+    .use(originGuard())
     .use(jwt({ name: "jwt", secret: jwtSecret, exp: "7d" }))
     .guard({ cookie: cookieSchema })
 

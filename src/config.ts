@@ -14,6 +14,7 @@ bind = "local"   # "local" = 127.0.0.1 only | "public" = 0.0.0.0 (all interfaces
 # tls_cert = "/etc/anpan-os/cert.pem"
 # tls_key  = "/etc/anpan-os/key.pem"
 # TLS is optional — if cert/key are unset or files are missing, server runs on HTTP.
+# allowed_origins = []   # extra origins allowed to change things — for a proxy that rewrites Host
 
 [auth]
 # username = "admin"
@@ -43,6 +44,11 @@ interface ServerConfig {
   bind?: "local" | "public";
   tls_cert?: string;
   tls_key?: string;
+  /**
+   * Origins, besides the one a request is addressed to, whose pages may change things —
+   * e.g. "https://anpan.example.com" behind a reverse proxy that rewrites the Host header.
+   */
+  allowed_origins?: string[];
 }
 
 interface AuthConfig {
@@ -153,6 +159,19 @@ class Config {
    */
   get passkeyAllowedOrigins(): string[] {
     return this.data.auth.passkey_allowed_origins ?? [];
+  }
+
+  /**
+   * Origins allowed to make state-changing requests, besides the host a request was
+   * addressed to: `server.allowed_origins` plus `auth.passkey_allowed_origins`. The passkey
+   * list counts because it already records the addresses anpan-os is reached at — someone
+   * who listed their public hostname there for passkeys uses that hostname for everything.
+   */
+  get allowedOrigins(): string[] {
+    return [...new Set([
+      ...(this.data.server.allowed_origins ?? []),
+      ...(this.data.auth.passkey_allowed_origins ?? []),
+    ])];
   }
 
   /**
