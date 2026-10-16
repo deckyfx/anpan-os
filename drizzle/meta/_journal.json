@@ -113,6 +113,13 @@
       "when": 1787373863777,
       "tag": "0015_freezing_steve_rogers",
       "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "6",
+      "when": 1792054510848,
+      "tag": "0016_stale_cannonball",
+      "breakpoints": true
     }
   ]
 }

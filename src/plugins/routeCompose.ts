@@ -18,8 +18,8 @@ import {
 } from "../lib/compose-source";
 import type { ComposeSourceReport } from "../lib/compose-source";
 import { CASAOS_APPS_DIR } from "../lib/platform";
+import { STACK_NAME_RE } from "../constants/stack";
 
-const STACK_NAME_RE     = /^[a-zA-Z0-9_-]+$/;
 const CONTAINER_NAME_RE = /^[a-zA-Z0-9_.\-]+$/;
 
 function getLogPath(name: string): string {

@@ -1,10 +1,15 @@
 import { Elysia, t } from "elysia";
-import type { Cookie } from "elysia";
 import { jwt } from "@elysiajs/jwt";
 import { config } from "../config";
 import { UserStore } from "../stores/user-store";
 import { SettingsStore } from "../stores/settings-store";
 import { commands } from "../lib/commands";
+import { issueSession, sessionIdOf, verifySession } from "../lib/session-auth";
+import type { JwtCtx } from "../lib/session-auth";
+import { SessionStore } from "../stores/session-store";
+import { LoginThrottle } from "../lib/login-throttle";
+import { SignInLimiter } from "../lib/sign-in-limiter";
+import { originGuard } from "./originGuard";
 import {
   usernameField,
   passwordField,
@@ -12,7 +17,6 @@ import {
   validatePassword,
 } from "../constants/auth";
 
-const MAX_AGE = 7 * 24 * 60 * 60; // 7 days in seconds
 const DOCKER_TIMEOUT_MS = 30_000;
 
 /**
@@ -34,23 +38,9 @@ async function runWithTimeout(proc: ReturnType<typeof Bun.spawn>, ms: number): P
   }
 }
 
-type JwtCtx = { verify: (token: string) => Promise<Record<string, unknown> | false> };
-
-/**
- * Verifies the session cookie and checks tokenVersion against the DB.
- * Returns the user row on success, null if the session is missing, invalid,
- * expired, or stale (pre-rotation token after a password change).
- */
+/** The user behind a fully verified session, or null. See verifySession. */
 async function requireActiveSession(jwtCtx: JwtCtx, token: string | undefined) {
-  if (!token) return null;
-  const payload = await jwtCtx.verify(token);
-  if (!payload) return null;
-  const userId = parseInt(String(payload.sub), 10);
-  if (isNaN(userId)) return null;
-  const user = await UserStore.findById(userId);
-  if (!user) return null;
-  if ((payload.tokenVersion as number) !== (user.tokenVersion ?? 0)) return null;
-  return user;
+  return (await verifySession(jwtCtx, token))?.user ?? null;
 }
 
 /**
@@ -77,28 +67,41 @@ const cookieSchema = t.Cookie({
 });
 
 /**
- * Writes the JWT session cookie with the project's standard security attributes.
+ * Password sign-in draws on three budgets -- address and username, address alone, and
+ * account alone -- so none can be sidestepped through the others. See SignInLimiter.
  *
- * The `Secure` flag is derived from the *client-facing* protocol, not the backend TLS
- * config.  When anpan-os runs behind a reverse proxy that terminates TLS (e.g. Nginx
- * Proxy Manager), the browser talks HTTP to the proxy while the backend sees HTTPS.
- * Setting `Secure` based on backend TLS would cause browsers to silently drop the
- * cookie on HTTP responses from the proxy.
- *
- * Resolution order:
- *   1. `X-Forwarded-Proto: https` → `Secure` (proxy is terminating TLS for the client)
- *   2. `X-Forwarded-Proto: http`  → not `Secure`
- *   3. No `X-Forwarded-Proto` header → fall back to `config.tlsEnabled` (direct connection)
+ * Addresses are the connection's own. X-Forwarded-For is written by whoever sends the
+ * request, so trusting it would let a guesser present a fresh address on every attempt.
+ * Behind a reverse proxy every client therefore shares the proxy's address: two people
+ * signing in through it at once can see the second told to retry in a second, and an
+ * attacker's repeated failures delay everyone's sign-in through the proxy, up to 30 s an
+ * attempt. A sign-in from the LAN keeps its own address.
  */
-function setSession(c: Cookie<string | undefined>, token: string, request: Request) {
-  const forwarded = request.headers.get("x-forwarded-proto")?.split(",")[0]?.trim().toLowerCase();
-  const secure = forwarded ? forwarded === "https" : config.tlsEnabled;
-  c.value = token;
-  c.httpOnly = true;
-  c.sameSite = config.sessionSameSite;
-  c.secure = secure;
-  c.maxAge = MAX_AGE;
-  c.path = "/";
+const signInLimiter = new SignInLimiter();
+
+/**
+ * Wrong current-password guesses on the password-change form, per session -- see the
+ * /password route for why the key is the session rather than the user.
+ */
+const passwordThrottle = new LoginThrottle();
+
+/** The address of the connection itself, or "unknown" where there is none (in-process). */
+function clientAddress(
+  server: { requestIP(request: Request): { address: string } | null } | null,
+  request: Request,
+): string {
+  return server?.requestIP(request)?.address ?? "unknown";
+}
+
+/** A 429 saying how long to wait, in the body and in Retry-After. */
+function tooManyAttempts(
+  set: { status?: number | string; headers: Record<string, string | number> },
+  waitMs: number,
+): { error: string } {
+  const seconds = Math.ceil(waitMs / 1000);
+  set.status = 429;
+  set.headers["retry-after"] = String(seconds);
+  return { error: `Too many failed attempts — try again in ${seconds} s` };
 }
 
 /** Returns a 422 JSON response with an `error` field, or null if valid. */
@@ -125,7 +128,7 @@ function checkCredentials(
  *   GET  /api/auth/status  — { initialized, authenticated }
  *   POST /api/auth/setup   — create admin (only when no users exist)
  *   POST /api/auth/login   — verify credentials, set JWT session cookie
- *   POST /api/auth/logout  — clear session cookie
+ *   POST /api/auth/logout  — end this browser's session and clear its cookie
  */
 /**
  * What the browser is told when Docker is absent.
@@ -145,6 +148,8 @@ async function dockerMissing(set: { status?: number | string }): Promise<boolean
 
 export function authPlugin(jwtSecret: string) {
   return new Elysia({ prefix: "/api/auth" })
+    // Public routes here change state too: a forged sign-in or logout is still forged.
+    .use(originGuard())
     .use(jwt({ name: "jwt", secret: jwtSecret, exp: "7d" }))
     .guard({ cookie: cookieSchema })
 
@@ -158,8 +163,9 @@ export function authPlugin(jwtSecret: string) {
 
     .get("/status", async ({ jwt: jwtCtx, cookie: { anpan_session } }) => {
       const initialized = (await UserStore.count()) > 0;
-      const token = anpan_session.value;
-      const authenticated = token ? !!(await jwtCtx.verify(token)) : false;
+      // The full check. Verifying the signature alone reported "signed in" for a token
+      // that a password change or a logout had already ended.
+      const authenticated = !!(await verifySession(jwtCtx, anpan_session.value));
       return { initialized, authenticated };
     })
 
@@ -180,12 +186,7 @@ export function authPlugin(jwtSecret: string) {
         }
 
         const user = await UserStore.create(body.username, body.password);
-        const token = await jwtCtx.sign({
-          sub: String(user.id),
-          username: user.username,
-          tokenVersion: user.tokenVersion ?? 0,
-        });
-        setSession(anpan_session, token, request);
+        await issueSession(jwtCtx, anpan_session, user, request);
         return { ok: true, username: user.username };
       },
       {
@@ -198,7 +199,7 @@ export function authPlugin(jwtSecret: string) {
 
     .post(
       "/login",
-      async ({ body, jwt: jwtCtx, cookie: { anpan_session }, set, request }) => {
+      async ({ body, jwt: jwtCtx, cookie: { anpan_session }, set, request, server }) => {
         if (config.disabledLoginMethods.has("form")) {
           set.status = 403;
           return { error: "Form login is disabled" };
@@ -215,19 +216,24 @@ export function authPlugin(jwtSecret: string) {
           return { error: "No admin configured — run setup first" };
         }
 
-        const user = await UserStore.findByUsername(body.username);
-        if (!user || !(await UserStore.verifyPassword(user, body.password))) {
-          set.status = 401;
-          return { error: "Invalid credentials" };
-        }
+        // Reserved before the password is checked, so a guess made while any budget is
+        // waiting -- or sent alongside one still being verified -- is not even tried.
+        const attempt = signInLimiter.begin(clientAddress(server, request), body.username);
+        if ("waitMs" in attempt) return tooManyAttempts(set, attempt.waitMs);
+        try {
+          const user = await UserStore.findByUsername(body.username);
+          if (!user || !(await UserStore.verifyPassword(user, body.password))) {
+            signInLimiter.fail(attempt.ticket);
+            set.status = 401;
+            return { error: "Invalid credentials" };
+          }
 
-        const token = await jwtCtx.sign({
-          sub: String(user.id),
-          username: user.username,
-          tokenVersion: user.tokenVersion ?? 0,
-        });
-        setSession(anpan_session, token, request);
-        return { ok: true, username: user.username };
+          signInLimiter.succeed(attempt.ticket);
+          await issueSession(jwtCtx, anpan_session, user, request);
+          return { ok: true, username: user.username };
+        } finally {
+          signInLimiter.end(attempt.ticket);
+        }
       },
       {
         body: t.Object({
@@ -237,7 +243,13 @@ export function authPlugin(jwtSecret: string) {
       },
     )
 
-    .post("/logout", ({ cookie: { anpan_session } }) => {
+    .post("/logout", async ({ jwt: jwtCtx, cookie: { anpan_session } }) => {
+      // End this browser's session on the server, so a copy of its token stops working
+      // too. Deleting the cookie alone left that copy valid for up to a week. Only a
+      // verified signature is needed: the id is unguessable, and ending a session must not
+      // depend on the session still being valid.
+      const sid = await sessionIdOf(jwtCtx, anpan_session.value);
+      if (sid) await SessionStore.revoke(sid);
       anpan_session.remove();
       return { ok: true };
     })
@@ -313,39 +325,45 @@ export function authPlugin(jwtSecret: string) {
     .put(
       "/password",
       async ({ body, jwt: jwtCtx, cookie: { anpan_session }, set, request }) => {
-        const token = anpan_session.value;
-        const payload = token ? await jwtCtx.verify(token) : null;
-        if (!payload) { set.status = 401; return { error: "Not authenticated" }; }
+        const session = await verifySession(jwtCtx, anpan_session.value);
+        if (!session) { set.status = 401; return { error: "Not authenticated" }; }
+        const user = session.user;
 
-        const userId = parseInt(String(payload.sub), 10);
-        const user   = await UserStore.findById(userId);
-        if (!user)                                           { set.status = 401; return { error: "User not found" }; }
-        if (payload.tokenVersion !== (user.tokenVersion ?? 0)) { set.status = 401; return { error: "Session expired" }; }
+        // A stolen session could otherwise test guesses at the current password here, and a
+        // right guess would let it set a new one and outlive the owner's next logout. Keyed on
+        // the session, not the user: keyed on the user, that session's wrong guesses would
+        // also block the owner's password change -- the very step that evicts it.
+        const key  = `password|${session.sid}`;
+        const wait = passwordThrottle.acquire(key);
+        if (wait > 0) return tooManyAttempts(set, wait);
+        // Held until the change is complete, not just verified. Released after the check, a
+        // second request from this session could verify against the still-current password
+        // and race the first through the update, the revocation and the reissue.
+        try {
+          const pErr = validatePassword(body.newPassword);
+          if (pErr)   { set.status = 422; return { error: pErr }; }
 
-        const pErr = validatePassword(body.newPassword);
-        if (pErr)   { set.status = 422; return { error: pErr }; }
+          if (!(await UserStore.verifyPassword(user, body.currentPassword))) {
+            passwordThrottle.recordFailure(key);
+            set.status = 400;
+            return { error: "Current password is incorrect" };
+          }
+          passwordThrottle.recordSuccess(key);
 
-        if (!(await UserStore.verifyPassword(user, body.currentPassword))) {
-          set.status = 400;
-          return { error: "Current password is incorrect" };
+          const hash = await Bun.password.hash(body.newPassword);
+          await UserStore.updatePassword(user.id, hash);
+
+          // A new password ends every session: the bumped tokenVersion already refuses their
+          // tokens, and their rows go too. This browser then gets a fresh session, so the
+          // user who just changed it stays signed in.
+          await SessionStore.revokeAllFor(user.id);
+          const updated = await UserStore.findById(user.id);
+          if (updated) await issueSession(jwtCtx, anpan_session, updated, request);
+
+          return { ok: true };
+        } finally {
+          passwordThrottle.release(key);
         }
-
-        const hash = await Bun.password.hash(body.newPassword);
-        await UserStore.updatePassword(user.id, hash);
-
-        // Re-fetch to get the incremented tokenVersion, then issue a fresh JWT
-        // so the browser immediately holds a valid session.
-        const updated = await UserStore.findById(user.id);
-        if (updated) {
-          const newToken = await jwtCtx.sign({
-            sub: String(updated.id),
-            username: updated.username,
-            tokenVersion: updated.tokenVersion ?? 0,
-          });
-          setSession(anpan_session, newToken, request);
-        }
-
-        return { ok: true };
       },
       {
         body: t.Object({
