@@ -1,5 +1,42 @@
 # Roadmap
 
+## v0.13.0 — 2026-10-16
+
+A security and correctness release. Sign-in, sessions and cross-site requests are hardened;
+large uploads finally finish; deleting a folder works; and the file manager's root holds as a
+boundary through symlinks. **Everyone signs in once more after upgrading.**
+
+### Security
+- **Logout ends this browser's session — and only this one.** Logging out used to delete the cookie and nothing else, so a copy of the session token kept working for up to a week. Each sign-in now gets a row in a new `sessions` table, its id travels in the token, and logout deletes it: the token stops working wherever it was copied, while other devices stay signed in. A password change still ends every session. `/api/auth/status` also checked the token's signature alone, so after a password change it reported "signed in" while every route refused the token
+- **Requests that change something must come from this server's own pages.** The session cookie's SameSite policy was the only defence against cross-site request forgery, and it is configurable down to `lax`. Every POST, PUT, PATCH and DELETE under `/api` now needs an Origin that is this server — scheme, host and port — or one listed in the new `server.allowed_origins` or in `auth.passkey_allowed_origins`. Requests with no Origin, from scripts and the CLI, are unaffected; `Origin: null`, which an attacker can produce on demand, is refused
+- **Password guessing is limited.** Sign-in draws on three budgets — per address and username, per address, and per account — so changing username or spreading guesses across many addresses does not escape the limit. Each budget allows some free failures, then doubles a delay from 1 s to a 30 s cap; never a lockout, and a success clears it. Each address and each account has one password check in flight at a time, so a burst of concurrent guesses is verified one at a time rather than all before the first failure counts. The password-change form has its own limit, per session, so a stolen session cannot block the owner from changing the password
+- **The files root is a boundary through symlinks.** With `files.root` narrowed below `/`, a symlink inside it pointing outside passed the containment check, and listing, reading or writing through it reached the rest of the host. Going into a path now follows every link; acting on an entry itself — delete, rename, copy, move — follows only its parents, so a link pointing out of the root can still be removed
+- **The config folder cannot be deleted through another name for it.** The guard that keeps a folder delete from taking anpan-os's own database compared spellings, so a symlinked `RUNTIME_CONFIG_DIR`, or macOS's `/var` versus `/private/var`, walked past it
+- **The CasaOS migration reads only from known places.** Its compose path — whether the default or one you supply — must lie inside CasaOS's app folder or the file manager's root. Stack names follow the same rule as everywhere else, which allows no dots
+
+### Bug fixes
+- **Large uploads never finished.** A 4 GB ISO left the upload dialog open forever: Bun's 128 MB body limit cut the single request off after a few hundred KB, and the dialog had no timeout, error or cancel. Files now go up in 32 MB chunks — resumable, retried per chunk, and renamed into place only after the last byte. The dialog says why a file failed and has a Cancel button
+- **A retried upload chunk could leave a "completed" file empty.** The client retries a stalled chunk after 60 s; if the stalled request was still running, it could truncate the file after the retry had already committed it. Each upload's temp file is now handled by one request at a time
+- **Deleting a folder had never worked.** `rm` without `recursive` fails on every directory, and the client discarded the error. Folders now delete with their contents, and the files root, system and shared roots, and anything holding anpan-os's own config are refused
+- **Unknown routes** returned 500, or for `GET /api/*` the web UI's HTML with a 200. Both are JSON 404s now
+- **A compose stack name could escape its folder.** `..%2Fcomposes-x` passed a prefix check with no separator. Stack names are validated once, for every route
+- **A deliberately refused request was reported as a server crash.** The error handler turned every status thrown on purpose into a 500
+- The upload dialog's auto-close no longer wipes a second upload started within its 800 ms window; abandoning an upload refuses `.` and `..` like uploading does; upload positions and `Content-Length` must be whole numbers; and a CasaOS migration request with no body no longer crashes
+
+### Upgrading
+- **Everyone signs in once more.** Session tokens from before this release carry no session id and are refused; accepting them would leave each one impossible to revoke for up to a week
+- **Behind a reverse proxy**, writes keep working when the proxy sends `X-Forwarded-Host` and `X-Forwarded-Proto` — Caddy, Nginx Proxy Manager and Cloudflare Tunnel do — or when your public address is in `auth.passkey_allowed_origins` or `server.allowed_origins`. A refused request names the setting to add
+- **Building from source needs Bun 1.4.3 or newer**, since the type check is now `bun check`. `install-local.sh` says so instead of reporting a type error that does not exist. The release binaries need no Bun
+- Database migration `0016` creates the `sessions` table and changes nothing else
+
+### Notes
+- Behind a reverse proxy every client shares the proxy's address, so an attacker's failed sign-ins can slow everyone's sign-in through it, by at most 30 s an attempt. Sign-in from the LAN keeps its own address and is unaffected
+- The cross-site check runs as a hook scoped to the API plugins, never a global one: any global hook stops Elysia serving the web UI's pages. Page serving was checked on a compiled binary, with and without TLS
+- Dependencies updated within their ranges — Elysia 1.4.30, React 19.3.1, viewerjs 1.15 among them
+- Test suite **217 → 307**, each new guard confirmed by restoring the old behaviour and watching its test fail. One test fires a cross-site request at every state-changing API route
+
+---
+
 ## v0.12.0 — 2026-09-20
 
 The file manager gets a way to reach the machine's other disks, a filter for the folder
