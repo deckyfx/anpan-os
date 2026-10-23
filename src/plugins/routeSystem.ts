@@ -1,45 +1,20 @@
 import { Elysia } from "elysia";
-import { dirname, join } from "node:path";
-import { chmod, rename, rm } from "node:fs/promises";
-import { randomUUID } from "node:crypto";
 import { authGuard } from "./authGuard";
 import { metrics, ports, service, shareProvider } from "../lib/providers";
 import {
   ARCH, FEATURES, PLATFORM, PLATFORM_LABEL,
-  binaryName, currentBinaryPath, detectSamba,
+  detectSamba,
 } from "../lib/platform";
 import { bins, commands } from "../lib/commands";
 import { envConfig } from "../env-config";
 import { listDrives } from "../lib/drives";
-
-function semverGt(a: string, b: string): boolean {
-  const parse = (v: string) => v.replace(/^v/, "").split(".").map(n => parseInt(n, 10) || 0);
-  const [aMaj = 0, aMin = 0, aPatch = 0] = parse(a);
-  const [bMaj = 0, bMin = 0, bPatch = 0] = parse(b);
-  if (aMaj !== bMaj) return aMaj > bMaj;
-  if (aMin !== bMin) return aMin > bMin;
-  return aPatch > bPatch;
-}
+import { UpdateError, downloadVerified, fetchLatestRelease, installBinary, isNewer, withUpdateLock } from "../lib/self-update";
 
 // Injected at build time via define; falls back to reading package.json from CWD in dev.
 const APP_VERSION: string =
   (process.env.APP_VERSION as string | undefined) ??
   ((await Bun.file("package.json").json()) as { version?: string }).version ??
   "0.0.0";
-
-/**
- * True while a self-update is running.
- *
- * /update downloads ~70 MB, stages it beside the target and renames over it. Two of those
- * at once interleave: one request can still be writing its staged file while the other
- * renames, and the binary the service launches from ends up partial. A double-click on the
- * update button is enough to produce it, so the second caller is refused rather than
- * allowed to race the first.
- *
- * Process-local, which is the right scope: the lock exists to protect this process's own
- * write, and only one anpan-os owns a given install.
- */
-let updateInFlight = false;
 
 export function systemPlugin(jwtSecret: string) {
   return new Elysia({ prefix: "/api/system" })
@@ -113,41 +88,17 @@ export function systemPlugin(jwtSecret: string) {
     })
     .get("/update-check", async () => {
       try {
-        const res = await fetch(
-          "https://api.github.com/repos/deckyfx/anpan-os/releases/latest",
-          {
-            headers: { "User-Agent": "anpan-os" },
-            signal: AbortSignal.timeout(10_000),
-          },
-        );
-        if (!res.ok) return { updateAvailable: false, currentVersion: APP_VERSION, error: `GitHub API returned ${res.status}` };
-
-        const data = await res.json() as {
-          tag_name: string;
-          body?: string;
-          assets?: { name: string; browser_download_url: string }[];
-        };
-
-        const latestVersion = (data.tag_name ?? "").replace(/^v/, "");
-        const updateAvailable = latestVersion !== "" && semverGt(latestVersion, APP_VERSION);
-
-        // Asset for *this* host, not always the Linux one — downloading a Linux ELF
-        // onto a Mac and marking it executable produces a service that cannot start.
-        const asset       = binaryName();
-        const assets      = data.assets ?? [];
-        const downloadUrl = assets.find(a => a.name === asset)?.browser_download_url ?? "";
-        const sha256Url   = assets.find(a => a.name === `${asset}.sha256`)?.browser_download_url ?? "";
-
+        const release = await fetchLatestRelease();
         return {
-          currentVersion: APP_VERSION,
-          latestVersion,
-          updateAvailable,
-          releaseNotes: data.body ?? "",
-          downloadUrl,
-          sha256Url,
+          currentVersion:  APP_VERSION,
+          latestVersion:   release.version,
+          updateAvailable: release.version !== "" && isNewer(release.version, APP_VERSION),
+          releaseNotes:    release.notes,
+          downloadUrl:     release.binaryUrl,
+          sha256Url:       release.sha256Url,
         };
       } catch (e) {
-        return { updateAvailable: false, currentVersion: APP_VERSION, error: String(e) };
+        return { updateAvailable: false, currentVersion: APP_VERSION, error: e instanceof Error ? e.message : String(e) };
       }
     })
     .post("/update", async ({ set }) => {
@@ -165,99 +116,31 @@ export function systemPlugin(jwtSecret: string) {
         return { error: "Self-update is only available for an installed binary, not a source-mode run." };
       }
 
-      if (updateInFlight) {
-        set.status = 409;
-        return { error: "An update is already in progress." };
-      }
-      updateInFlight = true;
-      try {
-        return await runUpdate(set);
-      } finally {
-        updateInFlight = false;
-      }
+      return runUpdate(set);
     });
 }
 
 /**
- * Download the latest release and replace the running binary.
+ * Download the latest release, verify it and replace the running binary, then restart.
  *
- * Split out of the route so the in-flight guard can wrap it in a try/finally without the
- * early returns below leaking the lock.
+ * The steps live in lib/self-update, shared with `anpan-os --upgrade`; this maps their
+ * failures to HTTP statuses. The update lock is held across the download and the replace,
+ * so neither a second click nor a CLI upgrade in another process can interleave with it.
  */
 async function runUpdate(set: { status?: number | string }): Promise<Record<string, unknown>> {
+  try {
+    await withUpdateLock(async () => {
+      const release = await fetchLatestRelease();
+      await installBinary(await downloadVerified(release));
+    });
+  } catch (e) {
+    if (e instanceof UpdateError) { set.status = e.status; return { error: e.message }; }
+    throw e;
+  }
 
-      // Re-fetch latest release to get download URLs
-      const releaseRes = await fetch(
-        "https://api.github.com/repos/deckyfx/anpan-os/releases/latest",
-        { headers: { "User-Agent": "anpan-os" }, signal: AbortSignal.timeout(15_000) },
-      );
-      if (!releaseRes.ok) { set.status = 502; return { error: `GitHub API returned ${releaseRes.status}` }; }
-
-      const release = await releaseRes.json() as {
-        assets?: { name: string; browser_download_url: string }[];
-      };
-
-      const asset     = binaryName();
-      const assets    = release.assets ?? [];
-      const binaryUrl = assets.find(a => a.name === asset)?.browser_download_url;
-      const sha256Url = assets.find(a => a.name === `${asset}.sha256`)?.browser_download_url;
-
-      if (!binaryUrl || !sha256Url) { set.status = 404; return { error: `No release asset found for ${asset}` }; }
-
-      // Download checksum file
-      const sha256Res = await fetch(sha256Url, { signal: AbortSignal.timeout(15_000) });
-      if (!sha256Res.ok) { set.status = 502; return { error: "Failed to download checksum file" }; }
-      const sha256Text    = await sha256Res.text();
-      const expectedHash  = sha256Text.trim().split(/\s+/)[0] ?? "";
-
-      const binRes = await fetch(binaryUrl, { signal: AbortSignal.timeout(120_000) });
-      if (!binRes.ok) { set.status = 502; return { error: "Failed to download binary" }; }
-      const binaryBuffer = await binRes.arrayBuffer();
-
-      // Verify SHA256
-      const hasher   = new Bun.CryptoHasher("sha256");
-      hasher.update(binaryBuffer);
-      const actualHash = hasher.digest("hex");
-      if (actualHash !== expectedHash) { set.status = 422; return { error: "SHA256 mismatch — download may be corrupted" }; }
-
-      // Replace the binary this process is running from, wherever the installer put it,
-      // rather than assuming /usr/local/bin — a self-update that writes somewhere other
-      // than the path the service unit launches would appear to succeed and change nothing.
-      const target = currentBinaryPath();
-
-      /**
-       * Stage the replacement beside the binary it replaces, never in the temp directory.
-       *
-       * rename() is atomic only within a single filesystem, and the temp directory is
-       * routinely on another — tmpfs on Linux, a per-user sandbox under /var/folders on
-       * macOS, or wherever a custom TMPDIR points. Across filesystems `mv` silently
-       * degrades to copy-then-unlink, so a crash, a full disk or a kill part-way through
-       * leaves a half-written executable at the exact path the service launches from, and
-       * the machine has no working anpan-os until someone reinstalls it by hand.
-       *
-       * Writing the download straight into the target's own directory keeps the final step
-       * a same-filesystem rename, which either happens completely or not at all. The name
-       * is unique and dotted so a partial file is neither picked up nor mistaken for the
-       * real binary if this process dies before the rename.
-       */
-      const staged = join(dirname(target), `.anpan-os-update-${process.pid}-${randomUUID()}`);
-
-      try {
-        await Bun.write(staged, binaryBuffer);
-        await chmod(staged, 0o755);
-        await rename(staged, target);
-      } catch (e) {
-        // The staged file is ours alone; leaving it behind would accumulate a copy of the
-        // binary in /usr/local/bin on every failed update.
-        await rm(staged, { force: true }).catch(() => {});
-        set.status = 500;
-        return { error: `Could not replace ${target}: ${e instanceof Error ? e.message : String(e)}` };
-      }
-
-      // Fire-and-forget restart (the response is sent before the process dies).
-      const restart = service.restartSelfCommand();
-      if (restart) void Bun.$`${restart}`.quiet().nothrow();
-
+  // Fire-and-forget restart (the response is sent before the process dies).
+  const restart = service.restartSelfCommand();
+  if (restart) void Bun.$`${restart}`.quiet().nothrow();
   return { ok: true, restarted: restart !== null };
 }
 
