@@ -65,11 +65,18 @@ export async function fetchLatestRelease(fetchImpl: typeof fetch = fetch): Promi
   }, "look up the latest release");
   if (!res.ok) throw new UpdateError(`GitHub API returned ${res.status}`, 502);
 
-  const data = await res.json() as {
+  // The body is read separately from the response, and can fail on its own: a proxy's HTML
+  // error page instead of JSON, or a connection dropped mid-read.
+  let data: {
     tag_name?: string;
     body?: string;
     assets?: { name: string; browser_download_url: string }[];
   };
+  try {
+    data = await res.json();
+  } catch (e) {
+    throw new UpdateError(`GitHub's release description could not be read: ${e instanceof Error ? e.message : String(e)}`, 502);
+  }
 
   // The asset for this host, not always the Linux one: a Linux ELF installed on a Mac and
   // marked executable produces a service that cannot start.
@@ -101,7 +108,13 @@ export async function downloadVerified(
 
   const sumRes = await fetchUpstream(fetchImpl, release.sha256Url, { signal: AbortSignal.timeout(15_000) }, "download the checksum");
   if (!sumRes.ok) throw new UpdateError("Failed to download checksum file", 502);
-  const expected = (await sumRes.text()).trim().split(/\s+/)[0] ?? "";
+  let sumText: string;
+  try {
+    sumText = await sumRes.text();
+  } catch (e) {
+    throw new UpdateError(`The checksum file could not be read: ${e instanceof Error ? e.message : String(e)}`, 502);
+  }
+  const expected = sumText.trim().split(/\s+/)[0] ?? "";
 
   // Ten minutes: the binary is about 90 MB, and a whole-download limit of two minutes failed
   // anything slower than about 0.75 MB/s.

@@ -103,6 +103,23 @@ describe("network failures", () => {
     }
   });
 
+  test("an unreadable release description or checksum body is an UpdateError with 502", async () => {
+    const api = "https://api.github.com/repos/deckyfx/anpan-os/releases/latest";
+    // A proxy's HTML error page where JSON was expected.
+    const err1 = await fetchLatestRelease(fakeFetch({ [api]: () => new Response("<html>bad gateway</html>") })).catch(e => e);
+    expect(err1).toBeInstanceOf(UpdateError);
+    expect(err1.status).toBe(502);
+
+    // The checksum body failing while it is read.
+    const failing = new ReadableStream<Uint8Array>({ pull(c) { c.error(new Error("connection reset")); } });
+    const err2 = await downloadVerified(release, undefined, fakeFetch({
+      "https://x/sum": () => new Response(failing),
+      "https://x/bin": () => new Response("x"),
+    })).catch(e => e);
+    expect(err2).toBeInstanceOf(UpdateError);
+    expect(err2.status).toBe(502);
+  });
+
   test("a download that drops part-way is an UpdateError with 502", async () => {
     let sent = false;
     const dropping = new ReadableStream<Uint8Array>({
