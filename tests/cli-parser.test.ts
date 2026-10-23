@@ -18,6 +18,13 @@ describe("parseCli", () => {
     expect(parseCli(["frobnicate"])).toEqual({ type: "invalid", message: "Unknown command: frobnicate." });
   });
 
+  test("names every object inherits are unknown words too, not modifiers", () => {
+    // `in` matched the prototype chain, so these passed as modifiers and started the server.
+    for (const word of ["constructor", "toString", "__proto__", "hasOwnProperty"]) {
+      expect(parseCli([word]).type).toBe("invalid");
+    }
+  });
+
   test("an unknown option is an error, never the server", () => {
     expect(parseCli(["--upgarde"]).type).toBe("invalid");
     expect(parseCli(["--port", "5000"]).type).toBe("invalid");

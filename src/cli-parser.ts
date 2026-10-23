@@ -78,7 +78,9 @@ export function parseCli(args: readonly string[] = Bun.argv.slice(2)): CliResult
   const repairIdx = args.indexOf("--compose-repair");
 
   for (const [i, arg] of args.entries()) {
-    if ((COMMANDS as readonly string[]).includes(arg) || arg in MODIFIERS) continue;
+    // Own properties only: `in` also matches what every object inherits, so `constructor`,
+    // `toString` or `__proto__` counted as modifiers and fell through to starting the server.
+    if ((COMMANDS as readonly string[]).includes(arg) || Object.hasOwn(MODIFIERS, arg)) continue;
     // Stack names are the one bare word allowed, and only after --compose-repair.
     if (!arg.startsWith("-") && repairIdx !== -1 && i > repairIdx) continue;
 
