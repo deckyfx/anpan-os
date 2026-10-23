@@ -89,6 +89,39 @@ describe("downloadVerified", () => {
   });
 });
 
+describe("network failures", () => {
+  const release: LatestRelease = { version: "9.9.9", notes: "", asset: "a", binaryUrl: "https://x/bin", sha256Url: "https://x/sum" };
+  const unreachable = (async () => { throw new TypeError("fetch failed"); }) as unknown as typeof fetch;
+
+  test("an unreachable GitHub is an UpdateError with 502, not a crash", async () => {
+    // Escaping as a bare TypeError, it was answered as a server error and printed raw.
+    for (const attempt of [fetchLatestRelease(unreachable), downloadVerified(release, undefined, unreachable)]) {
+      const err = await attempt.catch(e => e);
+      expect(err).toBeInstanceOf(UpdateError);
+      expect(err.status).toBe(502);
+      expect(err.message).toContain("Could not reach GitHub");
+    }
+  });
+
+  test("a download that drops part-way is an UpdateError with 502", async () => {
+    let sent = false;
+    const dropping = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (!sent) { sent = true; controller.enqueue(new Uint8Array(1024)); return; }
+        controller.error(new Error("connection reset"));
+      },
+    });
+    const fetchImpl = fakeFetch({
+      "https://x/sum": () => new Response(`${"0".repeat(64)}  a`),
+      "https://x/bin": () => new Response(dropping),
+    });
+    const err = await downloadVerified(release, undefined, fetchImpl).catch(e => e);
+    expect(err).toBeInstanceOf(UpdateError);
+    expect(err.status).toBe(502);
+    expect(err.message).toContain("interrupted");
+  });
+});
+
 describe("installBinary", () => {
   test("replaces the target, executable, leaving nothing staged beside it", async () => {
     const dir = mkdtempSync(join(root, "install-"));

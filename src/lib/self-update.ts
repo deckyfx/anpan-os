@@ -21,6 +21,21 @@ export class UpdateError extends Error {
   }
 }
 
+/**
+ * Fetch, turning a network failure into an UpdateError.
+ *
+ * Unreachable GitHub, a timeout or a reset connection otherwise escaped as a bare TypeError:
+ * the web route answered it as a server crash (500, with a stack trace in the log) and the
+ * CLI printed the raw exception. It is an upstream failure, so 502 with what was attempted.
+ */
+async function fetchUpstream(fetchImpl: typeof fetch, url: string, init: RequestInit, what: string): Promise<Response> {
+  try {
+    return await fetchImpl(url, init);
+  } catch (e) {
+    throw new UpdateError(`Could not reach GitHub to ${what}: ${e instanceof Error ? e.message : String(e)}`, 502);
+  }
+}
+
 /** Whether version `candidate` is newer than `current`. Tolerates a leading "v". */
 export function isNewer(candidate: string, current: string): boolean {
   const parse = (v: string) => v.replace(/^v/, "").split(".").map(n => Number.parseInt(n, 10) || 0);
@@ -44,10 +59,10 @@ export interface LatestRelease {
 
 /** Look up the latest release on GitHub. */
 export async function fetchLatestRelease(fetchImpl: typeof fetch = fetch): Promise<LatestRelease> {
-  const res = await fetchImpl(LATEST_RELEASE_URL, {
+  const res = await fetchUpstream(fetchImpl, LATEST_RELEASE_URL, {
     headers: { "User-Agent": "anpan-os" },
     signal: AbortSignal.timeout(15_000),
-  });
+  }, "look up the latest release");
   if (!res.ok) throw new UpdateError(`GitHub API returned ${res.status}`, 502);
 
   const data = await res.json() as {
@@ -84,24 +99,29 @@ export async function downloadVerified(
     throw new UpdateError(`No release asset found for ${release.asset}`, 404);
   }
 
-  const sumRes = await fetchImpl(release.sha256Url, { signal: AbortSignal.timeout(15_000) });
+  const sumRes = await fetchUpstream(fetchImpl, release.sha256Url, { signal: AbortSignal.timeout(15_000) }, "download the checksum");
   if (!sumRes.ok) throw new UpdateError("Failed to download checksum file", 502);
   const expected = (await sumRes.text()).trim().split(/\s+/)[0] ?? "";
 
   // Ten minutes: the binary is about 90 MB, and a whole-download limit of two minutes failed
   // anything slower than about 0.75 MB/s.
-  const binRes = await fetchImpl(release.binaryUrl, { signal: AbortSignal.timeout(600_000) });
+  const binRes = await fetchUpstream(fetchImpl, release.binaryUrl, { signal: AbortSignal.timeout(600_000) }, "download the binary");
   if (!binRes.ok || !binRes.body) throw new UpdateError("Failed to download binary", 502);
 
   const total  = Number(binRes.headers.get("content-length")) || null;
   const hasher = new Bun.CryptoHasher("sha256");
   const chunks: Uint8Array[] = [];
   let received = 0;
-  for await (const chunk of binRes.body) {
-    hasher.update(chunk);
-    chunks.push(chunk);
-    received += chunk.byteLength;
-    onProgress?.(received, total);
+  try {
+    for await (const chunk of binRes.body) {
+      hasher.update(chunk);
+      chunks.push(chunk);
+      received += chunk.byteLength;
+      onProgress?.(received, total);
+    }
+  } catch (e) {
+    // The connection can also drop part-way, after the response has started.
+    throw new UpdateError(`Download interrupted after ${received} bytes: ${e instanceof Error ? e.message : String(e)}`, 502);
   }
 
   if (hasher.digest("hex") !== expected) {
