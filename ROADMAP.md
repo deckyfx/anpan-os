@@ -1,5 +1,36 @@
 # Roadmap
 
+## v0.13.1 — 2026-10-23
+
+A command-line release. `anpan-os --upgrade` updates an installed binary from the terminal,
+a mistyped command no longer starts a server, and the binary stops taking configuration
+from whatever folder it happens to be started in.
+
+### Security
+- **The binary ran code from the folder it was started in.** Bun reads `.env` and `bunfig.toml` from the working directory by default, even in a compiled executable, and `bunfig.toml` can name scripts to preload. v0.13.0 runs such a script before doing anything else — even for `--version` — so a `bunfig.toml` planted in a folder where someone later ran `sudo anpan-os --doctor` would run as root. Compiled binaries now read neither file; `bun run` from source still reads both
+
+### Bug fixes
+- **Any unrecognised argument started a full server.** The command-line parser fell back to "serve", so `anpan-os upgrade` — a command that did not exist — launched a second anpan-os in the current folder, with that folder's `.env` deciding where its database went. Only a bare `anpan-os` serves now, which is how the systemd and launchd services run it; anything else is a known command or an error, and a bare word that names one gets a hint (`upgrade` → *Did you mean --upgrade?*)
+- **`--help` named `/root/.anpanos` as the config folder**, which no install uses. It now shows the folder the binary actually resolves
+- **The migration lock took a live process for a dead one** when that process belonged to another user. Signalling it fails with "permission denied" rather than "no such process", and every failure counted as death, so a second process could take over a running migration's lock
+- **A network failure during a web update was reported as a server crash.** GitHub being unreachable, a download dropping part-way, or a proxy's error page where JSON was expected now each answer 502 with what went wrong
+
+### New features
+- **`anpan-os --upgrade`** installs the latest release over the running binary and restarts the service; **`--upgrade --check`** only reports whether one is available. It is the web updater's own code, moved out of the HTTP route so both use it: pick this machine's binary, verify its SHA-256, write it beside the current one and rename it into place, then restart through the service manager. It asks for root before downloading 100 MB rather than after, refuses to run from source, and shows progress
+- **One update at a time, across processes.** The web updater guarded against a second update with a flag inside the server, which a terminal upgrade — a separate process — could not see. Both now hold one lock beside the binary
+
+### Upgrading
+- **From v0.13.0, upgrade through the web UI** — the version dialog's **Update now** — since v0.13.0 has no `--upgrade`. From this release on, `sudo anpan-os --upgrade` works too
+- **Restarting the service after `--upgrade` has not yet been exercised on a live install.** It is the command the web updater already uses, and the first real run is the first `--upgrade` after this release. If the service does not come back, `sudo systemctl restart anpan-os` (or `launchctl kickstart`) finishes the job; the new binary is already in place
+- No database migrations
+
+### Notes
+- The update lock is the migration lock, moved into `src/lib/dir-lock.ts` rather than written a second time. Extracting it found a fault in the update path's first version that migrations never reached: with no wait, a caller that cleared a crashed update's lock then gave up anyway, reporting an update already in progress
+- Binaries are now about 108 MB rather than 90 MB. That is Bun 1.4.4's runtime, not anything in this release — v0.13.0's source builds to the same size
+- Test suite **307 → 338**, with the lock and the update steps covered directly for the first time; each new guard confirmed by restoring the old behaviour and watching its test fail
+
+---
+
 ## v0.13.0 — 2026-10-16
 
 A security and correctness release. Sign-in, sessions and cross-site requests are hardened;

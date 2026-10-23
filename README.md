@@ -225,6 +225,34 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now anpan-os
 ```
 
+### Upgrading
+
+Each of these installs the latest release over the existing binary, after verifying its SHA-256 checksum, and restarts the service. The config file and database are kept; any database migrations run on the next start.
+
+**From the terminal** (v0.13.1 and later):
+
+```bash
+anpan-os --upgrade --check   # is a newer release out? (no root needed)
+sudo anpan-os --upgrade      # download, verify, install, restart
+```
+
+**From the web UI:** open the version dialog and choose **Update now**.
+
+**With the install script:** re-run the [one-liner](#one-liner-linux-and-macos). It also does what the other two cannot: install a specific release with `--release`, or roll back to an older one.
+
+Notes:
+
+- `--upgrade` replaces the binary it was started from, wherever that is, so it needs write access there. That is why it needs `sudo` for `/usr/local/bin/anpan-os`. It checks this before downloading anything.
+- Only one update runs at a time. If a terminal upgrade and a web update overlap, the second one is refused and nothing is downloaded.
+- If the service does not come back after an upgrade, restart it yourself: the new binary is already in place.
+
+  ```bash
+  sudo systemctl restart anpan-os                               # Linux
+  sudo launchctl kickstart -k system/io.anpan.anpan-os          # macOS
+  ```
+
+- v0.13.0 and earlier have no `--upgrade`. Upgrade those through the web UI or the install script; from then on, `--upgrade` works.
+
 ---
 
 ## Getting Started (development)
@@ -252,10 +280,11 @@ Open `http://localhost:3000` and complete the setup wizard on first run.
 
 ## CLI
 
-Running `anpan-os` with no arguments starts the server. These flags run a single task and exit:
+Running `anpan-os` with no arguments starts the server. These flags run a single task and exit. Any other argument is an error, so a mistyped command never starts a second server:
 
 | Flag | Purpose |
 | --- | --- |
+| `--upgrade [--check]` | Install the latest release and restart the service. With `--check`, only report whether one is available. See [Upgrading](#upgrading) |
 | `--doctor` | Check required system binaries and report what is missing |
 | `--compose-doctor [--all]` | Report which compose file each stack's containers were created from. Exits non-zero when any stack needs repair, so it can gate a deploy script. `--all` lists healthy stacks too |
 | `--compose-repair <stack…>`<br>`--compose-repair --all` | Re-anchor stacks onto the managed compose folder. Containers are recreated; named volumes and networks are kept |
