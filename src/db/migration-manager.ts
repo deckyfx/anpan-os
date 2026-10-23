@@ -4,11 +4,12 @@ import { migrate } from "drizzle-orm/bun-sqlite/migrator";
 import { sql } from "drizzle-orm";
 import { config } from "../config";
 import { envConfig } from "../env-config";
+import { DirLock, LockBusyError } from "../lib/dir-lock";
 import {
   embeddedMigrations,
   embeddedMigrationCount,
 } from "./migrations-embedded";
-import { mkdirSync, rmSync, readFileSync, writeFileSync, statSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { readdir, rm } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
@@ -39,238 +40,31 @@ export class MigrationManager {
     ".migrations",
   );
 
-  /** Lock directory guarding materialise → preflight → migrate. */
-  private static readonly lockDir = join(
-    envConfig.RUNTIME_CONFIG_DIR,
-    ".migrations.lock",
-  );
-
   /**
-   * Mutex serialising reclamation of {@link lockDir}.
+   * Guards materialise → preflight → migrate.
    *
-   * Deciding correctly that a lock is abandoned is not enough: two waiters can reach that
-   * conclusion together, the first deletes and re-creates the lock, and the second then
-   * deletes the *replacement* — a live one. Deletion therefore happens only while holding
-   * this second lock, so at most one process is ever between the delete and the re-create.
+   * Two processes can reach that sequence at once — a service restart overlapping its
+   * predecessor, or `bun run migrate` while the service is up. Without a lock they both
+   * rewrite the migrations directory, and an older build can delete the very files a newer
+   * one is midway through applying. See DirLock for how abandoned locks are reclaimed.
    */
-  private static readonly reclaimDir = join(
-    envConfig.RUNTIME_CONFIG_DIR,
-    ".migrations.reclaim",
-  );
+  private static readonly lock = new DirLock({
+    lockDir:    join(envConfig.RUNTIME_CONFIG_DIR, ".migrations.lock"),
+    reclaimDir: join(envConfig.RUNTIME_CONFIG_DIR, ".migrations.reclaim"),
+    waitMs:     30_000,
+    onReclaim:  () => console.warn("⚠️  Reclaiming an abandoned migration lock"),
+  });
 
-  /** A lock older than this is assumed abandoned even if its PID check is inconclusive. */
-  private static readonly LOCK_STALE_MS = 5 * 60_000;
-
-  /**
-   * Staleness bound for the reclaim mutex. Far shorter than LOCK_STALE_MS because it is
-   * held across a few filesystem calls and never across migration work, so anything older
-   * is a crashed reclaimer rather than a slow one.
-   */
-  private static readonly RECLAIM_STALE_MS = 30_000;
-
-  /**
-   * Run `fn` with exclusive access to the migration sequence.
-   *
-   * Two processes can reach this at once — a service restart overlapping its predecessor,
-   * or `bun run migrate` while the service is up. Without a lock they both rewrite the
-   * migrations directory, and an older build can delete the very files a newer one is
-   * midway through applying.
-   *
-   * mkdir is the lock: it is atomic on every platform this runs on, unlike a
-   * check-then-create on a file. The PID recorded inside lets a genuinely abandoned lock
-   * be reclaimed, which matters because preflight() exits the process on a mismatch and
-   * would otherwise leave the directory behind forever.
-   */
+  /** Run `fn` with exclusive access to the migration sequence, or exit if it stays held. */
   private static async withLock<T>(fn: () => Promise<T>): Promise<T> {
-    const deadline = Date.now() + 30_000;
-
-    for (;;) {
-      try {
-        mkdirSync(this.lockDir); // throws if it already exists
-        writeFileSync(join(this.lockDir, "pid"), this.ownerToken());
-        break;
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-
-        // No `continue` here: reclaim() returns without acting when another process holds
-        // the reclaim mutex or the lock turned out to be live, and skipping the deadline
-        // and backoff below would spin hot and never time out.
-        if (this.lockIsAbandoned()) this.reclaim();
-
-        if (Date.now() > deadline) {
-          console.error(
-            "❌ Another process is migrating and did not finish within 30s.",
-          );
-          console.error(`💡 If nothing is running, remove ${this.lockDir}`);
-          process.exit(1);
-        }
-        await Bun.sleep(250);
-      }
-    }
-
-    const pidFile = join(this.lockDir, "pid");
-    const token = this.ownerToken();
-
-    // Deliberately synchronous I/O here and in the release below, against the usual
-    // preference for Bun.file/Bun.write: the ownership check and the write that follows it
-    // must not be separated by an await. An async heartbeat can also overlap itself, and
-    // the release runs in a finally block where an await point risks the process exiting
-    // between deciding the lock is ours and removing it.
-    //
-    // Refresh the token while the work runs. The age check measures time since
-    // acquisition, so a migration slower than LOCK_STALE_MS would otherwise look
-    // abandoned: another process would reclaim the lock mid-run, and the original would
-    // then delete *its* lock on the way out — losing mutual exclusion in exactly the slow
-    // case the lock exists to protect.
-    const heartbeat: Timer = setInterval(() => {
-      try {
-        // Refresh only a lock still recorded as ours. Writing unconditionally would let a
-        // displaced owner stamp its token over the current one, and the real holder would
-        // then fail its own release check while we deleted a lock we no longer hold.
-        if (readFileSync(pidFile, "utf8").trim() !== token) {
-          clearInterval(heartbeat);
-          return;
-        }
-        writeFileSync(pidFile, token);
-      } catch {
-        /* reclaimed or removed — the ownership check below handles it */
-      }
-    }, Math.floor(this.LOCK_STALE_MS / 4));
-
     try {
-      return await fn();
-    } finally {
-      clearInterval(heartbeat);
-      // Release only a lock still recorded as ours. If it was reclaimed despite the
-      // heartbeat, removing it here would evict whoever holds it now.
-      let stillOurs = false;
-      try { stillOurs = readFileSync(pidFile, "utf8").trim() === token; } catch { /* gone */ }
-      if (stillOurs) rmSync(this.lockDir, { recursive: true, force: true });
-    }
-  }
-
-  /**
-   * Remove an abandoned lock, serialised so no waiter can delete another's live lock.
-   *
-   * The abandonment test is re-run while holding the mutex, because the observation that
-   * sent us here was made outside it and the lock may since have been replaced by a live
-   * owner. Deletion is followed immediately by our own creation attempt: if a waiter on the
-   * fast path wins that race, its mkdir succeeds and ours fails, which is a correct outcome
-   * — exactly one owner either way.
-   */
-  private static reclaim(): void {
-    try {
-      mkdirSync(this.reclaimDir);
+      return await this.lock.run(fn);
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-      // Another process is reclaiming. Let it finish; only clear a mutex left by a crash.
-      try {
-        if (Date.now() - statSync(this.reclaimDir).mtimeMs > this.RECLAIM_STALE_MS) {
-          rmSync(this.reclaimDir, { recursive: true, force: true });
-        }
-      } catch { /* vanished under us — nothing to clear */ }
-      return;
+      if (!(err instanceof LockBusyError)) throw err;
+      console.error("❌ Another process is migrating and did not finish within 30s.");
+      console.error(`💡 If nothing is running, remove ${err.lockDir}`);
+      process.exit(1);
     }
-
-    try {
-      // Already gone — another reclaimer got here first. Without this, lockIsAbandoned()
-      // reports a missing directory as abandoned and we warn about reclaiming nothing.
-      try { statSync(this.lockDir); } catch { return; }
-      if (!this.lockIsAbandoned()) return;   // replaced by a live owner since we looked
-      console.warn("⚠️  Reclaiming an abandoned migration lock");
-      rmSync(this.lockDir, { recursive: true, force: true });
-    } finally {
-      rmSync(this.reclaimDir, { recursive: true, force: true });
-    }
-  }
-
-  /**
-   * Identify the lock owner as more than a PID.
-   *
-   * A PID alone is ambiguous: the owner can die and the number be reused, after which a
-   * liveness check reports "held" forever and every start fails until someone deletes a
-   * directory they have no reason to know about. Linux exposes a process start time in
-   * field 22 of /proc/<pid>/stat, and the pair is unique for as long as the machine is up.
-   */
-  private static ownerToken(): string {
-    return `${process.pid}:${this.startTimeOf(process.pid) ?? "?"}`;
-  }
-
-  /** Process start time in clock ticks, or null where /proc is unavailable. */
-  private static startTimeOf(pid: number): string | null {
-    try {
-      // comm can contain spaces and parentheses, so parse after the last ')'.
-      const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-      return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19] ?? null;
-    } catch {
-      return null;
-    }
-  }
-
-  /**
-   * Grace period for a lock directory that exists but carries no token yet.
-   *
-   * mkdir and the token write cannot be one operation, so there is a window in which a
-   * competing process sees the directory and no owner. Treating that as abandoned would
-   * let it delete a lock another process is in the middle of publishing, and both would
-   * then migrate.
-   */
-  private static readonly LOCK_PUBLISH_GRACE_MS = 15_000;
-
-  /**
-   * True when the lock's owner is gone.
-   *
-   * A live owner is never reclaimed on age alone. The heartbeat can be delayed by
-   * synchronous migration work, and reclaiming on that basis would evict a process that
-   * is still applying migrations. Age is the fallback only where ownership genuinely
-   * cannot be established.
-   */
-  private static lockIsAbandoned(): boolean {
-    let raw: string | null = null;
-    try {
-      raw = readFileSync(join(this.lockDir, "pid"), "utf8").trim();
-    } catch {
-      // Being published right now, or left behind empty. Only the second is reclaimable,
-      // and only once the publish window has passed.
-      return this.lockOlderThan(this.LOCK_PUBLISH_GRACE_MS);
-    }
-
-    const [pidPart, startPart] = raw.split(":");
-    const pid = Number.parseInt(pidPart ?? "", 10);
-    if (!Number.isFinite(pid) || pid <= 0) return this.lockOlderThan(this.LOCK_STALE_MS);
-
-    let alive = true;
-    try { process.kill(pid, 0); } catch { alive = false; }
-    if (!alive) return true;                       // owner is gone: reclaimable
-
-    const recordedStart = startPart && startPart !== "?" ? startPart : null;
-    const currentStart  = this.startTimeOf(pid);
-
-    // Same PID and same start time: definitively the live owner. Never reclaim, however
-    // old the token looks — a slow migration must not be interrupted.
-    if (recordedStart && currentStart) return recordedStart !== currentStart;
-
-    // Start times unavailable, so a recycled PID cannot be ruled out. Age decides.
-    return this.lockOlderThan(this.LOCK_STALE_MS);
-  }
-
-  /**
-   * Whether the lock was last touched longer ago than `ms`.
-   *
-   * Uses statSync rather than Bun.file().lastModified: the latter does not throw for a
-   * missing file, and the value it returns makes every comparison here false, which turned
-   * an abandoned empty lock into one that could never be reclaimed.
-   */
-  private static lockOlderThan(ms: number): boolean {
-    // Token file if it exists (the heartbeat keeps it fresh), else the directory itself.
-    for (const path of [join(this.lockDir, "pid"), this.lockDir]) {
-      try {
-        return Date.now() - statSync(path).mtimeMs > ms;
-      } catch {
-        continue;
-      }
-    }
-    return true;                                   // lock vanished from under us
   }
 
   /**
