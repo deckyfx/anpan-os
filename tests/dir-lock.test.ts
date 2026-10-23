@@ -78,6 +78,16 @@ describe("DirLock", () => {
     await expect(lock().run(async () => {})).rejects.toBeInstanceOf(LockBusyError);
   });
 
+  test.skipIf(process.getuid?.() === 0)("an owner this process may not signal is alive, not dead", async () => {
+    // PID 1 always exists and belongs to root, so signalling it from an ordinary user fails
+    // with EPERM, not ESRCH. Taking every error for death reclaimed a running owner's lock.
+    const start = hasProc
+      ? readFileSync("/proc/1/stat", "utf8").split(") ")[1]?.split(" ")[19] ?? "?"
+      : "?";
+    plant(`1:${start}`);
+    await expect(lock().run(async () => {})).rejects.toBeInstanceOf(LockBusyError);
+  });
+
   test.skipIf(!hasProc)("a live owner is not reclaimed however old its token looks", async () => {
     // Work can starve the heartbeat; reclaiming a live owner on age would evict it mid-work.
     plant(ownToken(), 60 * 60_000);

@@ -193,8 +193,11 @@ export class DirLock {
     const pid = Number.parseInt(pidPart ?? "", 10);
     if (!Number.isFinite(pid) || pid <= 0) return this.olderThan(this.staleMs);
 
+    // Only ESRCH means the process is gone. EPERM means it exists but belongs to another
+    // user -- a root-owned owner seen from an ordinary one -- and treating every error as
+    // death had that caller try to reclaim a lock whose owner was still running.
     let alive = true;
-    try { process.kill(pid, 0); } catch { alive = false; }
+    try { process.kill(pid, 0); } catch (e) { alive = (e as NodeJS.ErrnoException).code !== "ESRCH"; }
     if (!alive) return true;                       // owner is gone: reclaimable
 
     const recordedStart = startPart && startPart !== "?" ? startPart : null;
