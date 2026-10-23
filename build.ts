@@ -52,7 +52,17 @@ for (const { target, outfile } of targets) {
 
   const result = await Bun.build({
     entrypoints: ["./src/index.ts"],
-    compile: { outfile },
+    compile: {
+      outfile,
+      // An installed binary takes its settings from how it was installed, not from the folder
+      // it happens to be run in. By default Bun reads .env and bunfig.toml from the current
+      // directory even in a compiled executable: run from this repo, whose .env sets
+      // RUNTIME_CONFIG_DIR=./configs, the installed binary pointed itself at whatever that
+      // folder held. bunfig.toml can name preload scripts, so a stray one in the working
+      // directory would run inside a binary started with sudo. `bun run` still reads both.
+      autoloadDotenv: false,
+      autoloadBunfig: false,
+    },
     plugins: [twPlugin],
     minify: true,
     target: target as "bun",

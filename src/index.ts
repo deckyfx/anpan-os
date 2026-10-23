@@ -46,6 +46,16 @@ switch (cli.type) {
     await runResetUser(); // exits internally
     break;
   }
+  case "upgrade": {
+    const { runUpgrade } = await import("./cli/upgrade");
+    await runUpgrade(cli.checkOnly); // exits internally
+    break;
+  }
+  case "invalid":
+    console.error(`Error: ${cli.message}\n`);
+    console.error("Run 'anpan-os --help' for the list of commands.");
+    process.exit(1);
+    break;
   // "serve" falls through to server startup below
 }
 
