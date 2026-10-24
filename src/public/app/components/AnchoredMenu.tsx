@@ -72,6 +72,13 @@ export function AnchoredMenu({ anchor, onClose, className = "", children }: Anch
       <div className="fixed inset-0 z-40" onClick={onClose} />
       <div
         ref={menuRef}
+        // Tab past the last action would reach the page behind the backdrop with the menu still
+        // open. Only a blur with a destination closes it: Safari does not focus a clicked button,
+        // so clicking an action blurs to nothing, and closing then would swallow the click.
+        onBlur={(e) => {
+          const next = e.relatedTarget;
+          if (next instanceof Node && !e.currentTarget.contains(next)) onClose();
+        }}
         className={`fixed z-41 overflow-y-auto bg-gray-800 border border-gray-700 rounded-xl shadow-2xl p-1 text-sm ${className}`}
         style={{
           left: pos?.left ?? 0,
