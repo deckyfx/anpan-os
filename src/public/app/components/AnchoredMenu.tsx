@@ -47,7 +47,7 @@ export function AnchoredMenu({ anchor, onClose, className = "", children }: Anch
   // Focus the first action once the menu is visible: a hidden element cannot take focus.
   const placed = pos !== null;
   useEffect(() => {
-    if (placed) menuRef.current?.querySelector<HTMLElement>("button")?.focus({ preventScroll: true });
+    if (placed) menuRef.current?.querySelector<HTMLElement>("button:not(:disabled)")?.focus({ preventScroll: true });
   }, [placed]);
 
   // Hand focus back to the trigger — unless something else took it, such as the dialog an
