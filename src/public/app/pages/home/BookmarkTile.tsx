@@ -1,6 +1,7 @@
-import { useState, useEffect } from "react";
+import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
 import { Globe, MoreVertical, StickyNote, Pencil, Trash2, ExternalLink } from "lucide-react";
 import type { Bookmark, BookmarkAction } from "./types";
+import { AnchoredMenu } from "../../components/AnchoredMenu";
 
 // ─── Favicon img ─────────────────────────────────────────────────────────────
 
@@ -23,8 +24,9 @@ function FaviconImg({ src, title }: { src: string | null; title: string }) {
 
 // ─── Context menu ─────────────────────────────────────────────────────────────
 
-function TileMenu({ bookmark, onAction, onClose }: {
+function TileMenu({ bookmark, anchor, onAction, onClose }: {
   bookmark: Bookmark;
+  anchor: RefObject<HTMLButtonElement | null>;
   onAction: (action: BookmarkAction) => void;
   onClose: () => void;
 }) {
@@ -32,26 +34,23 @@ function TileMenu({ bookmark, onAction, onClose }: {
   const item = "w-full flex items-center gap-2.5 px-3 py-1.5 rounded-lg hover:bg-gray-700 text-gray-200 transition-colors";
 
   return (
-    <>
-      <div className="fixed inset-0 z-10" onClick={onClose} />
-      <div className="absolute top-8 right-0 z-20 w-44 bg-gray-800 border border-gray-700 rounded-xl shadow-2xl p-1 text-sm">
-        <button className={item} onClick={() => act("edit")}>
-          <Pencil size={14} className="text-amber-400 shrink-0" /> Edit
-        </button>
-        <button className={item} onClick={() => act("note")}>
-          <StickyNote size={14} className={bookmark.note ? "text-amber-400 shrink-0" : "text-gray-400 shrink-0"} />
-          Note
-          {bookmark.note && <span className="ml-auto w-1.5 h-1.5 rounded-full bg-amber-400" />}
-        </button>
-        <div className="border-t border-gray-700 my-1 mx-1" />
-        <button
-          className="w-full flex items-center gap-2.5 px-3 py-1.5 rounded-lg hover:bg-red-900/40 text-red-400 transition-colors"
-          onClick={() => act("delete")}
-        >
-          <Trash2 size={14} className="shrink-0" /> Delete…
-        </button>
-      </div>
-    </>
+    <AnchoredMenu anchor={anchor} onClose={onClose} className="w-44">
+      <button className={item} onClick={() => act("edit")}>
+        <Pencil size={14} className="text-amber-400 shrink-0" /> Edit
+      </button>
+      <button className={item} onClick={() => act("note")}>
+        <StickyNote size={14} className={bookmark.note ? "text-amber-400 shrink-0" : "text-gray-400 shrink-0"} />
+        Note
+        {bookmark.note && <span className="ml-auto w-1.5 h-1.5 rounded-full bg-amber-400" />}
+      </button>
+      <div className="border-t border-gray-700 my-1 mx-1" />
+      <button
+        className="w-full flex items-center gap-2.5 px-3 py-1.5 rounded-lg hover:bg-red-900/40 text-red-400 transition-colors"
+        onClick={() => act("delete")}
+      >
+        <Trash2 size={14} className="shrink-0" /> Delete…
+      </button>
+    </AnchoredMenu>
   );
 }
 
@@ -64,6 +63,8 @@ export interface BookmarkTileProps {
 
 export function BookmarkTile({ bookmark, onAction }: BookmarkTileProps) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const menuButton = useRef<HTMLButtonElement>(null);
+  const closeMenu  = useCallback(() => setMenuOpen(false), []);
 
   // Resolve icon: explicit icon URL → origin favicon → Globe fallback
   let iconSrc: string | null = bookmark.icon ?? null;
@@ -106,6 +107,7 @@ export function BookmarkTile({ bookmark, onAction }: BookmarkTileProps) {
       </div>
 
       <button
+        ref={menuButton}
         className="absolute top-2 right-2 text-gray-600 hover:text-gray-200 opacity-0 group-hover:opacity-100 transition-opacity w-6 h-6 flex items-center justify-center rounded-lg hover:bg-gray-700"
         onClick={e => { e.stopPropagation(); setMenuOpen(v => !v); }}
         aria-label="More options"
@@ -116,8 +118,9 @@ export function BookmarkTile({ bookmark, onAction }: BookmarkTileProps) {
       {menuOpen && (
         <TileMenu
           bookmark={bookmark}
+          anchor={menuButton}
           onAction={onAction}
-          onClose={() => setMenuOpen(false)}
+          onClose={closeMenu}
         />
       )}
     </div>
