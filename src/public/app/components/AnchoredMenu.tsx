@@ -18,6 +18,9 @@ interface AnchoredMenuProps {
  * wider than its tile lost its left part under the sidebar. In the body, no ancestor's
  * overflow or transform can clip it. See `placeMenu` for where it goes. Clicking outside and
  * Escape close it; scrolling and resizing move it with its button.
+ *
+ * Out of the tile, the menu is no longer next to its trigger in tab order, so focus is moved
+ * into it on open and handed back to the trigger on close.
  */
 export function AnchoredMenu({ anchor, onClose, className = "", children }: AnchoredMenuProps) {
   const menuRef = useRef<HTMLDivElement>(null);
@@ -38,6 +41,23 @@ export function AnchoredMenu({ anchor, onClose, className = "", children }: Anch
     return () => {
       window.removeEventListener("scroll", place, true);
       window.removeEventListener("resize", place);
+    };
+  }, [anchor]);
+
+  // Focus the first action once the menu is visible: a hidden element cannot take focus.
+  const placed = pos !== null;
+  useEffect(() => {
+    if (placed) menuRef.current?.querySelector<HTMLElement>("button")?.focus({ preventScroll: true });
+  }, [placed]);
+
+  // Hand focus back to the trigger — unless something else took it, such as the dialog an
+  // action opened. A focused element that is removed leaves focus on the body.
+  useEffect(() => {
+    const trigger = anchor.current;
+    const menu = menuRef.current;
+    return () => {
+      const active = document.activeElement;
+      if (!active || active === document.body || menu?.contains(active)) trigger?.focus({ preventScroll: true });
     };
   }, [anchor]);
 
