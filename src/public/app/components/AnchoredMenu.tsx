@@ -2,6 +2,9 @@ import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { EDGE, placeMenu } from "../lib/menu-placement";
 
+/** What counts as a menu action that can take focus. */
+const ACTION = 'button:not(:disabled), a[href], [tabindex]:not([tabindex="-1"])';
+
 interface AnchoredMenuProps {
   /** The button that opened the menu; the menu is placed against it. */
   anchor: React.RefObject<HTMLElement | null>;
@@ -47,7 +50,7 @@ export function AnchoredMenu({ anchor, onClose, className = "", children }: Anch
   // Focus the first action once the menu is visible: a hidden element cannot take focus.
   const placed = pos !== null;
   useEffect(() => {
-    if (placed) menuRef.current?.querySelector<HTMLElement>("button:not(:disabled)")?.focus({ preventScroll: true });
+    if (placed) menuRef.current?.querySelector<HTMLElement>(ACTION)?.focus({ preventScroll: true });
   }, [placed]);
 
   // Hand focus back to the trigger — unless something else took it, such as the dialog an
