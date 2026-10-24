@@ -1,5 +1,20 @@
 # Roadmap
 
+## v0.13.2 — 2026-10-24
+
+A fix for the home page's tile menus, which the sidebar cut off.
+
+### Bug fixes
+- **A tile's ⋮ menu was cut off in the leftmost column.** The menu was placed inside its tile, right-aligned to it, and the stack menu is 240 px wide while a tile can be 160 px. In the first column it therefore reached about 80 px past the tile, and the scrolling grid around it clipped that part where the sidebar begins, taking the icons and the start of each label. The stack menu, tall enough to run past the bottom of the window, could be cut off there too. Both tile menus now open over the whole page: lined up with their button, kept inside the window, and opened upwards when there is no room below. They follow their button as the page scrolls
+- **The tile menus work from the keyboard.** Opening one moves focus to its first action; Escape closes it and returns focus to the ⋮ button; tabbing out of it closes it rather than leaving it open over the page
+
+### Notes
+- The menu is a shared `AnchoredMenu`, rendered into the page body so no scrolling or transformed container can clip it, with its placement rules in a pure function that is tested directly
+- Checked with the real tiles in the home page's layout in headless Chrome, where v0.13.1 reproduces the cut-off menu, and on a local install
+- Test suite **338 → 344**
+
+---
+
 ## v0.13.1 — 2026-10-23
 
 A command-line release. `anpan-os --upgrade` updates an installed binary from the terminal,
