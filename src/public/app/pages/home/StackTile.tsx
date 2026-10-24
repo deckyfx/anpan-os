@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useCallback, useRef, useState } from "react";
 import {
   Play, Square, RotateCw, ScrollText, StickyNote,
   Settings2, FileDown, PackagePlus, Trash2,
@@ -8,6 +8,7 @@ import type { ComposeOrigin, Stack, StackAction } from "./types";
 import { buildLaunchUrl, launchLabel, stackStateColor } from "./utils";
 import { useSystemStore } from "../../stores/systemStore";
 import { useUpdateCheckStore } from "../../stores/updateCheckStore";
+import { AnchoredMenu } from "../../components/AnchoredMenu";
 
 const ORIGIN_LABEL: Record<NonNullable<ComposeOrigin>, string> = {
   managed: "⚙ Managed",
@@ -18,12 +19,14 @@ const ORIGIN_LABEL: Record<NonNullable<ComposeOrigin>, string> = {
 
 interface TileMenuProps {
   stack: Stack;
+  /** The ⋮ button the menu opens from. */
+  anchor: React.RefObject<HTMLButtonElement | null>;
   onAction: (action: StackAction) => void;
   onClose: () => void;
 }
 
-/** Floating context menu rendered inside the tile's relative container. */
-function TileMenu({ stack, onAction, onClose }: TileMenuProps) {
+/** The tile's action menu, opened from its ⋮ button. */
+function TileMenu({ stack, anchor, onAction, onClose }: TileMenuProps) {
   const allRunning = stack.state === "running";
   const allStopped = stack.state === "stopped";
   const act = (a: StackAction) => { onAction(a); onClose(); };
@@ -32,11 +35,7 @@ function TileMenu({ stack, onAction, onClose }: TileMenuProps) {
   const item = "w-full flex items-center gap-2.5 px-3 py-1.5 rounded-lg hover:bg-gray-700 text-gray-200 transition-colors";
 
   return (
-    <>
-      <div className="fixed inset-0 z-10" onClick={onClose} />
-      <div
-        className="absolute top-8 right-0 z-20 w-60 bg-gray-800 border border-gray-700 rounded-xl shadow-2xl p-1 text-sm"
-      >
+    <AnchoredMenu anchor={anchor} onClose={onClose} className="w-60">
       {!allRunning && (
         <button className={item} onClick={() => act("start")}>
           <Play size={14} className="text-green-400 shrink-0" /> Start
@@ -108,8 +107,7 @@ function TileMenu({ stack, onAction, onClose }: TileMenuProps) {
       >
         <Trash2 size={14} className="shrink-0" /> Delete Stack…
       </button>
-      </div>
-    </>
+    </AnchoredMenu>
   );
 }
 
@@ -144,6 +142,8 @@ export function StackTile({
   onDragStart, onDragOver, onDrop, onDragEnd,
 }: StackTileProps) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const menuButton  = useRef<HTMLButtonElement>(null);
+  const closeMenu   = useCallback(() => setMenuOpen(false), []);
   const launchUrl   = buildLaunchUrl(stack);
   const title       = stack.meta?.title ?? stack.name;
   const icon        = stack.meta?.icon ?? stack.icon ?? null;
@@ -229,6 +229,7 @@ export function StackTile({
 
       {/* Menu button — top-right corner, revealed on hover */}
       <button
+        ref={menuButton}
         className="absolute top-2 right-2 text-gray-600 hover:text-gray-200 opacity-0 group-hover:opacity-100 transition-opacity w-6 h-6 flex items-center justify-center rounded-lg hover:bg-gray-700"
         onClick={(e) => { e.stopPropagation(); setMenuOpen((v) => !v); }}
         aria-label="More options"
@@ -237,7 +238,7 @@ export function StackTile({
       </button>
 
       {menuOpen && (
-        <TileMenu stack={stack} onAction={onAction} onClose={() => setMenuOpen(false)} />
+        <TileMenu stack={stack} anchor={menuButton} onAction={onAction} onClose={closeMenu} />
       )}
     </div>
   );
