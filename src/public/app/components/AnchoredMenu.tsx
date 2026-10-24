@@ -57,6 +57,7 @@ export function AnchoredMenu({ anchor, onClose, className = "", children }: Anch
           left: pos?.left ?? 0,
           top: pos?.top ?? 0,
           maxHeight: `calc(100vh - ${EDGE * 2}px)`,
+          maxWidth: `calc(100vw - ${EDGE * 2}px)`,
           visibility: pos ? "visible" : "hidden",
         }}
       >
