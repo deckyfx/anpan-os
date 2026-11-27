@@ -381,7 +381,7 @@ async function listRegistryTags(
 
     const body = await res.json() as { tags?: string[] | null };
     names.push(...(body.tags ?? []));
-    next = nextPage(res.headers.get("link"), origin);
+    next = nextPage(res.headers.get("link"), url);
   }
 
   const tags = sortTagsNewestFirst(names.filter(n => !ARTIFACT_TAG_RE.test(n)))
@@ -393,15 +393,17 @@ async function listRegistryTags(
 /**
  * The next page from a `Link: </v2/…?last=x>; rel="next"` header.
  *
- * Followed only on the registry's own origin: the header comes from the registry, and a
- * token for it must not be sent wherever the header points.
+ * The target may be relative to the page just read (`<?last=x>`), so it is resolved against
+ * that URL. It is followed only on the same origin: the header comes from the registry, and
+ * a token for it must not be sent wherever the header points.
  */
-export function nextPage(link: string | null, origin: string): string | null {
+export function nextPage(link: string | null, current: string): string | null {
   const target = link && /<([^>]+)>\s*;\s*rel="?next"?/.exec(link)?.[1];
   if (!target) return null;
   try {
-    const url = new URL(target, origin);
-    return url.origin === origin ? url.href : null;
+    const base = new URL(current);
+    const url = new URL(target, base);
+    return url.origin === base.origin ? url.href : null;
   } catch {
     return null;
   }

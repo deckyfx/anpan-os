@@ -116,6 +116,9 @@ export function MissingStacksDialog({ open, onClose }: {
         useToastStore.getState().push((err.value as { error?: string })?.error ?? "Could not forget the stack", "error");
         return;
       }
+      // A scan started before this forget may still list the stack; let none of them land.
+      ++requestIdRef.current;
+      setLoading(false);
       useUpdateCheckStore.getState().forgetStack(stack.id);
       useToastStore.getState().push(`Forgot ${stack.title || stack.id}`, "success");
       setStacks(prev => prev.filter(s => s.id !== stack.id));

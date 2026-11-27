@@ -133,8 +133,11 @@ describe("helpers", () => {
   });
 
   test("a next-page link to another host is not followed", () => {
-    expect(nextPage('<https://evil.example/v2/x/tags/list>; rel="next"', "https://ghcr.io")).toBeNull();
-    expect(nextPage('</v2/x/tags/list?last=a>; rel="next"', "https://ghcr.io")).toBe("https://ghcr.io/v2/x/tags/list?last=a");
-    expect(nextPage(null, "https://ghcr.io")).toBeNull();
+    const current = "https://ghcr.io/v2/x/tags/list?n=1000";
+    expect(nextPage('<https://evil.example/v2/x/tags/list>; rel="next"', current)).toBeNull();
+    expect(nextPage('</v2/x/tags/list?last=a>; rel="next"', current)).toBe("https://ghcr.io/v2/x/tags/list?last=a");
+    // Query-only targets stay on the endpoint being paged, not the registry root.
+    expect(nextPage('<?last=b&n=1000>; rel="next"', current)).toBe("https://ghcr.io/v2/x/tags/list?last=b&n=1000");
+    expect(nextPage(null, current)).toBeNull();
   });
 });
