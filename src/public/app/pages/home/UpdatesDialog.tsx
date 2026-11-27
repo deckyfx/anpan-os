@@ -1,27 +1,19 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { CheckSquare, Square, Loader2, CheckCircle2, XCircle } from "lucide-react";
+import { useEffect, useState } from "react";
+import { CheckSquare, Square, Loader2 } from "lucide-react";
 import { Dialog } from "../../components/Dialog";
+import { JobView } from "../../components/JobView";
 import { api } from "../../lib/api";
 import { useUpdateCheckStore } from "../../stores/updateCheckStore";
-
-// ─── Types ────────────────────────────────────────────────────────────────────
-
-interface SSEMsg { log?: string; ok?: boolean; error?: string }
-
-interface UpdateResult {
-  stack: string;
-  success: boolean;
-  error?: string;
-}
-
-type Phase = "select" | "updating" | "done";
+import { useJobsStore, readStartAnswer } from "../../stores/jobsStore";
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
 /**
- * Dialog that shows all stacks with available image updates, lets the user
- * select which ones to update, then runs docker-compose pull+up sequentially
- * for each selected stack using the existing pull SSE endpoint.
+ * Dialog that shows all stacks with available image updates, lets the user select which
+ * to update, then updates them as one server-side job.
+ *
+ * The job pulls and redeploys each stack in turn and carries on with this dialog, or the
+ * whole tab, closed. Opened while such a job runs, the dialog shows it.
  */
 export function UpdatesDialog({ open, onClose, onUpdated }: {
   open: boolean;
@@ -29,6 +21,7 @@ export function UpdatesDialog({ open, onClose, onUpdated }: {
   onUpdated: () => void;
 }) {
   const { results, closeDialog } = useUpdateCheckStore();
+  const runningBulk = useJobsStore(s => Object.values(s.jobs).find(j => j.kind === "update-all" && j.status === "running") ?? null);
 
   // Group images with updates by stack
   const stacksWithUpdates = [...new Set(
@@ -38,118 +31,20 @@ export function UpdatesDialog({ open, onClose, onUpdated }: {
   const imagesForStack = (stackName: string) =>
     results.filter(r => r.stack === stackName && r.hasUpdate).map(r => r.image);
 
-  // Phase and selection state
-  const [phase, setPhase]         = useState<Phase>("select");
-  const [selected, setSelected]   = useState<Set<string>>(() => new Set(stacksWithUpdates));
-  const [updateQueue, setQueue]   = useState<string[]>([]);
-  const [current, setCurrent]     = useState<string | null>(null);
-  const [currentLog, setCurrentLog] = useState<string[]>([]);
-  const [updateResults, setUpdateResults] = useState<UpdateResult[]>([]);
+  const [selected, setSelected] = useState<Set<string>>(() => new Set(stacksWithUpdates));
+  const [jobId, setJobId]       = useState<string | null>(null);
+  const [starting, setStarting] = useState(false);
+  const [error, setError]       = useState("");
 
-  // AbortController for the currently-running per-stack pull (outside state to avoid re-renders)
-  const stackAbortRef = useRef<AbortController | null>(null);
-
-  const logRef = useRef<HTMLPreElement | null>(null);
-
-  // Reset to select phase when opened
+  // Reset when opened: show a bulk update already running, else the selection.
   useEffect(() => {
     if (open) {
-      setPhase("select");
       setSelected(new Set(stacksWithUpdates));
-      setQueue([]);
-      setCurrent(null);
-      setCurrentLog([]);
-      setUpdateResults([]);
+      setJobId(runningBulk?.id ?? null);
+      setError("");
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
-
-  // Auto-scroll log
-  useEffect(() => {
-    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
-  }, [currentLog]);
-
-  // Abort current stack and clear queue → useEffect detects empty queue → phase goes to "done"
-  const cancelAll = useCallback(() => {
-    stackAbortRef.current?.abort();
-    setQueue([]);
-  }, []);
-
-  // Run sequential updates when queue changes
-  useEffect(() => {
-    if (phase !== "updating" || updateQueue.length === 0 || current !== null) return;
-
-    const [next, ...rest] = updateQueue;
-    if (!next) {
-      setPhase("done");
-      return;
-    }
-
-    setCurrent(next);
-    setCurrentLog([]);
-    setQueue(rest);
-
-    void (async () => {
-      const abort = new AbortController();
-      stackAbortRef.current = abort;
-      // 5-minute hard guard so a hung SSE stream can't block the queue forever
-      const timeoutId = setTimeout(() => abort.abort(), 5 * 60 * 1000);
-
-      try {
-        // Pass AbortSignal to the fetch so we can cancel the SSE stream
-        const { data, error: err } = await (
-          (api.api.compose.stacks({ name: next }).pull.post as (body?: unknown, opts?: unknown) => Promise<{
-            data: AsyncIterable<{ data: SSEMsg }> | null;
-            error: unknown;
-          }>)(undefined, { fetch: { signal: abort.signal } })
-        );
-
-        if (err || !data) {
-          const msg = err ? ((err as { value?: { error?: string } }).value?.error ?? "Request failed") : "No data";
-          setUpdateResults(prev => [...prev, { stack: next, success: false, error: msg }]);
-          setCurrent(null);
-          return;
-        }
-
-        for await (const event of data as AsyncIterable<{ data: SSEMsg }>) {
-          if (abort.signal.aborted) break;
-          const m = event.data as SSEMsg;
-          if (m.log !== undefined) {
-            setCurrentLog(prev => [...prev, m.log!]);
-          } else if (m.ok) {
-            setUpdateResults(prev => [...prev, { stack: next, success: true }]);
-            setCurrent(null);
-            onUpdated();
-            return;
-          } else if (m.error) {
-            setUpdateResults(prev => [...prev, { stack: next, success: false, error: m.error }]);
-            setCurrent(null);
-            return;
-          }
-        }
-
-        // Stream ended without ok/error (includes abort/timeout)
-        const endMsg = abort.signal.aborted ? "Cancelled" : "Stream ended unexpectedly";
-        setUpdateResults(prev => [...prev, { stack: next, success: false, error: endMsg }]);
-        setCurrent(null);
-      } catch (e) {
-        const errorMsg = abort.signal.aborted ? "Cancelled" : (e instanceof Error ? e.message : String(e));
-        setUpdateResults(prev => [...prev, { stack: next, success: false, error: errorMsg }]);
-        setCurrent(null);
-      } finally {
-        clearTimeout(timeoutId);
-        stackAbortRef.current = null;
-      }
-    })();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [phase, updateQueue, current]);
-
-  // When queue empties and no current task, transition to done
-  useEffect(() => {
-    if (phase === "updating" && current === null && updateQueue.length === 0 && updateResults.length > 0) {
-      setPhase("done");
-    }
-  }, [phase, current, updateQueue, updateResults]);
 
   const toggleStack = (name: string) => {
     setSelected(prev => {
@@ -168,13 +63,21 @@ export function UpdatesDialog({ open, onClose, onUpdated }: {
     }
   };
 
-  const startUpdates = () => {
-    const queue = stacksWithUpdates.filter(s => selected.has(s));
-    if (queue.length === 0) return;
-    setPhase("updating");
-    setUpdateResults([]);
-    setCurrent(null);
-    setQueue(queue);
+  const startUpdates = async () => {
+    const stacks = stacksWithUpdates.filter(name => selected.has(name));
+    if (stacks.length === 0) return;
+    setStarting(true);
+    setError("");
+    try {
+      const { data, error: err } = await api.api.compose["update-all"].post({ stacks });
+      const answer = readStartAnswer(data, err);
+      if (answer.job) setJobId(answer.job.id);
+      else setError(answer.error ?? "Could not start the update");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setStarting(false);
+    }
   };
 
   const handleClose = () => {
@@ -245,100 +148,25 @@ export function UpdatesDialog({ open, onClose, onUpdated }: {
     </div>
   );
 
+
+
   const selectFooter = (
     <>
       <button onClick={handleClose} className="px-4 py-2 text-sm text-gray-400 hover:text-white transition-colors">
         Cancel
       </button>
       <button
-        onClick={startUpdates}
-        disabled={selected.size === 0}
-        className="px-4 py-2 text-sm bg-amber-500 hover:bg-amber-400 text-black font-semibold rounded-lg transition-colors disabled:opacity-40"
+        onClick={() => void startUpdates()}
+        disabled={selected.size === 0 || starting}
+        className="inline-flex items-center gap-2 px-4 py-2 text-sm bg-amber-500 hover:bg-amber-400 text-black font-semibold rounded-lg transition-colors disabled:opacity-40"
       >
+        {starting && <Loader2 size={14} className="animate-spin" />}
         Update {selected.size > 0 ? `${selected.size} stack${selected.size !== 1 ? "s" : ""}` : ""}
       </button>
     </>
   );
 
-  // ─── Updating phase content ──────────────────────────────────────────────
-
-  const allQueued = stacksWithUpdates.filter(s => selected.has(s));
-  const doneCount = updateResults.length;
-  const totalCount = allQueued.length;
-
-  const updatingContent = (
-    <div className="space-y-3">
-      {/* Progress summary */}
-      <div className="flex items-center gap-2 text-sm text-gray-300">
-        <Loader2 size={14} className="animate-spin text-sky-400 shrink-0" />
-        Updating {current ?? "…"} ({doneCount + 1}/{totalCount})
-      </div>
-
-      {/* Completed stacks */}
-      {updateResults.map(r => (
-        <div key={r.stack} className="flex items-center gap-2 text-xs">
-          {r.success
-            ? <CheckCircle2 size={13} className="text-green-400 shrink-0" />
-            : <XCircle size={13} className="text-red-400 shrink-0" />
-          }
-          <span className={r.success ? "text-gray-300" : "text-red-400"}>{r.stack}</span>
-          {r.error && <span className="text-gray-500 truncate">— {r.error}</span>}
-        </div>
-      ))}
-
-      {/* Log for current stack */}
-      {currentLog.length > 0 && (
-        <pre
-          ref={logRef}
-          className="h-48 bg-black rounded-lg border border-gray-700 p-3 text-xs text-green-400 font-mono overflow-y-auto whitespace-pre-wrap"
-        >
-          {currentLog.join("\n")}
-        </pre>
-      )}
-    </div>
-  );
-
-  // Cancel aborts the current pull and clears the remaining queue; dialog transitions to "done"
-  const updatingFooter = (
-    <button
-      onClick={cancelAll}
-      className="px-4 py-2 text-sm text-gray-400 hover:text-white transition-colors"
-    >
-      Cancel
-    </button>
-  );
-
-  // ─── Done phase content ──────────────────────────────────────────────────
-
-  const successCount = updateResults.filter(r => r.success).length;
-  const failCount    = updateResults.filter(r => !r.success).length;
-
-  const doneContent = (
-    <div className="space-y-3">
-      <p className="text-sm text-gray-300">
-        {successCount > 0 && (
-          <span className="text-green-400">{successCount} stack{successCount !== 1 ? "s" : ""} updated successfully. </span>
-        )}
-        {failCount > 0 && (
-          <span className="text-red-400">{failCount} stack{failCount !== 1 ? "s" : ""} failed.</span>
-        )}
-      </p>
-      <div className="space-y-1.5">
-        {updateResults.map(r => (
-          <div key={r.stack} className="flex items-center gap-2 text-xs">
-            {r.success
-              ? <CheckCircle2 size={13} className="text-green-400 shrink-0" />
-              : <XCircle size={13} className="text-red-400 shrink-0" />
-            }
-            <span className={r.success ? "text-gray-300" : "text-red-400"}>{r.stack}</span>
-            {r.error && <span className="text-gray-500 truncate">— {r.error}</span>}
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-
-  const doneFooter = (
+  const jobFooter = (
     <button onClick={handleClose} className="px-4 py-2 text-sm bg-gray-700 hover:bg-gray-600 text-white rounded-lg transition-colors">
       Close
     </button>
@@ -349,23 +177,17 @@ export function UpdatesDialog({ open, onClose, onUpdated }: {
   return (
     <Dialog
       open={open}
-      title={
-        phase === "select"   ? "Available Image Updates" :
-        phase === "updating" ? "Updating Stacks…" :
-                               "Update Complete"
-      }
-      onClose={phase === "updating" ? cancelAll : handleClose}
-      disableBackdropClose={phase === "updating"}
+      title={jobId ? "Updating Stacks" : "Available Image Updates"}
+      onClose={handleClose}
       size="md"
-      footer={
-        phase === "select"   ? selectFooter :
-        phase === "updating" ? updatingFooter :
-                               doneFooter
-      }
+      notification={error ? (
+        <p className="text-red-400 text-sm bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">{error}</p>
+      ) : undefined}
+      footer={jobId ? jobFooter : selectFooter}
     >
-      {phase === "select"   ? selectContent   :
-       phase === "updating" ? updatingContent :
-                              doneContent}
+      {jobId
+        ? <JobView jobId={jobId} logHeight="h-72" onFinished={() => onUpdated()} />
+        : selectContent}
     </Dialog>
   );
 }

@@ -23,14 +23,15 @@ Manage Docker Compose stacks, browse files, monitor system resources, and instal
 ### Docker & Stacks
 - **Compose dashboard** — install, start, stop, restart, and delete stacks
 - **Guided Compose Editor** — Monaco-based YAML editor with syntax highlighting, starter templates, and in-place editing
-- **Live install logs** — real-time streaming of `docker compose up` output
+- **Installs that finish without you** — installs, deploys, updates and migrations run as server jobs: close the tab and they carry on, and the **Jobs** menu in the top bar shows them and their logs again
+- **Checked before it starts** — the compose file, `.env` and tile settings are saved before the first start; a port another app or container already uses stops the install before anything runs; a failed install leaves nothing behind
 - **Live container logs** — per-tab streaming log viewer for running containers
-- **Pull & update** — one-click image pull and stack redeploy
+- **Pull & update** — one-click image pull and stack redeploy, or update every outdated stack in one job
 - **Compose source doctor** — reports which compose file each container was actually created from, flagging stacks left anchored to a foreign or deleted path
 - **Compose repair** — re-anchors a drifted stack onto the managed compose folder, refusing when doing so would delete a running service the compose file does not define
 
 ### App Store
-- **Browse remote apps** — search and install apps from any CasaOS-compatible GitHub repository
+- **Browse remote apps** — search and install apps from any CasaOS-compatible GitHub repository. `$AppID`, `$PUID`, `$PGID` and `$TZ` are filled in, and `/DATA/AppData` volumes go to your configured data folder
 - **Repo manager** — add, enable/disable, and refresh multiple app sources
 - **External bookmarks** — pin arbitrary web app links on the dashboard alongside managed stacks
 
@@ -320,7 +321,7 @@ curl -H "Authorization: Bearer $ANPAN_API_KEY" https://anpan.local:5000/api/open
 | Scope | Allows |
 | --- | --- |
 | `read` | GET requests, except files |
-| `operate` | `read`, plus creating, starting, stopping and updating stacks and containers, the update check, App Store, bookmarks and port notes. Not deleting a stack (it removes volumes), prune, files, Samba or shutdown |
+| `operate` | `read`, plus creating, starting, stopping and updating stacks and containers (and cancelling those jobs), the update check, App Store, bookmarks and port notes. Not deleting a stack (it removes volumes), prune, files, Samba or shutdown |
 | `full` | Everything the web UI can do, except account settings and managing API keys |
 
 A request outside the key's scope gets **403**; a wrong, revoked or expired key gets **401**. The rules (`src/lib/api-key-scope.ts`) are prefix and method grants, checked in order. A new route under an existing prefix inherits that prefix's grant for the methods it lists, so a new `GET /api/docker/…` is readable with a `read` key. A request that matches no grant, such as anything under a new prefix, needs `full`.
@@ -331,7 +332,7 @@ Things to know:
 - **Keys cannot manage keys, change the password, or touch the avatar.** Those routes accept only a signed-in browser.
 - **Changing your password revokes every API key**, the same way it signs out every browser.
 - Each key shows when and from which address it was last used. Every write made with a key is logged as `[api-key] <name> (<id>) <METHOD> <path>` in the service log (`journalctl -u anpan-os`).
-- Streaming routes (stack install, pull, repair, logs) answer with Server-Sent Events; use `curl -N`.
+- **Installs, deploys, updates, repairs and CasaOS migrations start a job** and answer `202` with it (`409` with the job in the way when that stack is busy). Follow it with `GET /api/jobs/<id>` (status and log so far) or the event stream `GET /api/jobs/stream` (`curl -N`); stop it with `POST /api/jobs/<id>/cancel`. Container logs still stream as Server-Sent Events.
 
 ---
 
@@ -347,7 +348,13 @@ bind = "local"   # "local" = 127.0.0.1 | "public" = 0.0.0.0
 # tls_key  = "/path/to/key.pem"
 
 [compose]
-# folder = "/custom/path/composes"   # defaults to ~/.anpanos/composes
+# folder = "/custom/path/composes"   # defaults to /var/lib/anpan-os/composes
+
+[apps]
+# data_root = "/DATA/AppData"   # one data folder per app; defaults to /var/lib/anpan-os/appdata
+# puid = 1000                   # $PUID / $PGID / $TZ for apps that ask for them (CasaOS-style)
+# pgid = 1000
+# tz = "Europe/Berlin"          # defaults to this machine's time zone
 
 [files]
 root = "/"   # root path the file manager can browse

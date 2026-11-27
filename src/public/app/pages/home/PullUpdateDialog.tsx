@@ -1,11 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { Loader2 } from "lucide-react";
 import { Dialog } from "../../components/Dialog";
+import { JobView } from "../../components/JobView";
 import { api } from "../../lib/api";
 import { useToastStore } from "../../stores/toastStore";
+import { useJobsStore, runningJobFor, readStartAnswer } from "../../stores/jobsStore";
 import type { Stack } from "./types";
-
-interface SSEMsg { log?: string; ok?: boolean; error?: string }
 
 export function PullUpdateDialog({ stack, open, onClose, onUpdated }: {
   stack: Stack | null;
@@ -17,80 +17,50 @@ export function PullUpdateDialog({ stack, open, onClose, onUpdated }: {
   return <PullUpdateDialogInner key={stack.name} stack={stack} onClose={onClose} onUpdated={onUpdated} />;
 }
 
+/**
+ * Pull a stack's images and redeploy it, as a server-side job.
+ *
+ * Opened while a job is already working on the stack (say, an update started from another
+ * tab), it shows that job instead of offering to start a second one.
+ */
 function PullUpdateDialogInner({ stack, onClose, onUpdated }: {
   stack: Stack;
   onClose: () => void;
   onUpdated: () => void;
 }) {
-  const [busy,  setBusy]  = useState(false);
+  const title = stack.meta?.title ?? stack.name;
+  const alreadyRunning = useJobsStore(s => runningJobFor(s.jobs, stack.name));
+  const [jobId, setJobId] = useState<string | null>(alreadyRunning?.id ?? null);
+  const [starting, setStarting] = useState(false);
   const [error, setError] = useState("");
-  const [log,   setLog]   = useState<string[]>([]);
-  const [phase, setPhase] = useState<"idle" | "pulling" | "deploying" | "done">("idle");
 
-  const logRef = useRef<HTMLPreElement | null>(null);
-
-  useEffect(() => {
-    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
-  }, [log]);
-
-  const handlePull = async () => {
-    setBusy(true);
+  const start = async () => {
+    setStarting(true);
     setError("");
-    setLog([]);
-    setPhase("pulling");
-
     try {
       const { data, error: err } = await api.api.compose.stacks({ name: stack.name }).pull.post();
-      if (err) {
-        setError((err.value as { error?: string })?.error ?? "Request failed");
-        setPhase("idle");
-        return;
-      }
-      for await (const event of data as AsyncIterable<{ data: SSEMsg }>) {
-        const m = event.data as SSEMsg;
-        if (m.log !== undefined) {
-          setLog(prev => [...prev, m.log!]);
-          const lower = m.log.toLowerCase();
-          if (lower.includes("pulling") || lower.includes("pull")) setPhase("pulling");
-          if (lower.includes("starting") || lower.includes("up -d") || lower.includes("running")) setPhase("deploying");
-        } else if (m.ok) {
-          setPhase("done");
-          useToastStore.getState().push(`Stack updated: ${stack.meta?.title ?? stack.name}`, "success");
-          onUpdated();
-          onClose();
-          return;
-        } else if (m.error) {
-          setError(m.error);
-          setPhase("idle");
-          return;
-        }
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-      setPhase("idle");
+      const answer = readStartAnswer(data, err);
+      if (answer.job) setJobId(answer.job.id);
+      if (answer.error && !answer.job) setError(answer.error);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
-      setBusy(false);
+      setStarting(false);
     }
   };
 
-  const phaseLabel = phase === "pulling"
-    ? "Pulling images…"
-    : phase === "deploying"
-      ? "Deploying…"
-      : phase === "done"
-        ? "Done!"
-        : null;
-
   const footer = (
     <>
-      <button onClick={onClose} disabled={busy} className="px-4 py-2 text-sm text-gray-400 hover:text-white transition-colors disabled:opacity-50">
-        {busy ? "Running…" : "Close"}
+      <button onClick={onClose} className="px-4 py-2 text-sm text-gray-400 hover:text-white transition-colors">
+        Close
       </button>
-      {!busy && (
+      {!jobId && (
         <button
-          onClick={() => void handlePull()}
-          className="px-4 py-2 text-sm bg-sky-600 hover:bg-sky-500 text-white font-semibold rounded-lg transition-colors"
+          onClick={() => void start()}
+          disabled={starting}
+          className="inline-flex items-center gap-2 px-4 py-2 text-sm bg-sky-600 hover:bg-sky-500 text-white font-semibold rounded-lg transition-colors disabled:opacity-50"
         >
+          {starting && <Loader2 size={14} className="animate-spin" />}
           Pull &amp; Update
         </button>
       )}
@@ -100,40 +70,28 @@ function PullUpdateDialogInner({ stack, onClose, onUpdated }: {
   return (
     <Dialog
       open
-      title={`Pull Update — ${stack.meta?.title ?? stack.name}`}
-      onClose={busy ? () => {} : onClose}
-      disableBackdropClose={busy}
+      title={`Pull Update — ${title}`}
+      onClose={onClose}
       size="lg"
       notification={error ? (
-        <p className="text-red-400 text-sm bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">
-          {error}
-        </p>
+        <p className="text-red-400 text-sm bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">{error}</p>
       ) : undefined}
       footer={footer}
     >
-      <div className="space-y-3">
-        {!busy && log.length === 0 && (
-          <p className="text-sm text-gray-400">
-            Pull the latest images for <span className="text-white font-medium">{stack.meta?.title ?? stack.name}</span> and re-deploy the stack.
-          </p>
-        )}
-
-        {phaseLabel && (
-          <div className="flex items-center gap-2 text-sm text-gray-300">
-            {phase !== "done" && <Loader2 size={14} className="animate-spin text-sky-400 shrink-0" />}
-            {phaseLabel}
-          </div>
-        )}
-
-        {log.length > 0 && (
-          <pre
-            ref={logRef}
-            className="h-64 bg-black rounded-lg border border-gray-700 p-3 text-xs text-green-400 font-mono overflow-y-auto whitespace-pre-wrap"
-          >
-            {log.join("\n")}
-          </pre>
-        )}
-      </div>
+      {jobId ? (
+        <JobView
+          jobId={jobId}
+          onFinished={job => {
+            if (job.status !== "done") return;
+            useToastStore.getState().push(`Stack updated: ${title}`, "success");
+            onUpdated();
+          }}
+        />
+      ) : (
+        <p className="text-sm text-gray-400">
+          Pull the latest images for <span className="text-white font-medium">{title}</span> and re-deploy the stack.
+        </p>
+      )}
     </Dialog>
   );
 }

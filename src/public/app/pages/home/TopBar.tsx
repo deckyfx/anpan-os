@@ -13,6 +13,7 @@ import { useSystemStore } from "../../stores/systemStore";
 import { useToastStore } from "../../stores/toastStore";
 import { useAuthStore } from "../../stores/authStore";
 import { UpdatesMenu } from "./UpdatesMenu";
+import { JobsMenu } from "./JobsMenu";
 
 interface NavItem {
   icon: React.ReactNode;
@@ -173,6 +174,9 @@ export function TopBar({ version, onNavigate, currentPath = "/", showUpdates = t
 
       {/* Updates menu — Check all / View report */}
       {showUpdates && <UpdatesMenu />}
+
+      {/* Server jobs (install, deploy, update, migrate) — shown on every page that has jobs */}
+      <JobsMenu />
 
       {/* Version badge — far right, before the user button */}
       <button

@@ -7,12 +7,13 @@ import { GuidedStackDialog } from "../home/GuidedStackDialog";
 import type { StoreApp } from "./types";
 
 export function AppDetailDialog() {
-  const { detailApp, setDetailApp, installApp, installContent, startInstall, clearInstall } =
+  const { detailApp, setDetailApp, installApp, installContent, installMeta, startInstall, clearInstall } =
     useAppStoreStore(useShallow(s => ({
       detailApp:      s.detailApp,
       setDetailApp:   s.setDetailApp,
       installApp:     s.installApp,
       installContent: s.installContent,
+      installMeta:    s.installMeta,
       startInstall:   s.startInstall,
       clearInstall:   s.clearInstall,
     })));
@@ -73,6 +74,7 @@ export function AppDetailDialog() {
         mode="create"
         open={isInstalling}
         initialContent={installContent ?? undefined}
+        initialMeta={installMeta ?? undefined}
         initialAppId={installApp?.id}
         onClose={clearInstall}
         onDone={clearInstall}
