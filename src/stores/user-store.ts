@@ -42,6 +42,16 @@ export class UserStore {
     await db.update(users).set({ passwordHash, tokenVersion: newTokenVersion }).where(eq(users.id, id));
   }
 
+  /** Record that `id` now has an avatar of `type`, changed at `at`. The bytes live on disk. */
+  static async setAvatar(id: number, type: string, at: Date): Promise<void> {
+    await db.update(users).set({ avatarType: type, avatarUpdatedAt: at }).where(eq(users.id, id));
+  }
+
+  /** Record that `id` has no avatar. */
+  static async clearAvatar(id: number): Promise<void> {
+    await db.update(users).set({ avatarType: null, avatarUpdatedAt: null }).where(eq(users.id, id));
+  }
+
   /** Wipe all users — used by the --reset-user CLI command. */
   static async deleteAll(): Promise<void> {
     await db.delete(users);

@@ -7,9 +7,15 @@ import { commands } from "../lib/commands";
 import { issueSession, sessionIdOf, verifySession } from "../lib/session-auth";
 import type { JwtCtx } from "../lib/session-auth";
 import { SessionStore } from "../stores/session-store";
+import { ApiKeyStore } from "../stores/api-key-store";
+import { forgetApiKeyUse } from "../lib/api-key-auth";
 import { LoginThrottle } from "../lib/login-throttle";
 import { SignInLimiter } from "../lib/sign-in-limiter";
 import { originGuard } from "./originGuard";
+import { bearerCredential } from "../lib/api-key-auth";
+import {
+  AVATAR_MAX_BYTES, AVATAR_TYPES, avatarPath, avatarUrlOf, removeAvatar, sniffAvatarType, writeAvatar,
+} from "../lib/avatar";
 import {
   usernameField,
   passwordField,
@@ -59,6 +65,28 @@ async function withDockerHubAuth<T>(
     return { error: "Not authenticated" };
   }
   return handler();
+}
+
+/** Why a request carrying an API key is refused by an account route. */
+const BEARER_REFUSED = "API keys cannot use account routes — sign in to the web UI";
+
+/**
+ * The account owner for an account route, or null with the status set: 403 when the request
+ * carries a Bearer credential at all, 401 when the cookie session does not verify.
+ *
+ * A key is refused before the cookie is even looked at, so a key and a cookie sent together
+ * — an agent running in a signed-in browser — cannot act on the account through the cookie.
+ */
+async function accountUser(
+  jwtCtx: JwtCtx,
+  token: string | undefined,
+  request: Request,
+  set: { status?: number | string },
+) {
+  if (bearerCredential(request) !== null) { set.status = 403; return null; }
+  const user = await requireActiveSession(jwtCtx, token);
+  if (!user) set.status = 401;
+  return user;
 }
 
 /** Cookie schema — session value is a JWT string. */
@@ -165,8 +193,15 @@ export function authPlugin(jwtSecret: string) {
       const initialized = (await UserStore.count()) > 0;
       // The full check. Verifying the signature alone reported "signed in" for a token
       // that a password change or a logout had already ended.
-      const authenticated = !!(await verifySession(jwtCtx, anpan_session.value));
-      return { initialized, authenticated };
+      const session = await verifySession(jwtCtx, anpan_session.value);
+      // Who is signed in, so a reloaded page can show it without a second request. Only
+      // from the full check: a token that verifies but was logged out names nobody.
+      return {
+        initialized,
+        authenticated: !!session,
+        username:  session?.user.username ?? null,
+        avatarUrl: session ? avatarUrlOf(session.user) : null,
+      };
     })
 
     .post(
@@ -187,7 +222,7 @@ export function authPlugin(jwtSecret: string) {
 
         const user = await UserStore.create(body.username, body.password);
         await issueSession(jwtCtx, anpan_session, user, request);
-        return { ok: true, username: user.username };
+        return { ok: true, username: user.username, avatarUrl: avatarUrlOf(user) };
       },
       {
         body: t.Object({
@@ -230,7 +265,7 @@ export function authPlugin(jwtSecret: string) {
 
           signInLimiter.succeed(attempt.ticket);
           await issueSession(jwtCtx, anpan_session, user, request);
-          return { ok: true, username: user.username };
+          return { ok: true, username: user.username, avatarUrl: avatarUrlOf(user) };
         } finally {
           signInLimiter.end(attempt.ticket);
         }
@@ -322,6 +357,66 @@ export function authPlugin(jwtSecret: string) {
       });
     })
 
+    // ── Avatar ────────────────────────────────────────────────────────────────
+    // Cookie session only, like the rest of this plugin, and a Bearer credential is refused
+    // outright even beside a valid cookie: an API key acts for its owner on the server, not
+    // as the owner's face. See accountUser.
+
+    .get("/avatar", async ({ jwt: jwtCtx, cookie: { anpan_session }, request, set }) => {
+      const user = await accountUser(jwtCtx, anpan_session.value, request, set);
+      if (!user) return { error: set.status === 403 ? BEARER_REFUSED : "Not authenticated" };
+      const file = Bun.file(avatarPath(user.id));
+      if (!user.avatarType || !(await file.exists())) {
+        set.status = 404;
+        return { error: "No avatar" };
+      }
+      return new Response(file, {
+        headers: {
+          "content-type": user.avatarType,
+          // The type was sniffed on upload; nosniff stops a browser second-guessing it, and
+          // the CSP keeps the bytes inert even if one were opened as a document.
+          "x-content-type-options": "nosniff",
+          "content-security-policy": "default-src 'none'",
+          // The URL carries ?v=<change time>, so a new avatar is a new URL.
+          "cache-control": "private, max-age=31536000, immutable",
+        },
+      });
+    })
+
+    .put(
+      "/avatar",
+      async ({ body, jwt: jwtCtx, cookie: { anpan_session }, request, set }) => {
+        const user = await accountUser(jwtCtx, anpan_session.value, request, set);
+        if (!user) return { error: set.status === 403 ? BEARER_REFUSED : "Not authenticated" };
+
+        const bytes = new Uint8Array(await body.file.arrayBuffer());
+        // The declared type and name are the client's say-so; only the bytes decide.
+        const type = sniffAvatarType(bytes);
+        if (!type) {
+          set.status = 422;
+          return { error: "The file is not a PNG, JPEG or WebP image" };
+        }
+
+        await writeAvatar(user.id, bytes);
+        const at = new Date();
+        await UserStore.setAvatar(user.id, type, at);
+        return { avatarUrl: avatarUrlOf({ avatarType: type, avatarUpdatedAt: at })! };
+      },
+      {
+        body: t.Object({
+          file: t.File({ type: [...AVATAR_TYPES], maxSize: AVATAR_MAX_BYTES }),
+        }),
+      },
+    )
+
+    .delete("/avatar", async ({ jwt: jwtCtx, cookie: { anpan_session }, request, set }) => {
+      const user = await accountUser(jwtCtx, anpan_session.value, request, set);
+      if (!user) return { error: set.status === 403 ? BEARER_REFUSED : "Not authenticated" };
+      await UserStore.clearAvatar(user.id);
+      await removeAvatar(user.id);
+      return { ok: true };
+    })
+
     .put(
       "/password",
       async ({ body, jwt: jwtCtx, cookie: { anpan_session }, set, request }) => {
@@ -357,6 +452,9 @@ export function authPlugin(jwtSecret: string) {
           // tokens, and their rows go too. This browser then gets a fresh session, so the
           // user who just changed it stays signed in.
           await SessionStore.revokeAllFor(user.id);
+          // API keys go too, for the same reason: one created from a stolen session must not
+          // survive the password change that evicts it.
+          for (const id of await ApiKeyStore.revokeAllFor(user.id)) forgetApiKeyUse(id);
           const updated = await UserStore.findById(user.id);
           if (updated) await issueSession(jwtCtx, anpan_session, updated, request);
 

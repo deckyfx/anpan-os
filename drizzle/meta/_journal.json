@@ -120,6 +120,13 @@
       "when": 1792054510848,
       "tag": "0016_stale_cannonball",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "6",
+      "when": 1795785596776,
+      "tag": "0017_hot_scrambler",
+      "breakpoints": true
     }
   ]
 }

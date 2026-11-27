@@ -1,4 +1,4 @@
-import { Elysia, ElysiaCustomStatusResponse } from "elysia";
+import { Elysia, ElysiaCustomStatusResponse, InvalidFileType } from "elysia";
 import { authPlugin } from "./plugins/routeAuth";
 import { passkeyPlugin } from "./plugins/routePasskey";
 import { apiPlugin } from "./plugins/routeApi";
@@ -12,6 +12,8 @@ import { portsPlugin }      from "./plugins/routePorts";
 import { bookmarksPlugin }  from "./plugins/routeBookmarks";
 import { appStorePlugin }   from "./plugins/routeAppStore";
 import { updateCheckPlugin } from "./plugins/routeUpdateCheck";
+import { apiKeysPlugin }    from "./plugins/routeApiKeys";
+import { openapiPlugin }    from "./plugins/openapi";
 
 function errorPage(title: string, detail: string, stack?: string): Response {
   const rows = stack
@@ -60,6 +62,11 @@ export function createApp(jwtSecret: string) {
       // Without this an unknown route fell through to the 500 below, so a typo in a URL
       // looked like a server crash.
       if (code === "NOT_FOUND") return Response.json({ error: "Not found" }, { status: 404 });
+      // A t.File({ type }) upload whose bytes are not that type -- Elysia sniffs them with
+      // file-type. It carries a 422 of its own but no case above, so it surfaced as a 500.
+      if (error instanceof InvalidFileType) {
+        return Response.json({ error: "The file's contents are not an accepted type" }, { status: 422 });
+      }
       if (code === "VALIDATION") {
         const first = [...error.all][0];
         return Response.json(
@@ -91,6 +98,10 @@ export function createApp(jwtSecret: string) {
     .use(bookmarksPlugin(jwtSecret))
     .use(appStorePlugin(jwtSecret))
     .use(updateCheckPlugin(jwtSecret))
+    // Cookie-only key management -- not behind authGuard, which accepts keys.
+    .use(apiKeysPlugin(jwtSecret))
+    // GET /api/openapi.json -- the spec for API-key clients; see plugins/openapi.ts.
+    .use(openapiPlugin(jwtSecret))
     .get("/api/health", () => ({ status: "ok" }))
     // The SPA's catch-all GET /* would otherwise answer an unknown API path with the app's
     // HTML and a 200, so a client calling a removed endpoint got a page instead of an error.

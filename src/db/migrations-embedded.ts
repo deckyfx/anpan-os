@@ -23,6 +23,7 @@ import m0013MassiveCammi from "../../drizzle/0013_massive_cammi.sql" with { type
 import m0014RedundantWhizzer from "../../drizzle/0014_redundant_whizzer.sql" with { type: "text" };
 import m0015FreezingSteveRogers from "../../drizzle/0015_freezing_steve_rogers.sql" with { type: "text" };
 import m0016StaleCannonball from "../../drizzle/0016_stale_cannonball.sql" with { type: "text" };
+import m0017HotScrambler from "../../drizzle/0017_hot_scrambler.sql" with { type: "text" };
 
 export interface EmbeddedMigrations {
   journal: string;
@@ -47,6 +48,7 @@ const files: Record<string, string> = {
   "0014_redundant_whizzer.sql": m0014RedundantWhizzer,
   "0015_freezing_steve_rogers.sql": m0015FreezingSteveRogers,
   "0016_stale_cannonball.sql": m0016StaleCannonball,
+  "0017_hot_scrambler.sql": m0017HotScrambler,
 };
 
 export const embeddedMigrations: EmbeddedMigrations = {

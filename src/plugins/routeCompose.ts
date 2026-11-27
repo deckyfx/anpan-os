@@ -659,7 +659,7 @@ export function composePlugin(jwtSecret: string) {
     // Done server-side so the browser avoids CORS, and so registry logins stay on the host.
     // `image` is a name without a tag: "nginx", "jellyfin/jellyfin", "ghcr.io/owner/app".
     .get("/tags", async ({ query, set }) => {
-      const image = (query as Record<string, string>).image?.trim() ?? "";
+      const image = query.image.trim();
       if (!image) { set.status = 422; return { error: "image query param required" }; }
 
       const result = await listTags(image, { credentials: await loadDockerCredentials() });
@@ -668,5 +668,10 @@ export function composePlugin(jwtSecret: string) {
       // Never 401: the client reads that as its own session having expired.
       set.status = { invalid: 422, "not-found": 404, "rate-limited": 429, failed: 502 }[result.reason];
       return { error: result.error };
+    }, {
+      query: t.Object({
+        image: t.String({ description: "Image name without a tag, e.g. `nginx`, `jellyfin/jellyfin`, `ghcr.io/owner/app`" }),
+      }),
+      detail: { summary: "List the tags of an image from its own registry" },
     });
 }
