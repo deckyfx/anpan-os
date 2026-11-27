@@ -133,32 +133,34 @@ export function DockerHubForm() {
 
   return (
     <form className="space-y-3" aria-label="Sign in to Docker Hub" onSubmit={e => { e.preventDefault(); void signIn(); }}>
-      <div>
-        <label htmlFor={`${id}-user`} className={LABEL}>Username</label>
-        <input
-          id={`${id}-user`}
-          type="text"
-          value={username}
-          onChange={e => setUsername(e.target.value)}
-          placeholder="dockerhub username"
-          autoComplete="username"
-          spellCheck={false}
-          className={INPUT}
-        />
-      </div>
-      <div>
-        <label htmlFor={`${id}-pass`} className={LABEL}>Password or access token</label>
-        <input
-          id={`${id}-pass`}
-          type="password"
-          value={password}
-          onChange={e => setPassword(e.target.value)}
-          placeholder="password or access token"
-          autoComplete="current-password"
-          aria-describedby={`${id}-hint`}
-          className={INPUT}
-        />
-        <p id={`${id}-hint`} className="text-[11px] text-gray-500 mt-1.5">A read-only access token is the safer choice.</p>
+      <div className="grid gap-3 items-start grid-cols-[repeat(auto-fit,minmax(min(100%,16rem),1fr))]">
+        <div>
+          <label htmlFor={`${id}-user`} className={LABEL}>Username</label>
+          <input
+            id={`${id}-user`}
+            type="text"
+            value={username}
+            onChange={e => setUsername(e.target.value)}
+            placeholder="dockerhub username"
+            autoComplete="username"
+            spellCheck={false}
+            className={INPUT}
+          />
+        </div>
+        <div>
+          <label htmlFor={`${id}-pass`} className={LABEL}>Password or access token</label>
+          <input
+            id={`${id}-pass`}
+            type="password"
+            value={password}
+            onChange={e => setPassword(e.target.value)}
+            placeholder="password or access token"
+            autoComplete="current-password"
+            aria-describedby={`${id}-hint`}
+            className={INPUT}
+          />
+          <p id={`${id}-hint`} className="text-[11px] text-gray-500 mt-1.5">A read-only access token is the safer choice.</p>
+        </div>
       </div>
       {errorBox}
       <div className="flex justify-end">

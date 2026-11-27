@@ -9,6 +9,8 @@ interface AnchoredMenuProps {
   /** The button that opened the menu; the menu is placed against it. */
   anchor: React.RefObject<HTMLElement | null>;
   onClose: () => void;
+  /** The menu's accessible name, e.g. the label of the button that opened it. */
+  label?: string;
   /** Width and any other classes for the menu panel. */
   className?: string;
   children: React.ReactNode;
@@ -25,7 +27,7 @@ interface AnchoredMenuProps {
  * Out of the tile, the menu is no longer next to its trigger in tab order, so focus is moved
  * into it on open and handed back to the trigger on close.
  */
-export function AnchoredMenu({ anchor, onClose, className = "", children }: AnchoredMenuProps) {
+export function AnchoredMenu({ anchor, onClose, label, className = "", children }: AnchoredMenuProps) {
   const menuRef = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
 
@@ -64,6 +66,29 @@ export function AnchoredMenu({ anchor, onClose, className = "", children }: Anch
     };
   }, [anchor]);
 
+  // Every action is a menu item. Set here rather than by each caller, so no menu forgets one.
+  useEffect(() => {
+    menuRef.current?.querySelectorAll<HTMLElement>(ACTION).forEach(el => {
+      if (!el.hasAttribute("role")) el.setAttribute("role", "menuitem");
+    });
+  });
+
+  // Up and Down move between items, wrapping; Home and End jump to the ends. Tab still
+  // leaves the menu, which then closes (see onBlur below).
+  const onMenuKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) return;
+    const items = [...(menuRef.current?.querySelectorAll<HTMLElement>(ACTION) ?? [])];
+    if (items.length === 0) return;
+    e.preventDefault();
+    const at = items.indexOf(document.activeElement as HTMLElement);
+    const next =
+      e.key === "Home" ? 0
+      : e.key === "End" ? items.length - 1
+      : at === -1 ? (e.key === "ArrowUp" ? items.length - 1 : 0)
+      : (at + (e.key === "ArrowUp" ? -1 : 1) + items.length) % items.length;
+    items[next]?.focus({ preventScroll: true });
+  };
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
     window.addEventListener("keydown", onKey);
@@ -75,6 +100,9 @@ export function AnchoredMenu({ anchor, onClose, className = "", children }: Anch
       <div className="fixed inset-0 z-40" onClick={onClose} />
       <div
         ref={menuRef}
+        role="menu"
+        aria-label={label}
+        onKeyDown={onMenuKeyDown}
         // Tab past the last action would reach the page behind the backdrop with the menu still
         // open. Only a blur with a destination closes it: Safari does not focus a clicked button,
         // so clicking an action blurs to nothing, and closing then would swallow the click.

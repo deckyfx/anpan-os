@@ -35,7 +35,7 @@ function TileMenu({ stack, anchor, onAction, onClose }: TileMenuProps) {
   const item = "w-full flex items-center gap-2.5 px-3 py-1.5 rounded-lg hover:bg-gray-700 text-gray-200 transition-colors";
 
   return (
-    <AnchoredMenu anchor={anchor} onClose={onClose} className="w-60">
+    <AnchoredMenu anchor={anchor} onClose={onClose} label={`Actions for ${stack.meta?.title ?? stack.name}`} className="w-60">
       {!allRunning && (
         <button className={item} onClick={() => act("start")}>
           <Play size={14} className="text-green-400 shrink-0" /> Start
@@ -55,7 +55,7 @@ function TileMenu({ stack, anchor, onAction, onClose }: TileMenuProps) {
         </button>
       )}
 
-      <div className="border-t border-gray-700 my-1 mx-1" />
+      <div role="separator" className="border-t border-gray-700 my-1 mx-1" />
 
       <button className={item} onClick={() => act("check-updates")}>
         <RefreshCw size={14} className="text-sky-400 shrink-0" /> Check for updates
@@ -99,7 +99,7 @@ function TileMenu({ stack, anchor, onAction, onClose }: TileMenuProps) {
         </>
       )}
 
-      <div className="border-t border-gray-700 my-1 mx-1" />
+      <div role="separator" className="border-t border-gray-700 my-1 mx-1" />
 
       <button
         className="w-full flex items-center gap-2.5 px-3 py-1.5 rounded-lg hover:bg-red-900/40 text-red-400 transition-colors"

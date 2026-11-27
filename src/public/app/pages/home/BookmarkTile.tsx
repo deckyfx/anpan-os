@@ -34,7 +34,7 @@ function TileMenu({ bookmark, anchor, onAction, onClose }: {
   const item = "w-full flex items-center gap-2.5 px-3 py-1.5 rounded-lg hover:bg-gray-700 text-gray-200 transition-colors";
 
   return (
-    <AnchoredMenu anchor={anchor} onClose={onClose} className="w-44">
+    <AnchoredMenu anchor={anchor} onClose={onClose} label={`Actions for ${bookmark.title}`} className="w-44">
       <button className={item} onClick={() => act("edit")}>
         <Pencil size={14} className="text-amber-400 shrink-0" /> Edit
       </button>
@@ -43,7 +43,7 @@ function TileMenu({ bookmark, anchor, onAction, onClose }: {
         Note
         {bookmark.note && <span className="ml-auto w-1.5 h-1.5 rounded-full bg-amber-400" />}
       </button>
-      <div className="border-t border-gray-700 my-1 mx-1" />
+      <div role="separator" className="border-t border-gray-700 my-1 mx-1" />
       <button
         className="w-full flex items-center gap-2.5 px-3 py-1.5 rounded-lg hover:bg-red-900/40 text-red-400 transition-colors"
         onClick={() => act("delete")}

@@ -1,7 +1,8 @@
 import { useId, type ReactNode } from "react";
+import { CARD } from "./styles";
 
 /**
- * One card on the Account page: a titled `<section>`, labelled by its heading so screen
+ * One card on an Account page: a titled `<section>`, labelled by its heading so screen
  * readers can jump between them, with optional actions at the right of the heading.
  */
 export function Section({ title, description, actions, children }: {
@@ -12,7 +13,7 @@ export function Section({ title, description, actions, children }: {
 }) {
   const headingId = useId();
   return (
-    <section aria-labelledby={headingId} className="bg-gray-900 border border-gray-800 rounded-xl p-5">
+    <section aria-labelledby={headingId} className={CARD}>
       <div className="flex items-start gap-3 mb-4">
         <div className="flex-1 min-w-0">
           <h2 id={headingId} className="text-sm font-semibold text-white">{title}</h2>
