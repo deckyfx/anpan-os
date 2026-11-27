@@ -63,6 +63,8 @@ interface UpdateCheckState {
   startCheck: (opts?: { auto?: boolean; force?: boolean; stack?: string }) => Promise<StartOutcome | null>;
   cancelCheck: () => Promise<void>;
   purge: () => Promise<void>;
+  /** Drop the results held for a stack that was just deleted or forgotten. */
+  forgetStack: (stackName: string) => void;
   dismissBlocked: () => void;
   openDialog: () => void;
   closeDialog: () => void;
@@ -283,6 +285,10 @@ export const useUpdateCheckStore = create<UpdateCheckState>((set, get) => ({
       set({ purging: false });
     }
   },
+
+  // The server deletes the stack's rows itself; this keeps the open page in step with it
+  // instead of showing the stack's results until the next snapshot.
+  forgetStack: (stackName) => set(s => ({ results: s.results.filter(r => r.stack !== stackName) })),
 
   dismissBlocked: () => set({ blocked: null }),
   openDialog:     () => set({ dialogOpen: true }),

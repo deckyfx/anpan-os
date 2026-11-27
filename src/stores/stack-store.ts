@@ -2,6 +2,7 @@ import { eq, sql } from "drizzle-orm";
 import { db } from "../db/index";
 import { stacks } from "../db/schema";
 import type { Stack, NewStack } from "../db/schema";
+import { UpdateCheckStore } from "./update-check-store";
 
 export class StackStore {
   static async findAll(): Promise<Stack[]> {
@@ -52,7 +53,15 @@ export class StackStore {
     return result[0] ?? null;
   }
 
+  /**
+   * Remove a stack's row and everything else keyed by its id.
+   *
+   * The update-check results go too: they are keyed by stack name, not linked to this row,
+   * so leaving them meant the update report went on listing a deleted stack until the next
+   * full sweep happened to prune it.
+   */
   static async delete(id: string): Promise<void> {
     await db.delete(stacks).where(eq(stacks.id, id));
+    await UpdateCheckStore.forgetStack(id);
   }
 }

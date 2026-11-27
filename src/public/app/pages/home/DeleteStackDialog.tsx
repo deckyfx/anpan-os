@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Dialog } from "../../components/Dialog";
 import type { Stack } from "./types";
 import { api } from "../../lib/api";
+import { useUpdateCheckStore } from "../../stores/updateCheckStore";
 
 /** One bind mount, with the server's verdict on whether it may be deleted. */
 interface BindInfo {
@@ -62,6 +63,7 @@ function DeleteStackDialogInner({ stack, onClose, onDeleted }: {
         setError((err2.value as { error?: string })?.error ?? "Server error");
         return;
       }
+      useUpdateCheckStore.getState().forgetStack(stack.name);
       onDeleted();
       onClose();
     } catch (err) {
