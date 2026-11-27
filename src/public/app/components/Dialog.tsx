@@ -35,9 +35,20 @@ export function Dialog({ open, title, children, footer, notification, onClose, s
   // Not a focus trap, and so no aria-modal: several dialogs here open a second one beside
   // themselves, and two traps would fight. Converting to a native <dialog> would provide
   // both; that is a change to every dialog in the app, so it is left for its own PR.
+  // Read during render, on the render that opens the dialog: by the time any effect runs, a
+  // child with autoFocus (BookmarkDialog's title field, say) has already taken focus, and the
+  // field would be remembered instead of the button that opened the dialog. Only a read of
+  // the DOM, and a repeated render keeps the first value, so it is safe to do here.
+  const openerRef = useRef<HTMLElement | null>(null);
+  const wasOpenRef = useRef(false);
+  if (open && !wasOpenRef.current) {
+    openerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  }
+  wasOpenRef.current = open;
+
   useEffect(() => {
     if (!open) return;
-    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const opener = openerRef.current;
     // A child with autoFocus has already taken focus by now; only fill the gap if none did.
     if (panelRef.current && !panelRef.current.contains(document.activeElement)) {
       panelRef.current.focus({ preventScroll: true });

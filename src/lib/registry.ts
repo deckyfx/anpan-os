@@ -106,6 +106,31 @@ async function getToken(
   }
 }
 
+/**
+ * The Authorization header to retry with after a 401, or null when there is none to send.
+ *
+ * Most registries answer with a Bearer challenge, whose realm issues a token. A registry run
+ * with `htpasswd` auth (distribution's own option) answers `Basic realm="…"` instead, where
+ * the realm is a label, not a URL; handing that to the token flow failed every lookup even
+ * with a matching `docker login`. Basic credentials go only to the registry itself, which is
+ * the host this request was sent to over https, so the realm rules in maySendCredentials
+ * do not apply.
+ */
+async function authorizationFor(
+  ref: ImageRef,
+  challenge: string,
+  cache: TokenCache,
+  signal: AbortSignal,
+  credentials: RegistryCredentials | null,
+): Promise<string | null> {
+  if (/^\s*basic\b/i.test(challenge)) {
+    if (!credentials) return null;
+    return `Basic ${Buffer.from(`${credentials.username}:${credentials.password}`).toString("base64")}`;
+  }
+  const token = await getToken(ref, challenge, cache, signal, credentials);
+  return token ? `Bearer ${token}` : null;
+}
+
 function readRateLimit(res: Response): number | null {
   // Format is "100;w=3600" — the count before the window parameter.
   const raw = res.headers.get("ratelimit-remaining") ?? res.headers.get("x-ratelimit-remaining");
@@ -152,9 +177,9 @@ export async function fetchRemoteDigest(
   const repoPath = ref.repository.split("/").map(encodeURIComponent).join("/");
   const url = `https://${ref.registry}/v2/${repoPath}/manifests/${encodeURIComponent(ref.tag)}`;
 
-  const request = async (method: "HEAD" | "GET", token: string | null): Promise<Response> => {
+  const request = async (method: "HEAD" | "GET", authorization: string | null): Promise<Response> => {
     const headers: Record<string, string> = { Accept: ACCEPT };
-    if (token) headers.Authorization = `Bearer ${token}`;
+    if (authorization) headers.Authorization = authorization;
     return fetch(url, { method, headers, signal: deadline() });
   };
 
@@ -166,7 +191,7 @@ export async function fetchRemoteDigest(
     // carries the instructions for getting one.
     if (res.status === 401) {
       const challenge = res.headers.get("www-authenticate") ?? "";
-      token = await getToken(ref, challenge, tokenCache, deadline(), credentials?.for(ref.registry) ?? null);
+      token = await authorizationFor(ref, challenge, tokenCache, deadline(), credentials?.for(ref.registry) ?? null);
       if (!token) return { ...base, error: "Authentication failed" };
       res = await request("HEAD", token);
     }
@@ -357,15 +382,15 @@ async function listRegistryTags(
 
   for (let page = 0; next && page < MAX_PAGES; page++) {
     const url: string = next;
-    const get = (bearer: string | null) => fetch(url, {
-      headers: { Accept: "application/json", ...(bearer ? { Authorization: `Bearer ${bearer}` } : {}) },
+    const get = (authorization: string | null) => fetch(url, {
+      headers: { Accept: "application/json", ...(authorization ? { Authorization: authorization } : {}) },
       signal,
     });
 
     let res = await get(token);
     if (res.status === 401 && !token) {
       const challenge = res.headers.get("www-authenticate") ?? "";
-      token = await getToken(ref, challenge, createTokenCache(), signal, credentials?.for(ref.registry) ?? null);
+      token = await authorizationFor(ref, challenge, createTokenCache(), signal, credentials?.for(ref.registry) ?? null);
       if (token) res = await get(token);
     }
 

@@ -33,7 +33,7 @@ function Row({ icon, label, detail, children }: {
 }
 
 /** Password, changed in an inline form that opens under the row. */
-function PasswordRow() {
+function PasswordRow({ onChanged }: { onChanged: () => void }) {
   const [open, setOpen] = useState(false);
   const formId = useId();
   const buttonRef = useRef<HTMLButtonElement>(null);
@@ -62,7 +62,7 @@ function PasswordRow() {
       </Row>
       {open && (
         <div id={formId} className="pl-7">
-          <ChangePasswordForm onDone={() => setOpen(false)} />
+          <ChangePasswordForm onDone={() => setOpen(false)} onChanged={onChanged} />
         </div>
       )}
     </div>
@@ -130,6 +130,7 @@ export function AccountPage({ onNavigate }: { onNavigate: (path: string) => void
   const username = useAuthStore(s => s.username);
   const version  = useStacksStore(s => s.version);
   const [signingOut, setSigningOut] = useState(false);
+  const [keysGeneration, setKeysGeneration] = useState(0);
 
   // The top bar's version comes from the stacks store, which only loads it on initialize.
   // FilesPage does the same, so a page opened directly still shows the version.
@@ -174,7 +175,7 @@ export function AccountPage({ onNavigate }: { onNavigate: (path: string) => void
 
             <Section title="Security">
               <div className="space-y-4">
-                <PasswordRow />
+                <PasswordRow onChanged={() => setKeysGeneration(g => g + 1)} />
                 <div className="border-t border-gray-800/60" />
                 <PasskeyRow />
               </div>
@@ -188,7 +189,10 @@ export function AccountPage({ onNavigate }: { onNavigate: (path: string) => void
             </Section>
 
             <div className="col-span-full">
-              <ApiKeysSection />
+              {/* Remounted after a password change, which revokes every key on the server:
+                  its list, any token on screen and any load in flight all belong to the old
+                  password. */}
+              <ApiKeysSection key={keysGeneration} />
             </div>
           </div>
 

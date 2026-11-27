@@ -1,6 +1,6 @@
 import { count, eq } from "drizzle-orm";
 import { db } from "../db/index";
-import { users } from "../db/schema";
+import { apiKeys, sessions, users } from "../db/schema";
 import type { User } from "../db/schema";
 
 export class UserStore {
@@ -42,14 +42,43 @@ export class UserStore {
     await db.update(users).set({ passwordHash, tokenVersion: newTokenVersion }).where(eq(users.id, id));
   }
 
-  /** Record that `id` now has an avatar of `type`, changed at `at`. The bytes live on disk. */
-  static async setAvatar(id: number, type: string, at: Date): Promise<void> {
+  /** Record that `id` now has an avatar of `type`, and return its new version. The bytes live on disk. */
+  static async setAvatar(id: number, type: string): Promise<Date> {
+    // avatarUpdatedAt is the avatar URL's version and the column holds whole seconds, so two
+    // uploads within a second would share a URL and the browser, told the image is immutable,
+    // would keep showing the first. Always move it forward by at least a second.
+    const current = await UserStore.findById(id);
+    const previous = current?.avatarUpdatedAt ? Math.floor(current.avatarUpdatedAt.getTime() / 1000) : 0;
+    const at = new Date(Math.max(Math.floor(Date.now() / 1000), previous + 1) * 1000);
     await db.update(users).set({ avatarType: type, avatarUpdatedAt: at }).where(eq(users.id, id));
+    return at;
+  }
+
+  /**
+   * Set a new password and end everything the old one vouched for: every browser session and
+   * every API key. Returns the ids of the revoked keys.
+   *
+   * One synchronous transaction, so the three writes commit or roll back together. Awaited
+   * one after another, a failed revocation left the new password saved and the old keys
+   * still working, and the owner could not retry, because the old password no longer passed
+   * the check. The tokenVersion bump comes first inside it: a key insert racing this change
+   * either lands before (and is deleted here) or sees the new version and is refused.
+   */
+  static changePasswordAndRevoke(id: number, passwordHash: string): string[] {
+    return db.transaction(tx => {
+      const user = tx.select({ v: users.tokenVersion }).from(users).where(eq(users.id, id)).get();
+      if (!user) throw new Error("User not found");
+      tx.update(users).set({ passwordHash, tokenVersion: (user.v ?? 0) + 1 }).where(eq(users.id, id)).run();
+      tx.delete(sessions).where(eq(sessions.userId, id)).run();
+      return tx.delete(apiKeys).where(eq(apiKeys.userId, id)).returning({ id: apiKeys.id }).all().map(r => r.id);
+    });
   }
 
   /** Record that `id` has no avatar. */
   static async clearAvatar(id: number): Promise<void> {
-    await db.update(users).set({ avatarType: null, avatarUpdatedAt: null }).where(eq(users.id, id));
+    // avatarUpdatedAt is kept: it is the URL version, and a later upload must still move past
+    // it, or a remove and re-upload within a second would reuse the old, cached URL.
+    await db.update(users).set({ avatarType: null }).where(eq(users.id, id));
   }
 
   /** Wipe all users — used by the --reset-user CLI command. */

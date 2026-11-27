@@ -33,9 +33,11 @@ export interface ApiKeyRule {
 /**
  * The policy, evaluated top to bottom; the first line whose prefix and method both match
  * decides. Refusals and exceptions therefore come before the grants they carve out of, the
- * way a firewall's rules do. A request no line matches is refused, so a route prefix added
- * later reaches only `full` keys — through the `/api` line at the bottom — until someone
- * decides here what narrower keys may do with it.
+ * way a firewall's rules do. A new route under a prefix listed here inherits that line's
+ * grant for the methods it names: a new GET under /api/docker is readable with a `read` key.
+ * A request that matches no narrower line falls to the `/api` line at the bottom and needs
+ * `full`, so a whole new prefix reaches only `full` keys until someone decides here what
+ * narrower keys may do with it.
  */
 export const API_KEY_RULES: readonly ApiKeyRule[] = [
   // ── Never, with any key ──────────────────────────────────────────────────────

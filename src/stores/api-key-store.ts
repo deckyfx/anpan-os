@@ -74,17 +74,6 @@ export class ApiKeyStore {
     return removed.length > 0;
   }
 
-  /**
-   * Delete every key `userId` holds, returning their ids.
-   *
-   * Called on a password change, which already ends every browser session: a key created
-   * from a stolen session would otherwise outlive the very step that evicts the thief.
-   */
-  static async revokeAllFor(userId: number): Promise<string[]> {
-    const removed = await db.delete(apiKeys).where(eq(apiKeys.userId, userId)).returning({ id: apiKeys.id });
-    return removed.map(r => r.id);
-  }
-
   /** Record a use. Called at most once a minute per key — see lib/api-key-auth. */
   static async touch(id: string, at: Date, ip: string | null): Promise<void> {
     await db.update(apiKeys).set({ lastUsedAt: at, lastUsedIp: ip }).where(eq(apiKeys.id, id));

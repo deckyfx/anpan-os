@@ -10,7 +10,11 @@ import { INPUT, LABEL, PRIMARY_BUTTON, QUIET_BUTTON } from "./styles";
  * Inline rather than in a dialog, so a stray click or Escape cannot throw away what was
  * typed. On success the fields are cleared and `onDone` is called; Cancel clears them too.
  */
-export function ChangePasswordForm({ onDone }: { onDone: () => void }) {
+export function ChangePasswordForm({ onDone, onChanged }: {
+  onDone: () => void;
+  /** Called only when the password really changed, not on Cancel. */
+  onChanged?: () => void;
+}) {
   const [current, setCurrent] = useState("");
   const [next,    setNext]    = useState("");
   const [confirm, setConfirm] = useState("");
@@ -34,8 +38,9 @@ export function ChangePasswordForm({ onDone }: { onDone: () => void }) {
         setError((err.value as { error?: string })?.error ?? "Server error");
         return;
       }
-      useToastStore.getState().push("Password changed", "success");
+      useToastStore.getState().push("Password changed. Other sessions and every API key were revoked.", "success");
       reset();
+      onChanged?.();
       onDone();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Unexpected error");

@@ -51,6 +51,29 @@ describe("StackStore.delete", () => {
   });
 });
 
+describe("fences against work already in flight", () => {
+  test("a listing that started before a delete does not count the stack as present", async () => {
+    await StackStore.upsert({ id: "fence-a", managed: true });
+    const listedAt = Date.now();
+    await StackStore.delete("fence-a");
+    expect(StackStore.deletedSince("fence-a", listedAt)).toBe(true);
+    expect(StackStore.deletedSince("fence-a", Date.now() + 1)).toBe(false);
+  });
+
+  test("an update-check sweep that started before a delete cannot write the stack back", async () => {
+    await StackStore.upsert({ id: "fence-b", managed: true });
+    const run = await UpdateCheckStore.createRun(false, 1);
+    const sweepStartedAt = Date.now() - 1;
+    await StackStore.delete("fence-b");
+
+    expect(await UpdateCheckStore.putResult(run.id, { stack: "fence-b", image: "x/y" }, sweepStartedAt)).toBeNull();
+    expect((await UpdateCheckStore.allState()).some(r => r.stack === "fence-b")).toBe(false);
+    // A sweep that starts afterwards checks it again, so a redeployed stack is not ignored.
+    expect(await UpdateCheckStore.putResult(run.id, { stack: "fence-b", image: "x/y" }, Date.now() + 1)).not.toBeNull();
+    await UpdateCheckStore.purge();
+  });
+});
+
 describe("routes", () => {
   const client = createTestClient();
   let cookie = "";

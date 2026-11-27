@@ -122,3 +122,16 @@ describe("checkability", () => {
     expect(r.reason).toContain("digest");
   });
 });
+
+describe("parseImageRef — Docker's separator grammar", () => {
+  test("double underscores and runs of dashes are valid", () => {
+    expect(parseImageRef("myuser/my__app")?.repository).toBe("myuser/my__app");
+    expect(parseImageRef("myuser/my--app")?.repository).toBe("myuser/my--app");
+  });
+
+  test("three underscores, doubled dots and trailing separators are not", () => {
+    for (const bad of ["myuser/my___app", "myuser/my..app", "myuser/app-", "myuser/_app"]) {
+      expect(parseImageRef(bad)).toBeNull();
+    }
+  });
+});

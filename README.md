@@ -323,7 +323,7 @@ curl -H "Authorization: Bearer $ANPAN_API_KEY" https://anpan.local:5000/api/open
 | `operate` | `read`, plus creating, starting, stopping and updating stacks and containers, the update check, App Store, bookmarks and port notes. Not deleting a stack (it removes volumes), prune, files, Samba or shutdown |
 | `full` | Everything the web UI can do, except account settings and managing API keys |
 
-A request outside the key's scope gets **403**; a wrong, revoked or expired key gets **401**. Rules are deny-by-default, so a route added later is `full`-only until someone decides otherwise (`src/lib/api-key-scope.ts`).
+A request outside the key's scope gets **403**; a wrong, revoked or expired key gets **401**. The rules (`src/lib/api-key-scope.ts`) are prefix and method grants, checked in order. A new route under an existing prefix inherits that prefix's grant for the methods it lists, so a new `GET /api/docker/…` is readable with a `read` key. A request that matches no grant, such as anything under a new prefix, needs `full`.
 
 Things to know:
 

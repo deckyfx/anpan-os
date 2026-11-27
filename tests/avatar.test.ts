@@ -155,7 +155,11 @@ describe("avatar routes", () => {
       headers: { cookie, "content-type": "application/json" },
       body: JSON.stringify({ name: "avatar-probe", scope: "full", expiresInDays: null, password }),
     });
+    // Without this, a failed mint would send "Bearer undefined", which is refused too, and the
+    // test would pass without ever trying a real key.
+    expect(minted.status).toBe(200);
     const { key } = await minted.json() as { key: string };
+    expect(key).toStartWith("anpan_");
     const auth = { authorization: `Bearer ${key}` };
 
     expect((await request("/api/auth/avatar", { headers: auth })).status).toBe(403);
@@ -175,9 +179,30 @@ describe("avatar routes", () => {
 
     const user = (await UserStore.findById(userId))!;
     expect(user.avatarType).toBeNull();
-    expect(user.avatarUpdatedAt).toBeNull();
+    // Kept on purpose: it is the URL version, which a later upload must move past.
+    expect(user.avatarUpdatedAt).not.toBeNull();
     const status = await request("/api/auth/status", { headers: { cookie } });
     expect(await status.json()).toMatchObject({ username, avatarUrl: null });
+  });
+
+  test("every upload gets a new URL, even within the same second and after a removal", async () => {
+    const urls: string[] = [];
+    for (let i = 0; i < 2; i++) {
+      const res = await upload(PNG, "a.png", "image/png");
+      urls.push((await res.json() as { avatarUrl: string }).avatarUrl);
+    }
+    await request("/api/auth/avatar", { method: "DELETE", headers: { cookie } });
+    urls.push((await (await upload(PNG, "a.png", "image/png")).json() as { avatarUrl: string }).avatarUrl);
+    expect(new Set(urls).size).toBe(3);
+  });
+
+  test("an upload and a removal sent together leave row and file agreeing", async () => {
+    await Promise.all([
+      upload(PNG, "a.png", "image/png"),
+      request("/api/auth/avatar", { method: "DELETE", headers: { cookie } }),
+    ]);
+    const user = (await UserStore.findById(userId))!;
+    expect(Boolean(user.avatarType)).toBe(await Bun.file(avatarPath(userId)).exists());
   });
 
   test("status names nobody without a live session", async () => {

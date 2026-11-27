@@ -1,10 +1,24 @@
 import { eq, sql } from "drizzle-orm";
 import { db } from "../db/index";
-import { stacks } from "../db/schema";
+import { imageUpdateState, stacks } from "../db/schema";
 import type { Stack, NewStack } from "../db/schema";
 import { UpdateCheckStore } from "./update-check-store";
 
+/** When each stack was last deleted, so a listing already in flight cannot re-add it. */
+const deletedAt = new Map<string, number>();
+
 export class StackStore {
+  /**
+   * Whether `id` was deleted at or after `since`.
+   *
+   * GET /api/docker/stacks lists Docker and then upserts every name it saw. A listing taken
+   * before a stack's containers were removed, landing after Forget, would otherwise put the
+   * forgotten row straight back.
+   */
+  static deletedSince(id: string, since: number): boolean {
+    return (deletedAt.get(id) ?? -Infinity) >= since;
+  }
+
   static async findAll(): Promise<Stack[]> {
     return db.select().from(stacks);
   }
@@ -61,7 +75,15 @@ export class StackStore {
    * full sweep happened to prune it.
    */
   static async delete(id: string): Promise<void> {
-    await db.delete(stacks).where(eq(stacks.id, id));
-    await UpdateCheckStore.forgetStack(id);
+    // One transaction: if the second delete failed after the first committed, a retry would
+    // find no row, answer 404, and never clear the results.
+    db.transaction(tx => {
+      tx.delete(stacks).where(eq(stacks.id, id)).run();
+      tx.delete(imageUpdateState).where(eq(imageUpdateState.stack, id)).run();
+    });
+    const now = Date.now();
+    deletedAt.set(id, now);
+    for (const [name, t] of deletedAt) if (now - t > 60 * 60_000) deletedAt.delete(name);
+    UpdateCheckStore.fenceStack(id, now);
   }
 }

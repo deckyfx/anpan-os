@@ -26,11 +26,13 @@ export const DOCKER_HUB_REGISTRY = "registry-1.docker.io";
 const DOCKER_HUB_ALIASES = new Set(["docker.io", "index.docker.io", DOCKER_HUB_REGISTRY]);
 
 /**
- * Docker's repository name grammar: lowercase alphanumerics, with separators between
- * them. Validating here means a malformed name is rejected once, rather than every
+ * Docker's repository name grammar (distribution/reference): lowercase alphanumerics,
+ * separated by one `.` or `_`, exactly two `_`, or any run of `-` — so `my__app` and
+ * `my--app` are valid, while `my___app`, `my..app` and a trailing separator are not. Validating here means a malformed name is rejected once, rather than every
  * consumer having to guard against what it might do to a URL or a filesystem path.
  */
-const REPOSITORY_RE = /^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$/;
+const COMPONENT = "[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*";
+const REPOSITORY_RE = new RegExp(`^${COMPONENT}(?:\\/${COMPONENT})*$`);
 
 /**
  * A registry host: dot-separated labels with an optional port, or localhost.

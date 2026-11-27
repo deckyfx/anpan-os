@@ -92,6 +92,19 @@ describe("listTags — other registries", () => {
     expect(result.ok && result.tags.map(t => t.name)).toEqual(["latest", "18.25.1", "18.21.0", "18.3.0"]);
   });
 
+  test("a registry using Basic auth gets the docker login, not the token flow", async () => {
+    const creds: CredentialSet = { for: (r) => r === "registry.example.com" ? { username: "u", password: "p" } : null, helperOnly: [] };
+    serve((url, init) => {
+      const auth = new Headers(init?.headers).get("authorization");
+      if (auth !== `Basic ${btoa("u:p")}`) {
+        return new Response(null, { status: 401, headers: { "www-authenticate": 'Basic realm="Registry Realm"' } });
+      }
+      return json({ tags: ["1.0"] });
+    });
+    expect(await listTags("registry.example.com/team/app", { credentials: creds }))
+      .toEqual({ ok: true, tags: [{ name: "1.0", updated: null }] });
+  });
+
   test("follows Link pagination on the registry's own origin", async () => {
     serve((url) => url.searchParams.get("last")
       ? json({ tags: ["b"] })

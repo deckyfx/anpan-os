@@ -16,6 +16,9 @@ export interface ResultInput {
   skippedReason?: string | null;
 }
 
+/** When each recently deleted stack was fenced off from running sweeps; see fenceStack. */
+const fencedAt = new Map<string, number>();
+
 /** Repository for update-check runs and per-image update state. */
 export class UpdateCheckStore {
   // Runs
@@ -118,7 +121,9 @@ export class UpdateCheckStore {
    * digests agree again, so it answers "how long has this been waiting" without a history
    * table behind it.
    */
-  static async putResult(runId: number, r: ResultInput): Promise<ImageUpdateStateRow | null> {
+  static async putResult(runId: number, r: ResultInput, sweepStartedAt?: number): Promise<ImageUpdateStateRow | null> {
+    // Null, like a failed write: the sweep then neither counts nor publishes it.
+    if (sweepStartedAt !== undefined && (fencedAt.get(r.stack) ?? -Infinity) >= sweepStartedAt) return null;
     const hasUpdate = r.hasUpdate ?? false;
     const now = new Date();
     const nowSeconds = Math.floor(now.getTime() / 1000);
@@ -190,14 +195,18 @@ export class UpdateCheckStore {
   }
 
   /**
-   * Drop every stored result for one stack.
+   * Stop a sweep already in progress from writing results for a stack that was just deleted
+   * or forgotten.
    *
-   * Called when the stack itself is deleted or forgotten. {@link retainOnly} would get there
-   * eventually, but only after the next full sweep, and until then the update report keeps
-   * listing a stack that no longer exists.
+   * The stack's rows are deleted with the stack (StackStore.delete), but a sweep that listed
+   * it before the delete can still be checking it, and would write its row back and publish
+   * it, so the update report would list a stack that no longer exists. Results from sweeps
+   * that started after the fence are written normally, so a redeployed stack is checked again.
    */
-  static async forgetStack(stack: string): Promise<number> {
-    return (await db.delete(imageUpdateState).where(eq(imageUpdateState.stack, stack)).returning()).length;
+  static fenceStack(stack: string, at = Date.now()): void {
+    fencedAt.set(stack, at);
+    // A fence only matters to sweeps already running, and none outlives an hour.
+    for (const [name, t] of fencedAt) if (at - t > 60 * 60_000) fencedAt.delete(name);
   }
 
   /** Remove all stored results and run history. Badges reappear after the next sweep. */

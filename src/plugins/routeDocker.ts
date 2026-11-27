@@ -81,15 +81,17 @@ export function dockerPlugin(jwtSecret: string) {
     })
 
     .get("/stacks", async ({ set }) => {
+      const listedAt = Date.now();
       const result = await DockerClient.listStacks();
       if (!result.ok) { set.status = 502; return { error: result.error }; }
 
       // Sync discovered stacks into DB (only seeds icon from Docker label; never overwrites user edits)
       // Wrapped in try/catch so a transient DB error doesn't abort the poll response.
       try {
-        await Promise.all(result.data.map(s =>
-          StackStore.upsert({ id: s.name, ...(s.icon ? { icon: s.icon } : {}) }),
-        ));
+        await Promise.all(result.data
+          // A stack deleted or forgotten while this listing was in flight stays gone.
+          .filter(s => !StackStore.deletedSince(s.name, listedAt))
+          .map(s => StackStore.upsert({ id: s.name, ...(s.icon ? { icon: s.icon } : {}) })));
       } catch (e) { console.error("[stacks] upsert failed:", e); }
 
       // Merge live Docker state with DB metadata + compose origin

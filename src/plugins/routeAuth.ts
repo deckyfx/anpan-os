@@ -7,7 +7,7 @@ import { commands } from "../lib/commands";
 import { issueSession, sessionIdOf, verifySession } from "../lib/session-auth";
 import type { JwtCtx } from "../lib/session-auth";
 import { SessionStore } from "../stores/session-store";
-import { ApiKeyStore } from "../stores/api-key-store";
+import { KeyedLock } from "../lib/keyed-lock";
 import { forgetApiKeyUse } from "../lib/api-key-auth";
 import { LoginThrottle } from "../lib/login-throttle";
 import { SignInLimiter } from "../lib/sign-in-limiter";
@@ -112,6 +112,9 @@ const signInLimiter = new SignInLimiter();
  * /password route for why the key is the session rather than the user.
  */
 const passwordThrottle = new LoginThrottle();
+
+/** Avatar uploads and removals, one at a time per user; see the PUT /avatar route. */
+const avatarLock = new KeyedLock();
 
 /** The address of the connection itself, or "unknown" where there is none (in-process). */
 function clientAddress(
@@ -397,9 +400,12 @@ export function authPlugin(jwtSecret: string) {
           return { error: "The file is not a PNG, JPEG or WebP image" };
         }
 
-        await writeAvatar(user.id, bytes);
-        const at = new Date();
-        await UserStore.setAvatar(user.id, type, at);
+        // File and row change together, one request per user at a time: interleaved with a
+        // removal, the row could advertise an avatar whose file was just deleted.
+        const at = await avatarLock.run(String(user.id), async () => {
+          await writeAvatar(user.id, bytes);
+          return UserStore.setAvatar(user.id, type);
+        });
         return { avatarUrl: avatarUrlOf({ avatarType: type, avatarUpdatedAt: at })! };
       },
       {
@@ -412,8 +418,10 @@ export function authPlugin(jwtSecret: string) {
     .delete("/avatar", async ({ jwt: jwtCtx, cookie: { anpan_session }, request, set }) => {
       const user = await accountUser(jwtCtx, anpan_session.value, request, set);
       if (!user) return { error: set.status === 403 ? BEARER_REFUSED : "Not authenticated" };
-      await UserStore.clearAvatar(user.id);
-      await removeAvatar(user.id);
+      await avatarLock.run(String(user.id), async () => {
+        await UserStore.clearAvatar(user.id);
+        await removeAvatar(user.id);
+      });
       return { ok: true };
     })
 
@@ -446,15 +454,13 @@ export function authPlugin(jwtSecret: string) {
           passwordThrottle.recordSuccess(key);
 
           const hash = await Bun.password.hash(body.newPassword);
-          await UserStore.updatePassword(user.id, hash);
 
-          // A new password ends every session: the bumped tokenVersion already refuses their
-          // tokens, and their rows go too. This browser then gets a fresh session, so the
-          // user who just changed it stays signed in.
-          await SessionStore.revokeAllFor(user.id);
-          // API keys go too, for the same reason: one created from a stolen session must not
-          // survive the password change that evicts it.
-          for (const id of await ApiKeyStore.revokeAllFor(user.id)) forgetApiKeyUse(id);
+          // A new password ends every session (the bumped tokenVersion already refuses their
+          // tokens, and their rows go too) and every API key, so one created from a stolen
+          // session cannot survive the change that evicts it. All in one transaction; see
+          // changePasswordAndRevoke. This browser then gets a fresh session, so the user who
+          // just changed it stays signed in.
+          for (const id of UserStore.changePasswordAndRevoke(user.id, hash)) forgetApiKeyUse(id);
           const updated = await UserStore.findById(user.id);
           if (updated) await issueSession(jwtCtx, anpan_session, updated, request);
 

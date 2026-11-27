@@ -101,7 +101,14 @@ export function apiKeysPlugin(jwtSecret: string) {
       if (wait > 0) {
         const seconds = Math.ceil(wait / 1000);
         set.headers["retry-after"] = String(seconds);
-        return status(429, { error: `Too many failed attempts — try again in ${seconds} s` });
+        // A wait with no delay in force means another create from this session is still
+        // checking its password, typically a double submit, not a run of wrong guesses.
+        const busy = createThrottle.retryAfterMs(throttleKey) === 0;
+        return status(429, {
+          error: busy
+            ? "Another key is still being created — try again in a moment"
+            : `Too many failed attempts — try again in ${seconds} s`,
+        });
       }
       try {
         if (!(await UserStore.verifyPassword(owner, body.password))) {

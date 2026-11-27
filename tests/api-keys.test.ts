@@ -2,10 +2,11 @@ import { test, expect, describe, beforeAll, afterAll, spyOn } from "bun:test";
 import { eq } from "drizzle-orm";
 import { createApp } from "../src/app";
 import { db } from "../src/db/index";
-import { apiKeys, users } from "../src/db/schema";
+import { apiKeys, sessions, users } from "../src/db/schema";
 import { UserStore } from "../src/stores/user-store";
+import { SessionStore } from "../src/stores/session-store";
 import { ApiKeyStore, MAX_API_KEYS_PER_USER } from "../src/stores/api-key-store";
-import { noteApiKeyUse, parseApiKeyToken } from "../src/lib/api-key-auth";
+import { generateApiKeyToken, noteApiKeyUse, parseApiKeyToken } from "../src/lib/api-key-auth";
 import { TEST_JWT, extractCookie } from "./helpers";
 
 /**
@@ -126,8 +127,16 @@ describe("minting and listing", () => {
   });
 
   test(`more than ${MAX_API_KEYS_PER_USER} keys → 409`, async () => {
+    // Filled through the store, not the API: each API create checks the password with a
+    // deliberately slow hash, and 50 of them overran the 5 s test timeout on macOS runners.
+    // The abandoned request then still held the per-session password check, so every later
+    // create in this file got a 429.
     const held = (await ApiKeyStore.listFor(userId)).length;
-    for (let i = held; i < MAX_API_KEYS_PER_USER; i++) await mint("read", `filler-${i}`);
+    const version = (await UserStore.findById(userId))?.tokenVersion ?? 0;
+    for (let i = held; i < MAX_API_KEYS_PER_USER; i++) {
+      const { id, secretHash } = generateApiKeyToken();
+      ApiKeyStore.create({ id, userId, name: `filler-${i}`, scope: "read", secretHash }, version);
+    }
     const res = await request("/api/api-keys", {
       method: "POST",
       headers: { cookie, "content-type": "application/json" },
@@ -359,6 +368,29 @@ describe("a password change", () => {
 
     expect((await request("/api/me", { headers: bearer(key) })).status).toBe(401);
     expect(await ApiKeyStore.listFor(userId)).toEqual([]);
+  });
+});
+
+describe("UserStore.changePasswordAndRevoke", () => {
+  test("changes the password, bumps tokenVersion and ends every session and key, together", async () => {
+    const other = await UserStore.create(`atomic-${crypto.randomUUID().slice(0, 8)}`, "atomic-password-1");
+    try {
+      const { id, secretHash } = generateApiKeyToken();
+      ApiKeyStore.create({ id, userId: other.id, name: "k", scope: "read", secretHash }, other.tokenVersion ?? 0);
+      await SessionStore.create(other.id);
+
+      const revoked = UserStore.changePasswordAndRevoke(other.id, await Bun.password.hash("atomic-password-2"));
+
+      expect(revoked).toEqual([id]);
+      const after = (await UserStore.findById(other.id))!;
+      expect(after.tokenVersion).toBe((other.tokenVersion ?? 0) + 1);
+      expect(await UserStore.verifyPassword(after, "atomic-password-2")).toBe(true);
+      expect(await ApiKeyStore.listFor(other.id)).toEqual([]);
+      expect(await db.select().from(sessions).where(eq(sessions.userId, other.id))).toEqual([]);
+    } finally {
+      await db.delete(apiKeys).where(eq(apiKeys.userId, other.id));
+      await db.delete(users).where(eq(users.id, other.id));
+    }
   });
 });
 
