@@ -42,7 +42,7 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 
 // ─── Tag picker ───────────────────────────────────────────────────────────────
 
-interface TagEntry { name: string; updated: string }
+interface TagEntry { name: string; updated: string | null }
 
 function TagPicker({ imageName, currentTag, onSelect }: {
   imageName:  string;

@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Search, Settings, X } from "lucide-react";
 import { useAppStoreStore } from "../../stores/appStoreStore";
-import { useAuthStore } from "../../stores/authStore";
 import { useStacksStore } from "../../stores/stacksStore";
 import { TopBar } from "../home/TopBar";
 import { AppCard } from "./AppCard";
@@ -16,7 +15,6 @@ export function AppStorePage({ onNavigate }: { onNavigate: (path: string) => voi
     setRepoManagerOpen, loadRepos, loadApps,
   } = useAppStoreStore();
 
-  const { username, logout, hasPasskey, registerPasskey } = useAuthStore();
   const version = useStacksStore(s => s.version);
 
   const [dismissedErrors, setDismissedErrors] = useState<Set<string>>(new Set());
@@ -67,12 +65,8 @@ export function AppStorePage({ onNavigate }: { onNavigate: (path: string) => voi
   return (
     <div className="flex flex-col h-screen bg-gray-950 text-white overflow-hidden">
       <TopBar
-        username={username}
         version={version}
-        hasPasskey={hasPasskey}
-        onLogout={logout}
         onNavigate={onNavigate}
-        onAddPasskey={() => registerPasskey("This device")}
         currentPath="/store"
       />
 

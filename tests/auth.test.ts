@@ -28,9 +28,7 @@ describe("auth flow", () => {
     const { data, response } = await client.api.auth.status.get();
 
     expect(response.status).toBe(200);
-    const body = data as { initialized: boolean; authenticated: boolean } | null;
-    expect(body?.initialized).toBe(false);
-    expect(body?.authenticated).toBe(false);
+    expect(data).toEqual({ initialized: false, authenticated: false, username: null, avatarUrl: null });
   });
 
   // 2. Setup ───────────────────────────────────────────────────────────────────
@@ -42,9 +40,7 @@ describe("auth flow", () => {
     });
 
     expect(response.status).toBe(200);
-    const body = data as { ok: boolean; username: string } | null;
-    expect(body?.ok).toBe(true);
-    expect(body?.username).toBe("admin");
+    expect(data).toEqual({ ok: true, username: "admin", avatarUrl: null });
 
     ({ cookie: sessionCookie, jwt: capturedJwt } = extractCookie(response));
   });
@@ -65,9 +61,8 @@ describe("auth flow", () => {
     });
 
     expect(response.status).toBe(200);
-    const body = data as { initialized: boolean; authenticated: boolean } | null;
-    expect(body?.initialized).toBe(true);
-    expect(body?.authenticated).toBe(true);
+    // Who is signed in, so a reloaded page needs no second request to show it.
+    expect(data).toEqual({ initialized: true, authenticated: true, username: "admin", avatarUrl: null });
   });
 
   test("GET /api/me — guarded route returns user info", async () => {
@@ -102,9 +97,9 @@ describe("auth flow", () => {
     expect(response.status).toBe(401);
   });
 
-  test("GET /api/me — 401 with Bearer token after logout (guard is cookie-only)", async () => {
-    // The JWT is still cryptographically valid, but the auth guard reads only the
-    // session cookie. Passing the same token via Authorization header must still fail.
+  test("GET /api/me — 401 with the session JWT sent as a Bearer token", async () => {
+    // The JWT is still cryptographically valid, but a Bearer credential must be an API key
+    // (anpan_<id>_<secret>); a session token there is just a malformed key.
     const { response } = await client.api.me.get({
       headers: { Authorization: `Bearer ${capturedJwt}` },
     });

@@ -1,6 +1,6 @@
 {
   "name": "anpan-os",
-  "version": "0.13.2",
+  "version": "0.14.0",
   "module": "src/index.ts",
   "type": "module",
   "private": true,
@@ -18,14 +18,15 @@
   "dependencies": {
     "@elysiajs/eden": "^1.4.9",
     "@elysiajs/jwt": "^1.4.2",
+    "@elysiajs/openapi": "^1.4.17",
     "@fontsource/fira-code": "^5.3.0",
     "@fontsource/inter": "^5.3.0",
     "@monaco-editor/react": "^4.7.0",
     "@simplewebauthn/browser": "^13.3.0",
     "@simplewebauthn/server": "^13.3.3",
     "drizzle-orm": "^0.45.4",
-    "elysia": "^1.4.30",
-    "lucide-react": "^1.57.0",
+    "elysia": "^1.4.32",
+    "lucide-react": "^1.82.0",
     "music-metadata": "^11.16.1",
     "node-id3": "^0.2.9",
     "plyr": "^3.8.5",
@@ -33,15 +34,15 @@
     "react-dom": "^19.3.1",
     "viewerjs": "^1.15.2",
     "yaml": "^2.9.1",
-    "zustand": "^5.0.15"
+    "zustand": "^5.1.0"
   },
   "devDependencies": {
     "@types/bun": "latest",
-    "@types/react": "^19.3.0",
+    "@types/react": "^19.3.3",
     "@types/react-dom": "^19.3.0",
     "bun-plugin-tailwind": "^0.1.2",
     "drizzle-kit": "^0.31.11",
-    "tailwindcss": "^4.3.3",
+    "tailwindcss": "^4.3.5",
     "typescript": "^7.0.2"
   },
   "peerDependencies": {

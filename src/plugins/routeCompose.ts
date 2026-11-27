@@ -19,6 +19,8 @@ import {
 import type { ComposeSourceReport } from "../lib/compose-source";
 import { CASAOS_APPS_DIR } from "../lib/platform";
 import { STACK_NAME_RE } from "../constants/stack";
+import { listTags } from "../lib/registry";
+import { loadDockerCredentials } from "../lib/docker-credentials";
 
 const CONTAINER_NAME_RE = /^[a-zA-Z0-9_.\-]+$/;
 
@@ -653,28 +655,23 @@ export function composePlugin(jwtSecret: string) {
       for await (const msg of agg) yield sse({ data: msg });
     })
 
-    // ── Docker Hub tag proxy ───────────────────────────────────────────────────
-    // Proxies to hub.docker.com so the browser avoids CORS and rate-limit issues.
-    // image may be "nginx", "library/nginx", or "myorg/myimage".
+    // ── Image tag lookup ──────────────────────────────────────────────────────
+    // Done server-side so the browser avoids CORS, and so registry logins stay on the host.
+    // `image` is a name without a tag: "nginx", "jellyfin/jellyfin", "ghcr.io/owner/app".
     .get("/tags", async ({ query, set }) => {
-      const image = (query as Record<string, string>).image ?? "";
+      const image = query.image.trim();
       if (!image) { set.status = 422; return { error: "image query param required" }; }
 
-      // Normalise: bare image names (e.g. "nginx") belong to "library"
-      const [ns, repo] = image.includes("/") ? image.split("/", 2) : ["library", image];
-      const url = `https://hub.docker.com/v2/repositories/${ns}/${repo}/tags?page_size=25&ordering=last_updated`;
+      const result = await listTags(image, { credentials: await loadDockerCredentials() });
+      if (result.ok) return { tags: result.tags };
 
-      try {
-        const res = await fetch(url, {
-          headers: { "Accept": "application/json" },
-          signal: AbortSignal.timeout(8_000),
-        });
-        if (!res.ok) { set.status = res.status; return { error: `Docker Hub returned ${res.status}` }; }
-        const data = await res.json() as { results?: Array<{ name: string; last_updated: string }> };
-        return { tags: (data.results ?? []).map(r => ({ name: r.name, updated: r.last_updated })) };
-      } catch (err) {
-        set.status = 502;
-        return { error: err instanceof Error ? err.message : "Failed to fetch tags" };
-      }
+      // Never 401: the client reads that as its own session having expired.
+      set.status = { invalid: 422, "not-found": 404, "rate-limited": 429, failed: 502 }[result.reason];
+      return { error: result.error };
+    }, {
+      query: t.Object({
+        image: t.String({ description: "Image name without a tag, e.g. `nginx`, `jellyfin/jellyfin`, `ghcr.io/owner/app`" }),
+      }),
+      detail: { summary: "List the tags of an image from its own registry" },
     });
 }

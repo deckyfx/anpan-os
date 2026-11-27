@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
 import { useStacksStore }   from "../stores/stacksStore";
-import { useAuthStore }     from "../stores/authStore";
 import { useBookmarkStore } from "../stores/bookmarkStore";
 import { useToastStore }    from "../stores/toastStore";
 import { useUpdateCheckStore } from "../stores/updateCheckStore";
@@ -30,13 +29,9 @@ import { useFileStore }      from "../stores/fileStore";
 
 import type { Stack, StackAction, Bookmark } from "./home/types";
 
-export function HomePage({ username, onLogout, onNavigate }: {
-  username: string;
-  onLogout: () => void;
+export function HomePage({ onNavigate }: {
   onNavigate: (path: string) => void;
 }) {
-  const { hasPasskey, registerPasskey } = useAuthStore();
-
   const {
     stacks, stats, summary, version,
     sortMode, setSortMode,
@@ -160,12 +155,8 @@ export function HomePage({ username, onLogout, onNavigate }: {
     <div className="h-screen bg-gray-950 text-white flex flex-col overflow-hidden">
 
       <TopBar
-        username={username}
         version={version}
-        hasPasskey={hasPasskey}
-        onLogout={onLogout}
         onNavigate={onNavigate}
-        onAddPasskey={() => registerPasskey("This device")}
       />
 
       <div className="flex-1 flex overflow-hidden">

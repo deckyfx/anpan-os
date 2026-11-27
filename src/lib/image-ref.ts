@@ -20,14 +20,19 @@ export interface ImageRef {
   raw: string;
 }
 
-const DOCKER_HUB_REGISTRY = "registry-1.docker.io";
+export const DOCKER_HUB_REGISTRY = "registry-1.docker.io";
+
+/** Hosts that mean Docker Hub when written in an image reference. */
+const DOCKER_HUB_ALIASES = new Set(["docker.io", "index.docker.io", DOCKER_HUB_REGISTRY]);
 
 /**
- * Docker's repository name grammar: lowercase alphanumerics, with separators between
- * them. Validating here means a malformed name is rejected once, rather than every
+ * Docker's repository name grammar (distribution/reference): lowercase alphanumerics,
+ * separated by one `.` or `_`, exactly two `_`, or any run of `-` — so `my__app` and
+ * `my--app` are valid, while `my___app`, `my..app` and a trailing separator are not. Validating here means a malformed name is rejected once, rather than every
  * consumer having to guard against what it might do to a URL or a filesystem path.
  */
-const REPOSITORY_RE = /^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$/;
+const COMPONENT = "[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*";
+const REPOSITORY_RE = new RegExp(`^${COMPONENT}(?:\\/${COMPONENT})*$`);
 
 /**
  * A registry host: dot-separated labels with an optional port, or localhost.
@@ -82,7 +87,9 @@ export function parseImageRef(raw: string): ImageRef | null {
   if (slash !== -1) {
     const head = remainder.slice(0, slash);
     if (isRegistryHost(head)) {
-      registry = head;
+      // "docker.io/nginx" is Docker Hub written out in full, not a separate registry: there
+      // is no registry API at docker.io, and the bare name still means library/nginx.
+      registry = DOCKER_HUB_ALIASES.has(head) ? DOCKER_HUB_REGISTRY : head;
       path = remainder.slice(slash + 1);
     }
   }

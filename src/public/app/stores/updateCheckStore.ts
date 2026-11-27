@@ -63,6 +63,8 @@ interface UpdateCheckState {
   startCheck: (opts?: { auto?: boolean; force?: boolean; stack?: string }) => Promise<StartOutcome | null>;
   cancelCheck: () => Promise<void>;
   purge: () => Promise<void>;
+  /** Drop the results held for a stack that was just deleted or forgotten. */
+  forgetStack: (stackName: string) => void;
   dismissBlocked: () => void;
   openDialog: () => void;
   closeDialog: () => void;
@@ -111,6 +113,15 @@ function mergeResult(list: ImageUpdateResult[], incoming: ImageUpdateResult): Im
   return next;
 }
 
+/**
+ * Stacks deleted or forgotten from this page since the last snapshot or sweep start.
+ *
+ * The server stops a running sweep from publishing them, but a result already on its way
+ * could still arrive after the forget and put the stack back in the list. Cleared by the next
+ * snapshot or sweep start, both of which already reflect the deletion.
+ */
+const forgottenStacks = new Set<string>();
+
 export const useUpdateCheckStore = create<UpdateCheckState>((set, get) => ({
   connected:  false,
   running:    false,
@@ -141,14 +152,19 @@ export const useUpdateCheckStore = create<UpdateCheckState>((set, get) => ({
 
           switch (msg.type) {
             case "snapshot":
+              // A snapshot is the server's current truth, deleted stacks already gone from it.
+              forgottenStacks.clear();
               set({ running: msg.running, run: msg.run, results: msg.results ?? [] });
               break;
             case "started":
               // Results are kept rather than cleared: they stay valid until each is
               // rechecked, so badges do not blink off for the length of a sweep.
+              // A sweep that starts after a forget checks the stack afresh if it is back.
+              forgottenStacks.clear();
               set({ running: true, run: msg.run, blocked: null });
               break;
             case "result":
+              if (forgottenStacks.has(msg.result.stack)) break;
               set(s => ({ results: mergeResult(s.results, msg.result) }));
               break;
             case "progress":
@@ -282,6 +298,13 @@ export const useUpdateCheckStore = create<UpdateCheckState>((set, get) => ({
     } finally {
       set({ purging: false });
     }
+  },
+
+  // The server deletes the stack's rows itself; this keeps the open page in step with it
+  // instead of showing the stack's results until the next snapshot.
+  forgetStack: (stackName) => {
+    forgottenStacks.add(stackName);
+    set(s => ({ results: s.results.filter(r => r.stack !== stackName) }));
   },
 
   dismissBlocked: () => set({ blocked: null }),

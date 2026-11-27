@@ -6,6 +6,13 @@ export const users = sqliteTable("users", {
   username: text("username").notNull().unique(),
   passwordHash: text("password_hash").notNull(),
   tokenVersion: integer("token_version").notNull().default(0),
+  /**
+   * MIME type of the avatar stored at RUNTIME_CONFIG_DIR/avatars/<id> — image/png, image/jpeg
+   * or image/webp, sniffed from the bytes rather than taken from the upload. Null = none.
+   */
+  avatarType: text("avatar_type"),
+  /** When the avatar last changed; its unix seconds version the avatar URL for caching. */
+  avatarUpdatedAt: integer("avatar_updated_at", { mode: "timestamp" }),
   createdAt: integer("created_at", { mode: "timestamp" })
     .notNull()
     .default(sql`(unixepoch())`),
@@ -76,6 +83,30 @@ export const sessions = sqliteTable("sessions", {
   createdAt: integer("created_at", { mode: "timestamp" }).notNull().default(sql`(unixepoch())`),
 });
 
+/**
+ * Bearer tokens that let a script or agent call the API without a browser session.
+ *
+ * The token is `anpan_<id>_<secret>`. Only a SHA-256 of the secret is kept: the secret is
+ * 32 random bytes, so there is nothing for a slow hash to protect against, and a fast one
+ * keeps every keyed request from paying bcrypt's cost. A leaked database therefore yields
+ * no usable key. `scope` limits what a key may do — see lib/api-key-scope.
+ */
+export const apiKeys = sqliteTable("api_keys", {
+  /** 12 lowercase hex chars, random; also the token's public half. */
+  id:         text("id").primaryKey(),
+  userId:     integer("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  name:       text("name").notNull(),
+  /** "read" | "operate" | "full" */
+  scope:      text("scope").notNull(),
+  /** Hex SHA-256 of the token's secret half. */
+  secretHash: text("secret_hash").notNull(),
+  createdAt:  integer("created_at", { mode: "timestamp" }).notNull().default(sql`(unixepoch())`),
+  /** Null = never expires. */
+  expiresAt:  integer("expires_at", { mode: "timestamp" }),
+  lastUsedAt: integer("last_used_at", { mode: "timestamp" }),
+  lastUsedIp: text("last_used_ip"),
+});
+
 export type User    = typeof users.$inferSelect;
 export type NewUser = typeof users.$inferInsert;
 
@@ -86,6 +117,9 @@ export type Session = typeof sessions.$inferSelect;
 
 export type Passkey    = typeof passkeys.$inferSelect;
 export type NewPasskey = typeof passkeys.$inferInsert;
+
+export type ApiKey    = typeof apiKeys.$inferSelect;
+export type NewApiKey = typeof apiKeys.$inferInsert;
 
 /**
  * Samba shares managed by anpan-os.

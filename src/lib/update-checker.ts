@@ -125,6 +125,9 @@ class UpdateChecker {
       }
     }
 
+    // Taken before discovery: a stack deleted after this point may still be in the target
+    // list, and its results must not be written back (see UpdateCheckStore.fenceStack).
+    const sweepStartedAt = Date.now();
     const discovered = await this.discover();
     if (!discovered.ok) return { started: false, reason: "no-docker", error: discovered.error };
 
@@ -139,7 +142,7 @@ class UpdateChecker {
     // open for the minutes the sweep may take. run() owns finalisation, so no status is
     // written here — a catch at this level ran after run()'s finally, which had already
     // decided there was nothing to publish.
-    const done = this.run(run.id, targets.data, abort, { scoped: Boolean(stack) })
+    const done = this.run(run.id, targets.data, abort, { scoped: Boolean(stack), sweepStartedAt })
       .finally(() => {
         // Only clear state still belonging to this run. A force-restart cancels the old
         // sweep and starts a new one, and the old promise settles afterwards — clearing
@@ -229,7 +232,7 @@ class UpdateChecker {
     runId: number,
     targets: Target[],
     controller: AbortController,
-    opts: { scoped: boolean } = { scoped: false },
+    opts: { scoped: boolean; sweepStartedAt?: number } = { scoped: false },
   ): Promise<void> {
     const signal = controller.signal;
     const tokenCache = createTokenCache();
@@ -253,17 +256,19 @@ class UpdateChecker {
         const outcome = await this.checkOne(target, tokenCache, signal, credentials);
         if (signal.aborted) return;
 
-        if (outcome.hasUpdate)      updatesFound++;
-        if (outcome.usedGetFallback) getFallbacks++;
-
         // Publishing the stored row rather than the raw outcome means subscribers and a
-        // page reload see byte-identical data.
-        const row = await UpdateCheckStore.putResult(runId, { ...target, ...outcome });
+        // page reload see byte-identical data. Null means the stack was deleted mid-sweep.
+        const row = await UpdateCheckStore.putResult(runId, { ...target, ...outcome }, opts.sweepStartedAt);
+        if (row && outcome.hasUpdate) updatesFound++;
+        if (outcome.usedGetFallback)  getFallbacks++;
         completed++;
 
         await UpdateCheckStore.recordProgress(runId, completed, updatesFound, getFallbacks);
 
-        if (row) this.bus.publish({ type: "result", result: row });
+        // Checked again: the stack may have been deleted while recordProgress was awaited.
+        if (row && !UpdateCheckStore.isFenced(row.stack, opts.sweepStartedAt)) {
+          this.bus.publish({ type: "result", result: row });
+        }
         this.bus.publish({ type: "progress", completed, total: targets.length, updatesFound });
       }
     };

@@ -56,6 +56,15 @@ describe("parseImageRef — other registries", () => {
     });
   });
 
+  test("docker.io written out is Docker Hub, with library/ for an official image", () => {
+    expect(parseImageRef("docker.io/nginx:1.29")).toMatchObject({
+      registry: "registry-1.docker.io", repository: "library/nginx", tag: "1.29",
+    });
+    expect(parseImageRef("index.docker.io/jellyfin/jellyfin")).toMatchObject({
+      registry: "registry-1.docker.io", repository: "jellyfin/jellyfin",
+    });
+  });
+
   test("host:port with no tag defaults to latest", () => {
     expect(parseImageRef("registry.internal:5000/team/app")).toMatchObject({
       registry: "registry.internal:5000", repository: "team/app", tag: "latest",
@@ -111,5 +120,18 @@ describe("checkability", () => {
     const r = checkability(parseImageRef(`nginx@${D}`)!);
     expect(r.checkable).toBe(false);
     expect(r.reason).toContain("digest");
+  });
+});
+
+describe("parseImageRef — Docker's separator grammar", () => {
+  test("double underscores and runs of dashes are valid", () => {
+    expect(parseImageRef("myuser/my__app")?.repository).toBe("myuser/my__app");
+    expect(parseImageRef("myuser/my--app")?.repository).toBe("myuser/my--app");
+  });
+
+  test("three underscores, doubled dots and trailing separators are not", () => {
+    for (const bad of ["myuser/my___app", "myuser/my..app", "myuser/app-", "myuser/_app"]) {
+      expect(parseImageRef(bad)).toBeNull();
+    }
   });
 });

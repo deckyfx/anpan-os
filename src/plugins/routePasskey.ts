@@ -11,6 +11,7 @@ import type {
   AuthenticationResponseJSON,
 } from "@simplewebauthn/server";
 import { config } from "../config";
+import { avatarUrlOf } from "../lib/avatar";
 import { authGuard } from "./authGuard";
 import { originGuard } from "./originGuard";
 import { UserStore } from "../stores/user-store";
@@ -176,7 +177,7 @@ export function passkeyPlugin(jwtSecret: string) {
 
         await issueSession(jwtCtx, anpan_session, dbUser, request);
 
-        return { ok: true, username: dbUser.username };
+        return { ok: true, username: dbUser.username, avatarUrl: avatarUrlOf(dbUser) };
       },
       {
         cookie: cookieSchema,

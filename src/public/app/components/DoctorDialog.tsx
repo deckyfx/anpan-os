@@ -7,6 +7,7 @@ import { Dialog } from "./Dialog";
 import { api } from "../lib/api";
 import { useSystemStore } from "../stores/systemStore";
 import { ComposeSourcesDialog } from "./ComposeSourcesDialog";
+import { MissingStacksDialog, fetchMissingStacks } from "./MissingStacksDialog";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -47,6 +48,7 @@ const INITIAL_CHECKS: Check[] = [
   { label: "Samba install", detail: "Checking…",    status: "pending" },
   { label: "Samba service", detail: "Checking…",    status: "pending" },
   { label: "Compose paths", detail: "Checking…",    status: "pending" },
+  { label: "Missing stacks", detail: "Checking…",   status: "pending" },
 ];
 
 // ─── Check runners ────────────────────────────────────────────────────────────
@@ -104,6 +106,23 @@ async function runComposeSourceCheck(set: (i: number, patch: Partial<Check>) => 
       : { status: "error", detail: `${stacks.length} stack${stacks.length !== 1 ? "s" : ""} drifted — click to review` });
   } catch {
     set(6, { status: "warn", detail: "Could not check compose paths" });
+  }
+}
+
+/**
+ * Check 7: stacks anpan-os has records for that Docker no longer has.
+ *
+ * A warning, not an error: nothing is broken, the records are only clutter, and the update
+ * check keeps reporting them. Forgetting them lives behind the dialog this row links to.
+ */
+async function runMissingStacksCheck(set: (i: number, patch: Partial<Check>) => void) {
+  try {
+    const missing = await fetchMissingStacks();
+    set(7, missing.length === 0
+      ? { status: "ok",   detail: "Every remembered stack is in Docker" }
+      : { status: "warn", detail: `${missing.length} stack${missing.length !== 1 ? "s" : ""} no longer in Docker. Click to review` });
+  } catch {
+    set(7, { status: "warn", detail: "Could not compare with Docker" });
   }
 }
 
@@ -221,6 +240,7 @@ export function DoctorDialog({ open, onClose }: {
   const [running,   setRunning]   = useState(false);
   const [configDir, setConfigDir] = useState<string | null>(null);
   const [sourcesOpen, setSourcesOpen] = useState(false);
+  const [missingOpen, setMissingOpen] = useState(false);
 
   const setCheck = (i: number, patch: Partial<Check>) =>
     setChecks(prev => prev.map((c, idx) => (idx === i ? { ...c, ...patch } : c)));
@@ -232,6 +252,7 @@ export function DoctorDialog({ open, onClose }: {
 
     await Promise.all([
       runComposeSourceCheck(setCheck),
+      runMissingStacksCheck(setCheck),
       runServiceChecks(setCheck).then(async () => {
         // piggyback configDir from the info response
         try {
@@ -263,6 +284,7 @@ export function DoctorDialog({ open, onClose }: {
   const serviceChecks = checks.slice(0, 4);
   const sambaChecks   = checks.slice(4, 6);
   const composeCheck  = checks[6];
+  const missingCheck  = checks[7];
   const tools         = systemStore.tools;
   const toolsLoaded   = systemStore.loaded;
 
@@ -348,6 +370,12 @@ export function DoctorDialog({ open, onClose }: {
                 onClick={composeCheck.status === "pending" ? undefined : () => setSourcesOpen(true)}
               />
             )}
+            {missingCheck && (
+              <CheckRow
+                check={missingCheck}
+                onClick={missingCheck.status === "pending" ? undefined : () => setMissingOpen(true)}
+              />
+            )}
           </Section>
 
           {/* Summary */}
@@ -391,6 +419,10 @@ export function DoctorDialog({ open, onClose }: {
     <ComposeSourcesDialog
       open={sourcesOpen}
       onClose={() => { setSourcesOpen(false); void runComposeSourceCheck(setCheck); }}
+    />
+    <MissingStacksDialog
+      open={missingOpen}
+      onClose={() => { setMissingOpen(false); void runMissingStacksCheck(setCheck); }}
     />
     </>
   );

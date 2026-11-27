@@ -46,6 +46,8 @@ Manage Docker Compose stacks, browse files, monitor system resources, and instal
 - **Samba management** — add, edit, and remove Samba shares; SQLite-backed source of truth
 - **WebAuthn passkeys** — register and authenticate with platform authenticators
 - **Auth** — JWT session login; bcrypt password storage; in-app password change
+- **Account page** — avatar, password, passkey, Docker Hub sign-in and API keys in one place, opened from your name in the top bar
+- **API keys** — scoped Bearer tokens so scripts and AI agents can manage stacks through anpan-os, with an OpenAPI description of every route. See [API access](#api-access)
 - **HTTPS** — optional TLS via cert/key paths in config
 - **Doctor dialog** — dependency checker for required system binaries
 
@@ -300,6 +302,36 @@ sudo anpan-os --compose-repair mystack  # fix one stack
 ```
 
 Repair refuses rather than destroys: if the managed compose file does not define a service that is currently running, it names that service and stops, so you can merge the files by hand first.
+
+---
+
+## API access
+
+Scripts and AI agents can call the same API the web UI uses. Going through anpan-os rather than running `docker compose` by hand keeps its records (stack metadata, update results, the managed compose folder) in step with what is actually running.
+
+**Create a key:** **Account → API keys** (click your name in the top bar). Pick a scope and an expiry, confirm with your current password, and copy the token. It is shown once. Then:
+
+```bash
+export ANPAN_API_KEY="anpan_…"
+curl -H "Authorization: Bearer $ANPAN_API_KEY" https://anpan.local:5000/api/docker/stacks
+curl -H "Authorization: Bearer $ANPAN_API_KEY" https://anpan.local:5000/api/openapi.json   # every route, for agents
+```
+
+| Scope | Allows |
+| --- | --- |
+| `read` | GET requests, except files |
+| `operate` | `read`, plus creating, starting, stopping and updating stacks and containers, the update check, App Store, bookmarks and port notes. Not deleting a stack (it removes volumes), prune, files, Samba or shutdown |
+| `full` | Everything the web UI can do, except account settings and managing API keys |
+
+A request outside the key's scope gets **403**; a wrong, revoked or expired key gets **401**. The rules (`src/lib/api-key-scope.ts`) are prefix and method grants, checked in order. A new route under an existing prefix inherits that prefix's grant for the methods it lists, so a new `GET /api/docker/…` is readable with a `read` key. A request that matches no grant, such as anything under a new prefix, needs `full`.
+
+Things to know:
+
+- **Treat any `operate` or `full` key like a root password.** A key that can deploy a compose file can mount any host path into a container.
+- **Keys cannot manage keys, change the password, or touch the avatar.** Those routes accept only a signed-in browser.
+- **Changing your password revokes every API key**, the same way it signs out every browser.
+- Each key shows when and from which address it was last used. Every write made with a key is logged as `[api-key] <name> (<id>) <METHOD> <path>` in the service log (`journalctl -u anpan-os`).
+- Streaming routes (stack install, pull, repair, logs) answer with Server-Sent Events; use `curl -N`.
 
 ---
 

@@ -1,6 +1,7 @@
 import { Elysia, t } from "elysia";
 import { join } from "node:path";
 import { rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { authGuard } from "./authGuard";
 import { DockerClient } from "../lib/docker";
 import { StackStore } from "../stores/stack-store";
@@ -9,6 +10,8 @@ import { getDiskUsage, prune, type CleanupCategory } from "../lib/docker-cleanup
 import { config } from "../config";
 import { envConfig } from "../env-config";
 import { CASAOS_APPS_DIR } from "../lib/platform";
+import { findMissingStacks } from "../lib/missing-stacks";
+import { STACK_NAME_RE } from "../constants/stack";
 
 type ComposeOrigin = "managed" | "casaos" | null;
 
@@ -78,15 +81,17 @@ export function dockerPlugin(jwtSecret: string) {
     })
 
     .get("/stacks", async ({ set }) => {
+      const listedAt = Date.now();
       const result = await DockerClient.listStacks();
       if (!result.ok) { set.status = 502; return { error: result.error }; }
 
       // Sync discovered stacks into DB (only seeds icon from Docker label; never overwrites user edits)
       // Wrapped in try/catch so a transient DB error doesn't abort the poll response.
       try {
-        await Promise.all(result.data.map(s =>
-          StackStore.upsert({ id: s.name, ...(s.icon ? { icon: s.icon } : {}) }),
-        ));
+        await Promise.all(result.data
+          // A stack deleted or forgotten while this listing was in flight stays gone.
+          .filter(s => !StackStore.deletedSince(s.name, listedAt))
+          .map(s => StackStore.upsert({ id: s.name, ...(s.icon ? { icon: s.icon } : {}) })));
       } catch (e) { console.error("[stacks] upsert failed:", e); }
 
       // Merge live Docker state with DB metadata + compose origin
@@ -112,6 +117,53 @@ export function dockerPlugin(jwtSecret: string) {
         set.status = 500;
         return { error: String(e) };
       }
+    })
+
+    /**
+     * Stacks anpan-os remembers that Docker no longer has.
+     *
+     * GET /stacks lists only what Docker reports, so these never appear on the home page and
+     * cannot be deleted from it. The System Doctor lists them so they can be forgotten.
+     */
+    .get("/stacks/missing", async ({ set }) => {
+      const live = await DockerClient.listStacks();
+      // Without a listing every row would look missing, so report the failure instead.
+      if (!live.ok) { set.status = 502; return { error: live.error }; }
+
+      const rows = await StackStore.findAll();
+      const liveNames = new Set(live.data.map(s => s.name));
+      // Checked only for names that are safe to join into a path. Other names come from
+      // standalone containers, which anpan-os never wrote a folder for.
+      const onDisk = (id: string) =>
+        STACK_NAME_RE.test(id) && existsSync(join(config.composeFolder, id));
+
+      return { stacks: findMissingStacks(rows, liveNames, onDisk) };
+    })
+
+    /**
+     * Forget a stack whose containers are gone: its row, and its update-check results.
+     *
+     * DELETE /stacks/:name would also do this, but it removes the stack's compose folder as
+     * well. Forgetting leaves every file where it is. It refuses while Docker still has a
+     * container for the stack, because that would just drop the metadata of a running app,
+     * and the next stack listing would add a blank row back for it.
+     */
+    .post("/stacks/:name/forget", async ({ params, set }) => {
+      if (!(await StackStore.findById(params.name))) {
+        set.status = 404;
+        return { error: `anpan-os has no record of a stack named "${params.name}"` };
+      }
+
+      const containers = await DockerClient.listProjectContainers(params.name);
+      if (!containers.ok) { set.status = 502; return { error: containers.error }; }
+      if (containers.data.length > 0) {
+        set.status = 409;
+        return { error: `Docker still has ${containers.data.length} container(s) for "${params.name}". Delete the stack instead.` };
+      }
+
+      await StackStore.delete(params.name);
+      invalidateOriginCache(params.name);
+      return { ok: true };
     })
 
     .patch(
