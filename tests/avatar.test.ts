@@ -197,10 +197,14 @@ describe("avatar routes", () => {
   });
 
   test("an upload and a removal sent together leave row and file agreeing", async () => {
-    await Promise.all([
+    // Both must succeed: fetch does not reject on an error status, and a refused request
+    // would leave row and file agreeing without proving the two were serialized.
+    const [put, del] = await Promise.all([
       upload(PNG, "a.png", "image/png"),
       request("/api/auth/avatar", { method: "DELETE", headers: { cookie } }),
     ]);
+    expect(put.status).toBe(200);
+    expect(del.status).toBe(200);
     const user = (await UserStore.findById(userId))!;
     expect(Boolean(user.avatarType)).toBe(await Bun.file(avatarPath(userId)).exists());
   });
