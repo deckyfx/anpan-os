@@ -20,7 +20,10 @@ export interface ImageRef {
   raw: string;
 }
 
-const DOCKER_HUB_REGISTRY = "registry-1.docker.io";
+export const DOCKER_HUB_REGISTRY = "registry-1.docker.io";
+
+/** Hosts that mean Docker Hub when written in an image reference. */
+const DOCKER_HUB_ALIASES = new Set(["docker.io", "index.docker.io", DOCKER_HUB_REGISTRY]);
 
 /**
  * Docker's repository name grammar: lowercase alphanumerics, with separators between
@@ -82,7 +85,9 @@ export function parseImageRef(raw: string): ImageRef | null {
   if (slash !== -1) {
     const head = remainder.slice(0, slash);
     if (isRegistryHost(head)) {
-      registry = head;
+      // "docker.io/nginx" is Docker Hub written out in full, not a separate registry: there
+      // is no registry API at docker.io, and the bare name still means library/nginx.
+      registry = DOCKER_HUB_ALIASES.has(head) ? DOCKER_HUB_REGISTRY : head;
       path = remainder.slice(slash + 1);
     }
   }

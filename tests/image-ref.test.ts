@@ -56,6 +56,15 @@ describe("parseImageRef — other registries", () => {
     });
   });
 
+  test("docker.io written out is Docker Hub, with library/ for an official image", () => {
+    expect(parseImageRef("docker.io/nginx:1.29")).toMatchObject({
+      registry: "registry-1.docker.io", repository: "library/nginx", tag: "1.29",
+    });
+    expect(parseImageRef("index.docker.io/jellyfin/jellyfin")).toMatchObject({
+      registry: "registry-1.docker.io", repository: "jellyfin/jellyfin",
+    });
+  });
+
   test("host:port with no tag defaults to latest", () => {
     expect(parseImageRef("registry.internal:5000/team/app")).toMatchObject({
       registry: "registry.internal:5000", repository: "team/app", tag: "latest",
