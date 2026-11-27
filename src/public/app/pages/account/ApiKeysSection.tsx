@@ -259,6 +259,9 @@ export function ApiKeysSection() {
   const [createError, setCreateError] = useState("");
   const [created,  setCreated]  = useState<{ name: string; token: string } | null>(null);
 
+  // Creating before the first load finished would invalidate that load and leave the list
+  // showing only the new key.
+  const [loadedOnce, setLoadedOnce] = useState(false);
   // A reload can overlap a create or revoke; only the newest load may write the list.
   const requestIdRef = useRef(0);
   const id = useId();
@@ -275,6 +278,7 @@ export function ApiKeysSection() {
         return;
       }
       setKeys((data as { keys?: ApiKey[] } | null)?.keys ?? []);
+      setLoadedOnce(true);
     } catch (e) {
       if (requestId === requestIdRef.current) setLoadError(e instanceof Error ? e.message : "Could not load API keys");
     } finally {
@@ -299,7 +303,7 @@ export function ApiKeysSection() {
   const trimmedName = name.trim();
   const atCap = keys.length >= MAX_KEYS;
   // One token on screen at a time: a second create would replace the first unseen.
-  const canCreate = trimmedName.length > 0 && trimmedName.length <= NAME_MAX && password.length > 0
+  const canCreate = loadedOnce && trimmedName.length > 0 && trimmedName.length <= NAME_MAX && password.length > 0
     && !creating && !atCap && !created;
 
   const create = async () => {

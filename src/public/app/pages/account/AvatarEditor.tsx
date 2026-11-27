@@ -75,6 +75,10 @@ export function AvatarEditor() {
   const [busy, setBusy]         = useState<"prepare" | "upload" | "remove" | null>(null);
   const [confirmRemove, setConfirmRemove] = useState(false);
   const inputRef  = useRef<HTMLInputElement>(null);
+  // Cropping is async; if the page is left meanwhile, the preview's cleanup has already run
+  // and a URL created afterwards would never be released.
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
 
   // The preview's object URL is released when it is replaced and when the page is left.
   useEffect(() => () => { if (preview) URL.revokeObjectURL(preview.url); }, [preview]);
@@ -93,6 +97,7 @@ export function AvatarEditor() {
     setBusy("prepare");
     try {
       const blob = await toAvatarBlob(file);
+      if (!mounted.current) return;
       setPreview({ blob, url: URL.createObjectURL(blob) });
     } catch (e) {
       toast(e instanceof Error ? e.message : "Could not read the image", "error");

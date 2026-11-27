@@ -6,6 +6,11 @@ import type { ApiKey, NewApiKey, User } from "../db/schema";
 /** How many keys one user may hold. Enough for every agent anyone runs; few enough to audit. */
 export const MAX_API_KEYS_PER_USER = 50;
 
+/** Raised by {@link ApiKeyStore.create} when the password changed during the request. */
+export class ApiKeyStaleError extends Error {
+  constructor() { super("Your password changed while the key was being created. Sign in again and retry."); }
+}
+
 /** Raised by {@link ApiKeyStore.create} when the user already holds the maximum. */
 export class ApiKeyLimitError extends Error {
   constructor() {
@@ -20,13 +25,20 @@ export class ApiKeyLimitError extends Error {
  */
 export class ApiKeyStore {
   /**
-   * Insert a key unless the user is at the limit.
+   * Insert a key unless the user is at the limit, or their password changed since
+   * `tokenVersion` was read.
    *
-   * Count and insert run in one synchronous transaction: awaited separately, two requests
-   * sent together could each count 49 and both insert.
+   * Count, version check and insert run in one synchronous transaction: awaited separately,
+   * two requests sent together could each count 49 and both insert. The version check closes
+   * a race with a password change, which bumps tokenVersion and then revokes every key. A
+   * create that passed its password check before the change but inserts after the revocation
+   * would otherwise leave a working key behind. Inserted before the bump, the revocation
+   * removes it; checked after the bump, it is refused here.
    */
-  static create(row: NewApiKey): ApiKey {
+  static create(row: NewApiKey, tokenVersion: number): ApiKey {
     return db.transaction(tx => {
+      const current = tx.select({ v: users.tokenVersion }).from(users).where(eq(users.id, row.userId)).get();
+      if (!current || current.v !== tokenVersion) throw new ApiKeyStaleError();
       const held = tx.select({ n: count() }).from(apiKeys).where(eq(apiKeys.userId, row.userId)).get();
       if ((held?.n ?? 0) >= MAX_API_KEYS_PER_USER) throw new ApiKeyLimitError();
       const created = tx.insert(apiKeys).values(row).returning().get();

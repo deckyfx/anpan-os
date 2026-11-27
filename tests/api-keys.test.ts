@@ -164,7 +164,7 @@ describe("management is cookie-only", () => {
     const other = await UserStore.create(`keys-other-${crypto.randomUUID().slice(0, 8)}`, "other-password-1");
     try {
       const id = "abcdef012345";
-      ApiKeyStore.create({ id, userId: other.id, name: "theirs", scope: "full", secretHash: "0".repeat(64) });
+      ApiKeyStore.create({ id, userId: other.id, name: "theirs", scope: "full", secretHash: "0".repeat(64) }, other.tokenVersion ?? 0);
       const res = await request(`/api/api-keys/${id}`, { method: "DELETE", headers: { cookie } });
       expect(res.status).toBe(404);
       expect(await ApiKeyStore.findWithUser(id)).not.toBeNull();
@@ -282,7 +282,7 @@ describe("using a key", () => {
     const other = await UserStore.create(`keys-gone-${crypto.randomUUID().slice(0, 8)}`, "other-password-1");
     const { generateApiKeyToken } = await import("../src/lib/api-key-auth");
     const { id, token, secretHash } = generateApiKeyToken();
-    ApiKeyStore.create({ id, userId: other.id, name: "orphan", scope: "full", secretHash });
+    ApiKeyStore.create({ id, userId: other.id, name: "orphan", scope: "full", secretHash }, other.tokenVersion ?? 0);
     expect((await request("/api/me", { headers: bearer(token) })).status).toBe(200);
     await db.delete(users).where(eq(users.id, other.id));
     try {
@@ -359,5 +359,22 @@ describe("a password change", () => {
 
     expect((await request("/api/me", { headers: bearer(key) })).status).toBe(401);
     expect(await ApiKeyStore.listFor(userId)).toEqual([]);
+  });
+});
+
+describe("ApiKeyStore.create against a password change", () => {
+  test("refuses a key whose password check predates the change", async () => {
+    const other = await UserStore.create(`race-${crypto.randomUUID().slice(0, 8)}`, "race-password-1");
+    try {
+      const seen = other.tokenVersion ?? 0;               // read when the session was verified
+      await UserStore.updatePassword(other.id, await Bun.password.hash("race-password-2"));
+      const { id, secretHash } = { id: "aaaaaaaaaaaa", secretHash: "0".repeat(64) };
+      expect(() => ApiKeyStore.create({ id, userId: other.id, name: "late", scope: "full", secretHash }, seen))
+        .toThrow(/password changed/);
+      expect(await ApiKeyStore.listFor(other.id)).toEqual([]);
+    } finally {
+      await db.delete(apiKeys).where(eq(apiKeys.userId, other.id));
+      await db.delete(users).where(eq(users.id, other.id));
+    }
   });
 });

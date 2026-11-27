@@ -73,6 +73,21 @@ async function fetchProfile(): Promise<Pick<AuthStatus, "username" | "avatarUrl"
   }
 }
 
+/**
+ * Bumped whenever the signed-in user or their avatar changes, so a profile read started
+ * before that cannot land afterwards: an upload's new URL, or a logout's cleared state,
+ * would otherwise be overwritten by the older answer.
+ */
+let profileGeneration = 0;
+
+/** Fetch the profile and apply its avatar, unless something newer has happened meanwhile. */
+function refreshAvatar(set: (patch: Partial<AuthState>) => void): void {
+  const generation = ++profileGeneration;
+  void fetchProfile().then(p => {
+    if (generation === profileGeneration) set({ avatarUrl: p.avatarUrl ?? null });
+  });
+}
+
 /** Global auth store — manages view routing, login state, passkey presence, and login method flags. */
 export const useAuthStore = create<AuthState>((set, get) => ({
   view:         "loading",
@@ -109,7 +124,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
   login: async (username) => {
     set({ username });
-    void fetchProfile().then(p => set({ avatarUrl: p.avatarUrl ?? null }));
+    refreshAvatar(set);
     const { loginMethods } = get();
     if (!loginMethods.passkey) {
       // Passkey disabled — skip passkey setup entirely
@@ -120,8 +135,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     set({ hasPasskey: has, view: has ? "app" : "passkeySetup" });
   },
   afterSetup:       (username) => set({ view: "passkeySetup", username, avatarUrl: null, hasPasskey: false }),
-  logout:           ()         => set({ view: "login",        username: "", avatarUrl: null, hasPasskey: null }),
-  setAvatarUrl:     (avatarUrl) => set({ avatarUrl }),
+  logout:           ()         => { ++profileGeneration; set({ view: "login", username: "", avatarUrl: null, hasPasskey: null }); },
+  setAvatarUrl:     (avatarUrl) => { ++profileGeneration; set({ avatarUrl }); },
   skipPasskeySetup: ()         => set({ view: "app" }),
 
   registerPasskey: async (deviceName) => {
@@ -154,7 +169,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     const { username } = verRes.data as { username: string };
 
     set({ view: "app", username, hasPasskey: true });
-    void fetchProfile().then(p => set({ avatarUrl: p.avatarUrl ?? null }));
+    refreshAvatar(set);
     return username;
   },
 }));

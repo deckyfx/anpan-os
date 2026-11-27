@@ -19,22 +19,34 @@ export function DockerHubForm() {
   const [password, setPassword] = useState("");
   const [busy,     setBusy]     = useState(false);
   const [error,    setError]    = useState("");
+  // A failed status check is not "signed out": showing the sign-in form then would hide the
+  // Sign out button of an account that is in fact signed in.
+  const [loadError, setLoadError] = useState("");
   const loadIdRef = useRef(0);
   const id = useId();
 
-  useEffect(() => {
+  const loadStatus = async () => {
     const loadId = ++loadIdRef.current;
-    void (async () => {
-      try {
-        const { data } = await api.api.auth.dockerhub.get();
-        if (loadId !== loadIdRef.current) return;
-        const s = (data as Status | null) ?? { loggedIn: false, username: null };
-        setStatus(s);
-        if (s.username) setUsername(s.username);
-      } catch {
-        if (loadId === loadIdRef.current) setStatus({ loggedIn: false, username: null });
+    setLoadError("");
+    setStatus(null);
+    try {
+      const { data, error: err } = await api.api.auth.dockerhub.get();
+      if (loadId !== loadIdRef.current) return;
+      if (err || !data) {
+        setLoadError((err?.value as { error?: string } | undefined)?.error ?? "Could not check Docker Hub sign-in");
+        return;
       }
-    })();
+      const s = data as Status;
+      setStatus(s);
+      if (s.username) setUsername(s.username);
+    } catch (e) {
+      if (loadId === loadIdRef.current) setLoadError(e instanceof Error ? e.message : "Could not check Docker Hub sign-in");
+    }
+  };
+
+  useEffect(() => {
+    void loadStatus();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const signIn = async () => {
@@ -83,6 +95,15 @@ export function DockerHubForm() {
   const errorBox = error
     ? <p role="alert" className="text-red-400 text-xs bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">{error}</p>
     : null;
+
+  if (loadError) {
+    return (
+      <div role="alert" className="flex items-center gap-3 flex-wrap text-xs text-red-400">
+        <span>{loadError}</span>
+        <button type="button" onClick={() => void loadStatus()} className={QUIET_BUTTON}>Retry</button>
+      </div>
+    );
+  }
 
   if (status === null) {
     return (

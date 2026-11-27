@@ -29,6 +29,25 @@ export function Dialog({ open, title, children, footer, notification, onClose, s
   // nearest common ancestor of press and release, so selecting text in a field and letting
   // go outside the panel used to "click" the backdrop and close the dialog, input and all.
   const pressedOnBackdrop = useRef(false);
+  const panelRef = useRef<HTMLDivElement>(null);
+
+  // Focus moves into the dialog when it opens and back to whatever opened it when it closes.
+  // Not a focus trap, and so no aria-modal: several dialogs here open a second one beside
+  // themselves, and two traps would fight. Converting to a native <dialog> would provide
+  // both; that is a change to every dialog in the app, so it is left for its own PR.
+  useEffect(() => {
+    if (!open) return;
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    // A child with autoFocus has already taken focus by now; only fill the gap if none did.
+    if (panelRef.current && !panelRef.current.contains(document.activeElement)) {
+      panelRef.current.focus({ preventScroll: true });
+    }
+    return () => {
+      const active = document.activeElement;
+      const lost = !active || active === document.body || panelRef.current?.contains(active);
+      if (opener?.isConnected && lost) opener.focus({ preventScroll: true });
+    };
+  }, [open]);
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
@@ -50,10 +69,11 @@ export function Dialog({ open, title, children, footer, notification, onClose, s
       }}
     >
       <div
+        ref={panelRef}
         role="dialog"
-        aria-modal="true"
         aria-labelledby={titleId}
-        className={`w-full ${SIZE_CLASS[size]} bg-gray-900 border border-gray-700 rounded-xl shadow-2xl flex flex-col max-h-[90vh]`}
+        tabIndex={-1}
+        className={`w-full ${SIZE_CLASS[size]} bg-gray-900 border border-gray-700 rounded-xl shadow-2xl flex flex-col max-h-[90vh] outline-none`}
         style={minHeight ? { minHeight } : undefined}
       >
         <div className="flex items-center justify-between px-5 py-4 border-b border-gray-800">

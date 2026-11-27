@@ -3,7 +3,7 @@ import { jwt } from "@elysiajs/jwt";
 import { verifySession } from "../lib/session-auth";
 import { bearerCredential, forgetApiKeyUse, generateApiKeyToken } from "../lib/api-key-auth";
 import { API_KEY_SCOPES } from "../lib/api-key-scope";
-import { ApiKeyLimitError, ApiKeyStore } from "../stores/api-key-store";
+import { ApiKeyLimitError, ApiKeyStaleError, ApiKeyStore } from "../stores/api-key-store";
 import type { ApiKey } from "../db/schema";
 import { originGuard } from "./originGuard";
 import { LoginThrottle } from "../lib/login-throttle";
@@ -118,10 +118,14 @@ export function apiKeysPlugin(jwtSecret: string) {
         ? null
         : new Date(Date.now() + body.expiresInDays * 24 * 60 * 60 * 1000);
       try {
-        const created = ApiKeyStore.create({ id, userId: owner.id, name, scope: body.scope, secretHash, expiresAt });
+        const created = ApiKeyStore.create(
+          { id, userId: owner.id, name, scope: body.scope, secretHash, expiresAt },
+          // As read when the session was verified, so a change at any point since is caught.
+          owner.tokenVersion ?? 0,
+        );
         return { key: token, apiKey: toView(created) };
       } catch (err) {
-        if (err instanceof ApiKeyLimitError) return status(409, { error: err.message });
+        if (err instanceof ApiKeyLimitError || err instanceof ApiKeyStaleError) return status(409, { error: err.message });
         throw err;
       }
     }, {

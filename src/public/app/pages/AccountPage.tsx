@@ -137,16 +137,20 @@ export function AccountPage({ onNavigate }: { onNavigate: (path: string) => void
 
   const signOut = async () => {
     setSigningOut(true);
+    // Signed out only once the server says so. Clearing the page on a failed request would
+    // look signed out while the session stays valid, and a reload would sign straight back in.
     try {
-      await api.api.auth.logout.post();
+      const { error } = await api.api.auth.logout.post();
+      if (error) throw new Error((error.value as { error?: string })?.error ?? `HTTP ${error.status}`);
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
-      useToastStore.getState().push(`Logout failed: ${message}`, "error");
-    } finally {
-      // Back to "/" first, so signing in again lands on the dashboard, not this page.
-      onNavigate("/");
-      useAuthStore.getState().logout();
+      useToastStore.getState().push(`Sign out failed: ${message}. You are still signed in.`, "error");
+      setSigningOut(false);
+      return;
     }
+    // Back to "/" first, so signing in again lands on the dashboard, not this page.
+    onNavigate("/");
+    useAuthStore.getState().logout();
   };
 
   return (
