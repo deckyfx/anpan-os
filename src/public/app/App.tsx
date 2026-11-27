@@ -9,9 +9,10 @@ import { useAuthStore }     from "./stores/authStore";
 import { useSystemStore }   from "./stores/systemStore";
 import { ToastContainer }   from "./components/Toast";
 import { AppStorePage }     from "./pages/store/AppStorePage";
+import { AccountPage }      from "./pages/AccountPage";
 
 export function App() {
-  const { view, username, checkAuth, login, afterSetup, logout } = useAuthStore();
+  const { view, checkAuth, login, afterSetup } = useAuthStore();
   const { path, navigate } = useRouter();
   const prevViewRef = useRef<string>("");
 
@@ -48,6 +49,7 @@ export function App() {
 
   if (path.startsWith("/files"))  return <><FilesPage onNavigate={navigate} /><ToastContainer /></>;
   if (path.startsWith("/store"))  return <><AppStorePage onNavigate={navigate} /><ToastContainer /></>;
+  if (path.startsWith("/account")) return <><AccountPage onNavigate={navigate} /><ToastContainer /></>;
 
-  return <><HomePage username={username} onLogout={logout} onNavigate={navigate} /><ToastContainer /></>;
+  return <><HomePage onNavigate={navigate} /><ToastContainer /></>;
 }

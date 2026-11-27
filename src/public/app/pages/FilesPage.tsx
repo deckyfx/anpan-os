@@ -1,6 +1,5 @@
 import { useRef, useEffect, useState, useMemo } from "react";
 import { useFileStore, visibleEntries }  from "../stores/fileStore";
-import { useAuthStore }  from "../stores/authStore";
 import { useStacksStore } from "../stores/stacksStore";
 import { useSystemStore } from "../stores/systemStore";
 import { TopBar }        from "./home/TopBar";
@@ -73,7 +72,6 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
     fileBrowserConfig, toggleBookmark,
   } = useFileStore();
 
-  const { username, logout, hasPasskey, registerPasskey } = useAuthStore();
   const version = useStacksStore(s => s.version);
   const { isRoot, hasBin } = useSystemStore();
   const sambaEnabled = isRoot && hasBin("smbd");
@@ -194,12 +192,8 @@ export function FilesPage({ onNavigate }: { onNavigate: (path: string) => void }
     <div className="min-h-screen bg-gray-950 text-white flex flex-col">
 
       <TopBar
-        username={username}
         version={version}
-        hasPasskey={hasPasskey}
-        onLogout={logout}
         onNavigate={onNavigate}
-        onAddPasskey={() => registerPasskey("This device")}
         currentPath="/files"
         showUpdates={false}
       />
