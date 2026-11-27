@@ -264,8 +264,10 @@ function parsePorts(raw: unknown): PortEntry[] {
 
 type VolumeEntry = ServiceForm["volumes"][number];
 
+/** The access mode among comma-separated mount options (`ro,z` is read-only). */
 function toMode(s: string): VolumeEntry["mode"] {
-  return s === "ro" ? "ro" : s === "rw" ? "rw" : "";
+  const opts = s.split(",");
+  return opts.includes("ro") ? "ro" : opts.includes("rw") ? "rw" : "";
 }
 
 /**
@@ -522,6 +524,20 @@ export function formatVolume(v: VolumeEntry, suffix?: string): string {
   return s;
 }
 
+/**
+ * Compose value for a volume entry: the short-syntax string, except for a
+ * read-only anonymous volume. `/data:ro` would read as source `/data` and
+ * target `ro`, so that one is written in long syntax.
+ *
+ * @param v      - Form entry
+ * @param suffix - Original options part to keep verbatim, as for `formatVolume`
+ */
+export function volumeItem(v: VolumeEntry, suffix?: string): string | Record<string, unknown> {
+  if (v.host) return formatVolume(v, suffix);
+  // rw is the default, and other options have no short form without a source
+  return toMode(suffix ?? v.mode) === "ro" ? { type: "volume", target: v.container, read_only: true } : v.container;
+}
+
 /** List-syntax string for an environment entry (`KEY` inherits from the host). */
 export function formatEnv({ key, value }: { key: string; value: string | null }): string {
   return value === null ? key : `${key}=${value}`;
@@ -559,7 +575,8 @@ export function cleanServiceForm(form: ServiceForm): ServiceForm {
     ...form,
     ports:       form.ports.filter(p => p.container.trim() !== ""),
     environment: form.environment.filter(e => e.key.trim() !== ""),
-    volumes:     form.volumes.filter(v => v.host.trim() !== "" || v.container.trim() !== ""),
+    // A mount needs a target; an anonymous one needs nothing else
+    volumes:     form.volumes.filter(v => v.container.trim() !== ""),
     labels:      form.labels.filter(l => l.key.trim() !== ""),
     networks:    nonEmpty(form.networks),
     dependsOn:   nonEmpty(form.dependsOn),
@@ -599,7 +616,7 @@ export function serializeService(raw: ServiceForm): Record<string, unknown> {
   if (form.ports.length > 0)       out.ports       = form.ports.map(formatPort);
   if (form.environment.length > 0) out.environment = form.environment.map(formatEnv);
   if (form.labels.length > 0)      out.labels      = form.labels.map(formatLabel);
-  if (form.volumes.length > 0)     out.volumes     = form.volumes.map(v => formatVolume(v));
+  if (form.volumes.length > 0)     out.volumes     = form.volumes.map(v => volumeItem(v));
 
   if (form.networks.length > 0) out.networks = form.networks;
   if (form.dependsOn.length > 0) out.depends_on = form.dependsOn;

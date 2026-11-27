@@ -346,12 +346,11 @@ describe("applyFormChanges — array command", () => {
       .toBe("services:\n  app:\n    image: alpine\n    command:\n      - sh\n      - -c\n      - echo bye && sleep 1\n");
   });
 
-  test("an array falls back to a string only when the edit cannot be split", () => {
+  test("an array edit with unbalanced quotes is rejected, not saved as a string compose cannot split", () => {
     const yaml = 'services:\n  app:\n    image: alpine\n    command: ["sleep", "1"]\n';
     const base = snapshot(yaml);
     const next = editService(base, "app", f => ({ ...f, command: "sleep 'unterminated" }));
-    const app  = (parse(applyFormChanges(yaml, base, next)) as { services: Record<string, Record<string, unknown>> }).services.app!;
-    expect(app.command).toBe("sleep 'unterminated");
+    expect(() => applyFormChanges(yaml, base, next)).toThrow(/command.*unbalanced quotes/);
   });
 
   test("a string command stays a string", () => {
@@ -395,7 +394,7 @@ describe("applyFormChanges — services", () => {
     const base = snapshot(CASAOS);
     const next = { ...base, serviceNames: ["media", "db"], serviceForms: { media: base.serviceForms.jellyfin!, db: base.serviceForms.db! } };
     const out  = applyFormChanges(CASAOS, base, next, { jellyfin: "media" });
-    expect(lineDiff(CASAOS, out)).toEqual({ added: ["  media:"], removed: ["  jellyfin:"] });
+    expect(out).toBe(CASAOS.replace("  jellyfin:\n", "  media:\n"));
   });
 });
 
@@ -490,5 +489,117 @@ describe("applyFormChanges — layout", () => {
   test("invalid YAML throws instead of silently rebuilding", () => {
     const base = snapshot("services:\n  app:\n    image: nginx\n");
     expect(() => applyFormChanges("services: [\n", base, base)).toThrow();
+  });
+});
+
+// ─── Review regressions ───────────────────────────────────────────────────────
+
+type ParsedCompose = { services: Record<string, Record<string, unknown>>; networks?: Record<string, unknown> };
+const svcOf = (yaml: string, name: string) => (parse(yaml) as ParsedCompose).services[name]!;
+
+describe("applyFormChanges — YAML edited by hand since the last read", () => {
+  test("a list edit applies the form's changes to the current rows, keeping a hand edit to another row", () => {
+    const yaml   = "services:\n  app:\n    image: nginx\n    environment:\n      MODE: blue\n";
+    const base   = snapshot(yaml);
+    const edited = yaml.replace("MODE: blue", "MODE: green");
+    const next   = editService(base, "app", f => ({ ...f, environment: [...f.environment, { key: "FEATURE", value: "on" }] }));
+    expect(svcOf(applyFormChanges(edited, base, next), "app").environment).toEqual({ MODE: "green", FEATURE: "on" });
+  });
+
+  test("a service deleted in the YAML is not written back from the stale form", () => {
+    const base   = snapshot(CASAOS);
+    const edited = CASAOS.replace("  db:\n    image: postgres:16\n    environment:\n    - POSTGRES_PASSWORD=secret\n    restart: always\n", "");
+    const next   = editService(base, "jellyfin", f => ({ ...f, imageTag: "10.9.0" }));
+    const out    = applyFormChanges(edited, base, next);
+    expect(Object.keys((parse(out) as ParsedCompose).services)).toEqual(["jellyfin"]);
+  });
+});
+
+describe("applyFormChanges — anchors and aliases", () => {
+  const yaml = "x-w: &w\n  image: busybox\n  hostname: w\nservices:\n  web:\n    image: nginx\n  worker: *w\n";
+
+  test("an aliased service is left alone when another service is edited", () => {
+    const base = snapshot(yaml);
+    const next = editService(base, "web", f => ({ ...f, imageTag: "2" }));
+    expect(applyFormChanges(yaml, base, next)).toBe(yaml.replace("image: nginx", "image: nginx:2"));
+  });
+
+  test("editing an aliased service edits a copy and keeps the shared anchor", () => {
+    const base = snapshot(yaml);
+    const next = editService(base, "worker", f => ({ ...f, imageTag: "1.36" }));
+    const out  = parse(applyFormChanges(yaml, base, next)) as ParsedCompose & { "x-w": unknown };
+    expect(out.services.worker).toEqual({ image: "busybox:1.36", hostname: "w" });
+    expect(out["x-w"]).toEqual({ image: "busybox", hostname: "w" });
+  });
+});
+
+describe("applyFormChanges — fields compose would reject or misread", () => {
+  test("map-form extra_hosts never gets a host twice", () => {
+    const yaml = "services:\n  app:\n    image: nginx\n    extra_hosts:\n      dev: \"192.0.2.1\"\n";
+    const base = snapshot(yaml);
+    const next = editService(base, "app", f => ({ ...f, extraHosts: [...f.extraHosts, "dev=192.0.2.2"] }));
+    expect(svcOf(applyFormChanges(yaml, base, next), "app").extra_hosts).toEqual({ dev: "192.0.2.2" });
+  });
+
+  test("switching a network to external keeps only its name", () => {
+    const yaml = "services:\n  app:\n    image: nginx\nnetworks:\n  lan:\n    name: shared\n    driver: bridge\n    internal: true\n";
+    const base = snapshot(yaml);
+    const next = { ...base, stackConfig: { ...base.stackConfig, networks: [{ ...base.stackConfig.networks[0]!, external: true }] } };
+    expect((parse(applyFormChanges(yaml, base, next)) as ParsedCompose).networks).toEqual({ lan: { name: "shared", external: true } });
+  });
+
+  test("a dependency replaced by another does not inherit its condition", () => {
+    const yaml = "services:\n  web:\n    image: nginx\n    depends_on:\n      db:\n        condition: service_healthy\n";
+    const base = snapshot(yaml);
+    const next = editService(base, "web", f => ({ ...f, dependsOn: ["cache"] }));
+    expect(svcOf(applyFormChanges(yaml, base, next), "web").depends_on).toEqual({ cache: { condition: "service_started" } });
+  });
+
+  test("a port edit keeps a protocol the form cannot show", () => {
+    const yaml = "services:\n  dns:\n    image: coredns\n    ports:\n      - 53:53/${PROTO:-udp}\n      - target: 54\n        published: 54\n        protocol: ${PROTO:-udp}\n";
+    const base = snapshot(yaml);
+    const next = editService(base, "dns", f => ({ ...f, ports: f.ports.map(p => ({ ...p, host: "1" + p.host })) }));
+    expect(lineDiff(yaml, applyFormChanges(yaml, base, next))).toEqual({
+      added:   ["      - 153:53/${PROTO:-udp}", "        published: 154"],
+      removed: ["      - 53:53/${PROTO:-udp}", "        published: 54"],
+    });
+  });
+
+  test("a volume shows ro among other options, and a mode change keeps them", () => {
+    expect(parseVolumeEntry("/DATA/Media:/media:ro,z").mode).toBe("ro");
+    const base = snapshot(CASAOS);
+    const next = editService(base, "jellyfin", f => ({
+      ...f, volumes: f.volumes.map(v => v.container === "/media" ? { ...v, mode: "rw" as const } : v),
+    }));
+    expect(lineDiff(CASAOS, applyFormChanges(CASAOS, base, next)))
+      .toEqual({ added: ["    - /DATA/Media:/media:rw,z"], removed: ["    - /DATA/Media:/media:ro,z"] });
+  });
+
+  test("a read-only anonymous volume is written in long syntax", () => {
+    const yaml = "services:\n  app:\n    image: nginx\n    volumes:\n      - /cache\n";
+    const base = snapshot(yaml);
+    const next = editService(base, "app", f => ({ ...f, volumes: [{ ...f.volumes[0]!, mode: "ro" }] }));
+    expect(svcOf(applyFormChanges(yaml, base, next), "app").volumes).toEqual([{ type: "volume", target: "/cache", read_only: true }]);
+  });
+
+  test("a volume row with no container path writes nothing", () => {
+    const yaml = "services:\n  app:\n    image: nginx\n";
+    const base = snapshot(yaml);
+    const next = editService(base, "app", f => ({ ...f, volumes: [{ host: "./data", container: "", mode: "" }] }));
+    expect(applyFormChanges(yaml, base, next)).toBe(yaml);
+  });
+
+  test("a number edited to a string with leading zeros keeps what was typed", () => {
+    const yaml = "services:\n  app:\n    image: nginx\n    environment:\n      UMASK: 22\n";
+    const base = snapshot(yaml);
+    const next = editService(base, "app", f => ({ ...f, environment: [{ key: "UMASK", value: "022" }] }));
+    expect(svcOf(applyFormChanges(yaml, base, next), "app").environment).toEqual({ UMASK: "022" });
+  });
+
+  test("a CRLF file keeps CRLF on the edited line", () => {
+    const yaml = "services:\r\n  app:\r\n    image: nginx:1 # pinned\r\n    restart: always\r\n";
+    const base = snapshot(yaml);
+    const next = editService(base, "app", f => ({ ...f, imageTag: "2" }));
+    expect(applyFormChanges(yaml, base, next)).toBe(yaml.replace("nginx:1", "nginx:2"));
   });
 });

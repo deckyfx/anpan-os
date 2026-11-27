@@ -15,14 +15,14 @@
  *      original text, so untouched lines stay byte-for-byte.
  */
 import {
-  isMap, isNode, isPair, isScalar, isSeq, parse, parseDocument,
+  isAlias, isMap, isNode, isPair, isScalar, isSeq, parse, parseDocument,
   Scalar, YAMLMap, YAMLSeq,
   type Document, type Pair, type ToStringOptions,
 } from "yaml";
 import {
-  cleanServiceForm, formatEnv, formatHostEntry, formatImage, formatLabel, formatPort, formatVolume,
-  parseKeyValueItem, parseNamedNetwork, parseNamedVolume, parsePortEntry, parseService, parseVolumeEntry,
-  serializeService, splitArgs, splitHostEntry, splitImageRef, splitOutsideVars,
+  cleanServiceForm, formatEnv, formatHostEntry, formatImage, formatLabel, formatPort,
+  lastIndexOfOutsideVars, parseKeyValueItem, parseNamedNetwork, parseNamedVolume, parsePortEntry, parseService,
+  parseVolumeEntry, serializeService, splitArgs, splitHostEntry, splitImageRef, splitOutsideVars, volumeItem,
 } from "./composeUtils";
 import type { NamedNetwork, NamedVolume, ServiceForm, StackConfig } from "./types";
 
@@ -56,7 +56,9 @@ const same = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.str
  * @param renames  - Services renamed in the form, old name → new name; a
  *                   renamed service keeps all of its other keys
  * @returns The updated YAML text
- * @throws When `yamlText` is not valid YAML or not a mapping
+ * @throws When `yamlText` is not valid YAML or not a mapping, or when an
+ *         array `command`/`entrypoint` is edited to a string with
+ *         unbalanced quotes (the YAML is then left as it was)
  */
 export function applyFormChanges(
   yamlText: string,
@@ -91,7 +93,8 @@ function js(doc: Doc, node: unknown): unknown {
  */
 function coerceLike(prev: unknown, value: Prim): Prim {
   if (typeof value !== "string") return value;
-  if (typeof prev === "number" && value.trim() !== "" && Number.isFinite(Number(value))) return Number(value);
+  // Only when the number prints back as typed: `001` or `1.50` must stay what the user entered
+  if (typeof prev === "number" && String(Number(value)) === value) return Number(value);
   if (typeof prev === "boolean" && (value === "true" || value === "false")) return value === "true";
   return value;
 }
@@ -250,16 +253,44 @@ interface ItemCodec<T> {
   create(next: T, template: unknown): unknown;
 }
 
-/** Patch a seq's or map's items to represent `next`, keeping untouched items as they are. */
-function patchItems<T>(coll: YAMLSeq<unknown> | YAMLMap<unknown, unknown>, next: readonly T[], codec: ItemCodec<T>): void {
+/**
+ * Patch a seq's or map's items to represent `next`, keeping untouched items
+ * as they are. The form's own edits (`base` → `next`) are applied to the
+ * items as they are now, so a row edited, added or deleted by hand in the
+ * YAML since `base` was read keeps that edit unless the form changed the
+ * same row. Without `base` the current items are the base.
+ */
+function patchItems<T>(coll: YAMLSeq<unknown> | YAMLMap<unknown, unknown>, next: readonly T[], codec: ItemCodec<T>, base?: readonly T[]): void {
   const items    = coll.items as unknown[];
   const cur      = items.map(it => codec.read(it));
   const template = items[items.length - 1];
+  const from     = base ?? cur;
+
+  // What the form did to each base row, and the rows it added after each one (-1: before the first)
+  const fate  = new Array<Edit>(from.length);
+  const added = new Map<number, number[]>();
+  let after = -1;
+  for (const e of alignEntries(from, next)) {
+    if (e.kind === "add") added.set(after, [...(added.get(after) ?? []), e.to]);
+    else { fate[e.from] = e; after = e.from; }
+  }
+
   const out: unknown[] = [];
-  for (const e of alignEntries(cur, next)) {
-    if (e.kind === "keep")   out.push(items[e.from]);
-    if (e.kind === "change") out.push(codec.update(items[e.from], cur[e.from]!, next[e.to]!));
-    if (e.kind === "add")    out.push(codec.create(next[e.to]!, template));
+  const pushAdded = (at: number) => { for (const j of added.get(at) ?? []) out.push(codec.create(next[j]!, template)); };
+  pushAdded(-1);
+  // Walk the rows in their current order and apply the form's edit to each
+  for (const e of alignEntries(from, cur)) {
+    if (e.kind === "add") { out.push(items[e.to]); continue; } // added by hand
+    const f = fate[e.from]!;
+    if (e.kind === "remove") {
+      // Deleted by hand: only an edit to that row in the form brings it back
+      if (f.kind === "change") out.push(codec.create(next[f.to]!, template));
+    } else if (f.kind === "keep") {
+      out.push(items[e.to]);
+    } else if (f.kind === "change") {
+      out.push(codec.update(items[e.to], cur[e.to]!, next[f.to]!));
+    }
+    pushAdded(e.from);
   }
   (coll as { items: unknown[] }).items = out;
 }
@@ -275,12 +306,15 @@ interface FieldCodecs<T> {
   fresh:   (entries: readonly T[]) => unknown;
 }
 
-/** Patch a list-valued field in whatever shape the file uses for it. */
-function patchListField<T>(doc: Doc, path: Path, next: readonly T[], codecs: FieldCodecs<T>, keepDepth: number): void {
+/**
+ * Patch a list-valued field in whatever shape the file uses for it. `base`
+ * holds the rows as last read, cleaned the same way as `next`.
+ */
+function patchListField<T>(doc: Doc, path: Path, base: readonly T[], next: readonly T[], codecs: FieldCodecs<T>, keepDepth: number): void {
   if (next.length === 0) { deletePath(doc, path, keepDepth); return; }
   const node = doc.getIn(path, true);
-  if (isSeq(node) && codecs.seq) { patchItems(node, next, codecs.seq); return; }
-  if (isMap(node) && codecs.map) { patchItems(node, next, codecs.map); return; }
+  if (isSeq(node) && codecs.seq) { patchItems(node, next, codecs.seq, base); return; }
+  if (isMap(node) && codecs.map) { patchItems(node, next, codecs.map, base); return; }
   if (isScalar(node) && codecs.scalar && next.length === 1) { node.value = coerceLike(node.value, codecs.scalar(next[0]!)); return; }
   setValue(doc, path, codecs.fresh(next));
 }
@@ -294,11 +328,21 @@ function stringSeqCodec(doc: Doc): ItemCodec<string> {
   };
 }
 
-/** Codec for a map whose keys are the entries and whose values are kept on rename. */
+/**
+ * Codec for a map whose keys are the entries (`depends_on`, a service's
+ * `networks`). A changed key is another entry, so it gets a fresh value
+ * rather than inheriting the old one (`db`'s `service_healthy` must not
+ * carry over to `cache`).
+ */
 function keyOnlyMapCodec(doc: Doc, newValue: () => unknown): ItemCodec<string> {
   return {
     read:   item => pairKey(doc, item as AnyPair),
-    update: (item, _cur, next) => { renamePair(doc, item as AnyPair, next); return item; },
+    update: (item, _cur, next) => {
+      const pair = item as AnyPair;
+      renamePair(doc, pair, next);
+      pair.value = doc.createNode(newValue());
+      return pair;
+    },
     create: next => doc.createPair(next, newValue()),
   };
 }
@@ -379,18 +423,30 @@ function withEntryMap(doc: Doc, pair: AnyPair, edit: (put: (k: string, v: Prim) 
   if (isMap(pair.value) && pair.value.items.length === 0) pair.value = doc.createNode(null);
 }
 
+/** Compose rejects an external network or volume with any attribute besides `name`. */
+function dropAllButName(doc: Doc, map: YAMLMap<unknown, unknown>, drop: (k: string) => void): void {
+  for (const p of [...map.items]) {
+    const k = pairKey(doc, p as AnyPair);
+    if (k !== "name" && k !== "external") drop(k);
+  }
+}
+
+/** Top-level networks as the form lists them: named, one row per name. */
+const cleanNetworks = (rows: readonly NamedNetwork[]) => dedupeBy(rows.filter(n => n.name.trim() !== ""), byName);
+const cleanVolumes  = (rows: readonly NamedVolume[])  => dedupeBy(rows.filter(v => v.name.trim() !== ""), byName);
+
 function patchTopLevelNetworks(doc: Doc, base: readonly NamedNetwork[], nextRaw: readonly NamedNetwork[]): void {
   if (same(base, nextRaw)) return;
-  const next = dedupeBy(nextRaw.filter(n => n.name.trim() !== ""), byName);
-  patchListField<NamedNetwork>(doc, ["networks"], next, {
+  const next = cleanNetworks(nextRaw);
+  patchListField<NamedNetwork>(doc, ["networks"], cleanNetworks(base), next, {
     map: {
       read:   item => parseNamedNetwork(pairKey(doc, item as AnyPair), js(doc, (item as AnyPair).value)),
       update: (item, cur, nx) => {
         const pair = item as AnyPair;
         if (cur.name !== nx.name) renamePair(doc, pair, nx.name);
-        withEntryMap(doc, pair, (put, drop) => {
+        withEntryMap(doc, pair, (put, drop, map) => {
           if (cur.external !== nx.external) {
-            if (nx.external) { put("external", true); drop("driver"); drop("attachable"); }
+            if (nx.external) { put("external", true); dropAllButName(doc, map(), drop); }
             else drop("external");
           }
           if (nx.external) return;
@@ -407,8 +463,8 @@ function patchTopLevelNetworks(doc: Doc, base: readonly NamedNetwork[], nextRaw:
 
 function patchTopLevelVolumes(doc: Doc, base: readonly NamedVolume[], nextRaw: readonly NamedVolume[]): void {
   if (same(base, nextRaw)) return;
-  const next = dedupeBy(nextRaw.filter(v => v.name.trim() !== ""), byName);
-  patchListField<NamedVolume>(doc, ["volumes"], next, {
+  const next = cleanVolumes(nextRaw);
+  patchListField<NamedVolume>(doc, ["volumes"], cleanVolumes(base), next, {
     map: {
       read:   item => parseNamedVolume(pairKey(doc, item as AnyPair), js(doc, (item as AnyPair).value)),
       update: (item, cur, nx) => {
@@ -416,7 +472,7 @@ function patchTopLevelVolumes(doc: Doc, base: readonly NamedVolume[], nextRaw: r
         if (cur.name !== nx.name) renamePair(doc, pair, nx.name);
         withEntryMap(doc, pair, (put, drop, map) => {
           if (cur.external !== nx.external) {
-            if (nx.external) { put("external", true); drop("driver"); drop("driver_opts"); }
+            if (nx.external) { put("external", true); dropAllButName(doc, map(), drop); }
             else drop("external");
           }
           if (nx.external) return;
@@ -471,11 +527,21 @@ function patchServices(doc: Doc, base: FormSnapshot, next: FormSnapshot, renames
     const baseForm = base.serviceNames.includes(baseName) ? base.serviceForms[baseName] : undefined;
     const node     = svcMap.get(name, true);
     if (node === undefined) {
-      svcMap.set(doc.createNode(name), doc.createNode(serializeService(nextForm)));
+      // Not in the YAML. Write it when the form added it or edited it; an
+      // untouched one was deleted by hand in the YAML tab and stays deleted.
+      if (!baseForm || !same(baseForm, nextForm)) svcMap.set(doc.createNode(name), doc.createNode(serializeService(nextForm)));
       continue;
     }
-    if (!isMap(node)) svcMap.set(name, new YAMLMap());
     const curForm = parseService(js(doc, node));
+    // Untouched: leave the node as it is, which matters when it is not a plain map (`worker: *base`)
+    if (same(baseForm ?? curForm, nextForm)) continue;
+    if (!isMap(node)) {
+      // An aliased service is edited as a local copy, so the shared anchor and its other users stay as they are
+      const value = js(doc, node);
+      svcMap.set(name, isAlias(node) && value !== null && typeof value === "object" && !Array.isArray(value)
+        ? doc.createNode(value, { aliasDuplicateObjects: false })
+        : new YAMLMap());
+    }
     patchService(doc, name, baseForm ?? curForm, nextForm);
   }
 }
@@ -487,6 +553,7 @@ function patchServices(doc: Doc, base: FormSnapshot, next: FormSnapshot, renames
 function patchService(doc: Doc, name: string, base: ServiceForm, nextRaw: ServiceForm): void {
   if (same(base, nextRaw)) return;
   const next = cleanServiceForm(nextRaw);
+  const old  = cleanServiceForm(base); // list fields are diffed old → next, row by row
   const svc  = ["services", name] as const;
   const at   = (...p: Array<string | number>): Path => [...svc, ...p];
   const KEEP = svc.length; // never prune the service itself
@@ -511,31 +578,33 @@ function patchService(doc: Doc, name: string, base: ServiceForm, nextRaw: Servic
   if (changed("stdinOpen"))     flag("stdin_open",    next.stdinOpen);
   if (changed("tty"))           flag("tty",           next.tty);
 
-  if (changed("ports"))       patchPorts(doc, at("ports"), next.ports, KEEP);
-  if (changed("environment")) patchEnvironment(doc, at("environment"), next.environment, KEEP);
-  if (changed("labels"))      patchLabels(doc, at("labels"), next.labels, KEEP);
-  if (changed("volumes"))     patchVolumes(doc, at("volumes"), next.volumes, KEEP);
+  if (changed("ports"))       patchPorts(doc, at("ports"), old.ports, next.ports, KEEP);
+  if (changed("environment")) patchEnvironment(doc, at("environment"), old.environment, next.environment, KEEP);
+  if (changed("labels"))      patchLabels(doc, at("labels"), old.labels, next.labels, KEEP);
+  if (changed("volumes"))     patchVolumes(doc, at("volumes"), old.volumes, next.volumes, KEEP);
 
   if (changed("networks")) {
-    patchListField(doc, at("networks"), next.networks, {
+    patchListField(doc, at("networks"), old.networks, next.networks, {
       seq: stringSeqCodec(doc), map: keyOnlyMapCodec(doc, () => null), fresh: e => [...e],
     }, KEEP);
   }
   if (changed("dependsOn")) {
     // A new entry in long-form depends_on needs a condition; service_started is compose's default
-    patchListField(doc, at("depends_on"), next.dependsOn, {
+    patchListField(doc, at("depends_on"), old.dependsOn, next.dependsOn, {
       seq: stringSeqCodec(doc), map: keyOnlyMapCodec(doc, () => ({ condition: "service_started" })), fresh: e => [...e],
     }, KEEP);
   }
-  const strList = (key: string, values: string[]) => patchListField(doc, at(key), values, {
+  const strList = (key: string, from: string[], values: string[]) => patchListField(doc, at(key), from, values, {
     seq: stringSeqCodec(doc), scalar: v => v, fresh: e => [...e],
   }, KEEP);
-  if (changed("capAdd"))  strList("cap_add",  next.capAdd);
-  if (changed("capDrop")) strList("cap_drop", next.capDrop);
-  if (changed("devices")) strList("devices",  next.devices);
-  if (changed("dns"))     strList("dns",      next.dns);
+  if (changed("capAdd"))  strList("cap_add",  old.capAdd,  next.capAdd);
+  if (changed("capDrop")) strList("cap_drop", old.capDrop, next.capDrop);
+  if (changed("devices")) strList("devices",  old.devices, next.devices);
+  if (changed("dns"))     strList("dns",      old.dns,     next.dns);
   if (changed("extraHosts")) {
-    patchListField(doc, at("extra_hosts"), next.extraHosts, {
+    // In map form a host is a key, so it can appear only once (the last row wins)
+    const hosts = (rows: string[]) => isMapAt(doc, at("extra_hosts")) ? dedupeBy(rows, h => splitHostEntry(h).host) : rows;
+    patchListField(doc, at("extra_hosts"), hosts(old.extraHosts), hosts(next.extraHosts), {
       seq: stringSeqCodec(doc),
       map: {
         read:   item => formatHostEntry(pairKey(doc, item as AnyPair), js(doc, (item as AnyPair).value)),
@@ -559,8 +628,8 @@ function patchService(doc: Doc, name: string, base: ServiceForm, nextRaw: Servic
     }
     if (!same(next.logging.options, base.logging.options)) {
       const opts = dedupeBy(next.logging.options, byKey);
-      patchListField(doc, at("logging", "options"), opts, {
-            map: keyValueMapCodec(doc, raw => String(raw ?? "")),
+      patchListField(doc, at("logging", "options"), dedupeBy(old.logging.options, byKey), opts, {
+        map:   keyValueMapCodec(doc, raw => String(raw ?? "")),
         fresh: e => Object.fromEntries(e.map(o => [o.key, o.value])),
       }, KEEP);
     }
@@ -593,18 +662,30 @@ type VolumeEntry = ServiceForm["volumes"][number];
 type EnvEntry    = ServiceForm["environment"][number];
 type LabelEntry  = ServiceForm["labels"][number];
 
-function patchPorts(doc: Doc, path: Path, next: readonly PortEntry[], keep: number): void {
-  patchListField(doc, path, next, {
+function patchPorts(doc: Doc, path: Path, base: readonly PortEntry[], next: readonly PortEntry[], keep: number): void {
+  patchListField(doc, path, base, next, {
     seq: {
       read:   item => parsePortEntry(js(doc, item)),
-      update: (item, _cur, nx) => {
-        if (!isMap(item)) return updateScalarNode(doc, item, formatPort(nx));
+      update: (item, cur, nx) => {
+        // The form shows any protocol but udp as tcp, so one it did not edit
+        // (`${PROTO:-udp}`, `sctp`) is kept as written
+        const protoEdited = cur.protocol !== nx.protocol;
+        if (!isMap(item)) {
+          const original = String(js(doc, item) ?? "");
+          const slash    = lastIndexOfOutsideVars(original, "/");
+          const port     = !protoEdited && slash >= 0
+            ? `${formatPort({ ...nx, protocol: "tcp" })}${original.slice(slash)}`
+            : formatPort(nx);
+          return updateScalarNode(doc, item, port);
+        }
         // Long syntax: edit its keys, keep the rest (host_ip, mode, name...)
         const put = (k: string, v: Prim) => putScalar(doc, item, k, v);
         if (nx.host) put("published", nx.host); else item.delete("published");
         put("target", nx.container);
-        if (nx.protocol === "udp") put("protocol", "udp");
-        else if (item.has("protocol")) put("protocol", "tcp");
+        if (protoEdited) {
+          if (nx.protocol === "udp") put("protocol", "udp");
+          else if (item.has("protocol")) put("protocol", "tcp");
+        }
         return item;
       },
       create: (nx, template) => styledNode(doc, formatPort(nx), template),
@@ -613,8 +694,17 @@ function patchPorts(doc: Doc, path: Path, next: readonly PortEntry[], keep: numb
   }, keep);
 }
 
-function patchVolumes(doc: Doc, path: Path, next: readonly VolumeEntry[], keep: number): void {
-  patchListField(doc, path, next, {
+/**
+ * Short-syntax mount options with the access mode set to `mode`: only the
+ * `ro`/`rw` token changes, so `ro,z` becomes `rw,z` and keeps its SELinux label.
+ */
+function withAccessMode(options: string, mode: VolumeEntry["mode"]): string {
+  const rest = options.split(",").filter(o => o !== "" && o !== "ro" && o !== "rw");
+  return (mode ? [mode, ...rest] : rest).join(",");
+}
+
+function patchVolumes(doc: Doc, path: Path, base: readonly VolumeEntry[], next: readonly VolumeEntry[], keep: number): void {
+  patchListField(doc, path, base, next, {
     seq: {
       read:   item => parseVolumeEntry(js(doc, item)),
       update: (item, cur, nx) => {
@@ -627,20 +717,21 @@ function patchVolumes(doc: Doc, path: Path, next: readonly VolumeEntry[], keep: 
           }
           return item;
         }
-        // Short syntax: keep an options part the form cannot show (`ro,z`, `nocopy`) when the mode was not edited
+        // Short syntax: keep the options the form cannot show (`z`, `nocopy`); a mode edit swaps only the ro/rw token
         const original = String(js(doc, item) ?? "");
-        const suffix   = cur.mode === nx.mode ? splitOutsideVars(original, ":").slice(2).join(":") : undefined;
-        return updateScalarNode(doc, item, formatVolume(nx, suffix));
+        const options  = splitOutsideVars(original, ":").slice(2).join(":");
+        const value    = volumeItem(nx, cur.mode === nx.mode ? options : withAccessMode(options, nx.mode));
+        return typeof value === "string" ? updateScalarNode(doc, item, value) : doc.createNode(value);
       },
-      create: (nx, template) => styledNode(doc, formatVolume(nx), template),
+      create: (nx, template) => styledNode(doc, volumeItem(nx), template),
     },
-    fresh: e => e.map(v => formatVolume(v)),
+    fresh: e => e.map(v => volumeItem(v)),
   }, keep);
 }
 
-function patchEnvironment(doc: Doc, path: Path, next: readonly EnvEntry[], keep: number): void {
-  const rows = isMapAt(doc, path) ? dedupeBy(next, byKey) : next;
-  patchListField(doc, path, rows, {
+function patchEnvironment(doc: Doc, path: Path, base: readonly EnvEntry[], next: readonly EnvEntry[], keep: number): void {
+  const rows = (r: readonly EnvEntry[]) => isMapAt(doc, path) ? dedupeBy(r, byKey) : r;
+  patchListField(doc, path, rows(base), rows(next), {
     seq: {
       read:   item => parseKeyValueItem(js(doc, item)),
       update: (item, _cur, nx) => updateScalarNode(doc, item, formatEnv(nx)),
@@ -651,9 +742,9 @@ function patchEnvironment(doc: Doc, path: Path, next: readonly EnvEntry[], keep:
   }, keep);
 }
 
-function patchLabels(doc: Doc, path: Path, next: readonly LabelEntry[], keep: number): void {
-  const rows = isMapAt(doc, path) ? dedupeBy(next, byKey) : next;
-  patchListField(doc, path, rows, {
+function patchLabels(doc: Doc, path: Path, base: readonly LabelEntry[], next: readonly LabelEntry[], keep: number): void {
+  const rows = (r: readonly LabelEntry[]) => isMapAt(doc, path) ? dedupeBy(r, byKey) : r;
+  patchListField(doc, path, rows(base), rows(next), {
     seq: {
       read:   item => { const e = parseKeyValueItem(js(doc, item)); return { key: e.key, value: e.value ?? "" }; },
       update: (item, _cur, nx) => updateScalarNode(doc, item, formatLabel(nx)),
@@ -678,17 +769,19 @@ function patchLimit(doc: Doc, svc: Path, flatKey: string, deployKey: string, val
 }
 
 /**
- * `command` / `entrypoint`. An array stays an array when the edited string
- * splits cleanly (balanced quotes); unchanged elements keep their nodes. A
- * string stays a string. A new value is written as a string, as before.
+ * `command` / `entrypoint`. An array stays an array; unchanged elements keep
+ * their nodes. A string stays a string. A new value is written as a string.
+ *
+ * @throws When an array is edited to a string with unbalanced quotes; compose
+ *         tokenizes a string command the same way and would reject it
  */
 function patchArgs(doc: Doc, path: Path, value: string, keep: number): void {
   if (!value.trim()) { deletePath(doc, path, keep); return; }
   const node = doc.getIn(path, true);
   if (!isSeq(node)) { setScalar(doc, path, value); return; }
   const tokens = splitArgs(value);
-  if (tokens && tokens.length > 0) patchItems(node, tokens, stringSeqCodec(doc));
-  else setValue(doc, path, value); // unbalanced quotes: only the shell can make sense of it
+  if (!tokens || tokens.length === 0) throw new Error(`${String(path[path.length - 1])}: unbalanced quotes in ${JSON.stringify(value)}`);
+  patchItems(node, tokens, stringSeqCodec(doc));
 }
 
 /**
@@ -745,7 +838,15 @@ function detectPrintOptions(src: string): ToStringOptions {
  * is accepted only if it parses to exactly the edited data; otherwise the
  * plain print `S1` is returned, which is always correct.
  */
-function printPreservingSource(original: string, doc: Doc): string {
+function printPreservingSource(source: string, doc: Doc): string {
+  // The printer writes LF. Work in LF and restore CRLF at the end, or no
+  // original line (each ending in \r) would match a printed one.
+  const crlf = source.includes("\r\n");
+  const out  = printPreservingLF(crlf ? source.replace(/\r\n/g, "\n") : source, doc);
+  return crlf ? out.replace(/\n/g, "\r\n") : out;
+}
+
+function printPreservingLF(original: string, doc: Doc): string {
   const opts = detectPrintOptions(original);
   const s1   = doc.toString(opts);
   const s0   = parseDocument(original).toString(opts);

@@ -260,13 +260,19 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent, 
     }
   };
 
-  // Sync forms → YAML and return the result
-  const syncYaml = (): string => {
+  /**
+   * Write the forms into the YAML and return it, or null when the forms cannot be written
+   * (an unbalanced quote in a command, say). The error is shown and the caller must stop:
+   * falling back to the YAML as it was would deploy without the user's form edits, and say
+   * nothing about it.
+   */
+  const syncYaml = (): string | null => {
     if (serviceNames.length === 0) return yamlContent;
     try {
       return writeFormsToYaml();
-    } catch {
-      return yamlContent;
+    } catch (e) {
+      setParseErrors([e instanceof Error ? e.message : "Failed to apply forms to YAML"]);
+      return null;
     }
   };
 
@@ -332,6 +338,7 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent, 
     }
 
     const yaml = syncYaml();
+    if (yaml === null) return;
     if (!yaml.trim()) { setError("Compose content cannot be empty."); return; }
 
     setStarting(true);
@@ -376,6 +383,7 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent, 
     setParseErrors([]);
 
     const yaml = syncYaml();
+    if (yaml === null) return;
     setStarting(true);
     try {
       const { data, error: err } = await api.api.compose.stacks({ name: stack!.name }).file.put({
