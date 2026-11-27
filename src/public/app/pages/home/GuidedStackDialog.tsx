@@ -9,11 +9,8 @@ import { AppConfigTab }   from "./guided/AppConfigTab";
 import { EnvFileTab }     from "./guided/EnvFileTab";
 import { ServiceTab }     from "./guided/ServiceTab";
 import { StackConfigTab } from "./guided/StackConfigTab";
-import {
-  parseComposeDoc, serializeComposeDoc,
-  parseService,    serializeService,
-  parseStackConfig, serializeStackConfig,
-} from "./guided/composeUtils";
+import { parseComposeDoc, parseService, parseStackConfig } from "./guided/composeUtils";
+import { applyFormChanges, type FormSnapshot } from "./guided/composePatch";
 import type { AppConfigState, OpenMode, ServiceForm, StackConfig } from "./guided/types";
 
 interface SSEMsg { log?: string; ok?: boolean; error?: string }
@@ -49,7 +46,7 @@ const DEFAULT_YAML = `services:
     restart: unless-stopped
 `;
 
-function initForms(yaml: string, projectName = "") {
+function initForms(yaml: string, projectName = ""): FormSnapshot {
   try {
     const doc   = parseComposeDoc(yaml);
     const names = Object.keys(doc.services ?? {});
@@ -152,6 +149,10 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent }
 
   const logRef   = useRef<HTMLPreElement | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  // The forms as last read from (or written to) the YAML. Writing back diffs
+  // the current forms against this, so only fields the user changed are
+  // touched and everything else in the file is left as it is.
+  const formsBaseRef = useRef<FormSnapshot>(init);
 
   useEffect(() => {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
@@ -181,13 +182,12 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent }
         setYamlContent(yaml);
 
         try {
-          const doc   = parseComposeDoc(yaml);
-          const names = Object.keys(doc.services ?? {});
-          setServiceNames(names);
-          setServiceForms(Object.fromEntries(names.map(n => [n, parseService(doc.services[n])])));
-          const cfg = parseStackConfig(doc);
-          if (!cfg.name && stack?.name) cfg.name = stack.name;
-          setStackConfig(cfg);
+          // On a parse error this is the same empty state the dialog started with
+          const loaded = initForms(yaml, stack?.name ?? "");
+          setServiceNames(loaded.serviceNames);
+          setServiceForms(loaded.serviceForms);
+          setStackConfig(loaded.stackConfig);
+          formsBaseRef.current = loaded;
         } catch { /* ignore parse errors on load */ }
 
         const envRes  = await api.api.compose.stacks({ name: stack.name }).envfile.get();
@@ -208,11 +208,17 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent }
 
   const handleParseToForms = () => {
     try {
-      const doc   = parseComposeDoc(yamlContent);
-      const names = Object.keys(doc.services ?? {});
-      setServiceNames(names);
-      setServiceForms(Object.fromEntries(names.map(n => [n, parseService(doc.services[n])])));
-      setStackConfig(parseStackConfig(doc));
+      const doc    = parseComposeDoc(yamlContent);
+      const names  = Object.keys(doc.services ?? {});
+      const parsed: FormSnapshot = {
+        serviceNames: names,
+        serviceForms: Object.fromEntries(names.map(n => [n, parseService(doc.services[n])])),
+        stackConfig:  parseStackConfig(doc),
+      };
+      setServiceNames(parsed.serviceNames);
+      setServiceForms(parsed.serviceForms);
+      setStackConfig(parsed.stackConfig);
+      formsBaseRef.current = parsed;
       setParseErrors([]);
       if (isEdit) setNonAppConfigTouched(true);
       if (names[0]) setActiveTab(names[0]);
@@ -221,14 +227,21 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent }
     }
   };
 
+  /**
+   * Patch the current form edits into the YAML text in place and make the
+   * result the new base. Throws when the YAML does not parse.
+   */
+  const writeFormsToYaml = (): string => {
+    const now: FormSnapshot = { serviceNames, serviceForms, stackConfig };
+    const yaml = applyFormChanges(yamlContent, formsBaseRef.current, now);
+    formsBaseRef.current = now;
+    setYamlContent(yaml);
+    return yaml;
+  };
+
   const handleFormsToYaml = () => {
     try {
-      const doc      = parseComposeDoc(yamlContent);
-      const services = Object.fromEntries(
-        serviceNames.map(n => [n, serializeService(serviceForms[n] ?? parseService({}))])
-      );
-      const withCfg  = serializeStackConfig(stackConfig, { ...doc, services });
-      setYamlContent(serializeComposeDoc(withCfg));
+      writeFormsToYaml();
       setActiveTab("yaml");
     } catch (e) {
       setParseErrors([e instanceof Error ? e.message : "Failed to apply forms to YAML"]);
@@ -239,14 +252,7 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent }
   const syncYaml = (): string => {
     if (serviceNames.length === 0) return yamlContent;
     try {
-      const doc      = parseComposeDoc(yamlContent);
-      const services = Object.fromEntries(
-        serviceNames.map(n => [n, serializeService(serviceForms[n] ?? parseService({}))])
-      );
-      const withCfg  = serializeStackConfig(stackConfig, { ...doc, services });
-      const yaml     = serializeComposeDoc(withCfg);
-      setYamlContent(yaml);
-      return yaml;
+      return writeFormsToYaml();
     } catch {
       return yamlContent;
     }
