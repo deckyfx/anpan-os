@@ -265,7 +265,10 @@ class UpdateChecker {
 
         await UpdateCheckStore.recordProgress(runId, completed, updatesFound, getFallbacks);
 
-        if (row) this.bus.publish({ type: "result", result: row });
+        // Checked again: the stack may have been deleted while recordProgress was awaited.
+        if (row && !UpdateCheckStore.isFenced(row.stack, opts.sweepStartedAt)) {
+          this.bus.publish({ type: "result", result: row });
+        }
         this.bus.publish({ type: "progress", completed, total: targets.length, updatesFound });
       }
     };

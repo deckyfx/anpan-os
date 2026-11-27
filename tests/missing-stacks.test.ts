@@ -67,6 +67,9 @@ describe("fences against work already in flight", () => {
     await StackStore.delete("fence-b");
 
     expect(await UpdateCheckStore.putResult(run.id, { stack: "fence-b", image: "x/y" }, sweepStartedAt)).toBeNull();
+    // The same check guards publishing, for a row written just before the delete.
+    expect(UpdateCheckStore.isFenced("fence-b", sweepStartedAt)).toBe(true);
+    expect(UpdateCheckStore.isFenced("fence-b", undefined)).toBe(false);
     expect((await UpdateCheckStore.allState()).some(r => r.stack === "fence-b")).toBe(false);
     // A sweep that starts afterwards checks it again, so a redeployed stack is not ignored.
     expect(await UpdateCheckStore.putResult(run.id, { stack: "fence-b", image: "x/y" }, Date.now() + 1)).not.toBeNull();

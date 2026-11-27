@@ -123,7 +123,7 @@ export class UpdateCheckStore {
    */
   static async putResult(runId: number, r: ResultInput, sweepStartedAt?: number): Promise<ImageUpdateStateRow | null> {
     // Null, like a failed write: the sweep then neither counts nor publishes it.
-    if (sweepStartedAt !== undefined && (fencedAt.get(r.stack) ?? -Infinity) >= sweepStartedAt) return null;
+    if (UpdateCheckStore.isFenced(r.stack, sweepStartedAt)) return null;
     const hasUpdate = r.hasUpdate ?? false;
     const now = new Date();
     const nowSeconds = Math.floor(now.getTime() / 1000);
@@ -207,6 +207,16 @@ export class UpdateCheckStore {
     fencedAt.set(stack, at);
     // A fence only matters to sweeps already running, and none outlives an hour.
     for (const [name, t] of fencedAt) if (at - t > 60 * 60_000) fencedAt.delete(name);
+  }
+
+  /**
+   * Whether `stack` was deleted at or after a sweep that started at `sweepStartedAt`.
+   *
+   * Checked when writing a result and again just before publishing it: a row written before
+   * the delete is removed by it, but the worker still holds it and would otherwise announce it.
+   */
+  static isFenced(stack: string, sweepStartedAt: number | undefined): boolean {
+    return sweepStartedAt !== undefined && (fencedAt.get(stack) ?? -Infinity) >= sweepStartedAt;
   }
 
   /** Remove all stored results and run history. Badges reappear after the next sweep. */
