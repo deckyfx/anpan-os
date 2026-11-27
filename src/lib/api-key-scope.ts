@@ -74,7 +74,8 @@ export const API_KEY_RULES: readonly ApiKeyRule[] = [
   // ── read: look, never touch ──────────────────────────────────────────────────
   ...[
     "/api/me", "/api/docker", "/api/compose", "/api/system", "/api/samba",
-    "/api/casaos", "/api/ports", "/api/bookmarks", "/api/app-store", "/api/openapi.json",
+    "/api/casaos", "/api/ports", "/api/bookmarks", "/api/app-store", "/api/jobs",
+    "/api/openapi.json",
   ].map((prefix): ApiKeyRule => ({
     prefix, methods: READ_METHODS, minScope: "read",
     reason: "Status, lists, logs and the OpenAPI document: enough to monitor the box. Compose " +
@@ -84,10 +85,11 @@ export const API_KEY_RULES: readonly ApiKeyRule[] = [
   // ── operate: run the apps, not the machine ───────────────────────────────────
   ...[
     "/api/docker/stacks", "/api/docker/containers", "/api/docker/update-check",
-    "/api/compose", "/api/app-store", "/api/bookmarks", "/api/ports",
+    "/api/compose", "/api/app-store", "/api/bookmarks", "/api/ports", "/api/jobs",
   ].map((prefix): ApiKeyRule => ({
     prefix, methods: WRITE_METHODS, minScope: "operate",
-    reason: "Start, stop, restart, pull, install and edit stacks; check for updates; keep " +
+    reason: "Start, stop, restart, pull, install and edit stacks, and follow or cancel those " +
+            "jobs; check for updates; keep " +
             "bookmarks and port notes. Writing a compose file can mount any host path into a " +
             "container, so treat an operate key as nearly as powerful as a full one.",
   })),

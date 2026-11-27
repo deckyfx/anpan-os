@@ -4,11 +4,10 @@
  * Strategy:
  *   - Auth guard: every route must return 401 with no cookie.
  *   - Validation: POST /api/compose/stacks rejects bad names with 422.
- *   - Functional: with a valid session and valid input the route either:
- *       * Returns { ok: true } (Docker available, stack started)
- *       * Returns { ok: false, error: "..." } with 200 (docker compose failed)
- *       * Returns 500 if mkdir failed (permissions — test env uses a temp dir)
- *     In any case, the status is NOT 401 and NOT 422.
+ *   - Functional: with a valid session and valid input the route passes validation: it
+ *     starts a job (202), finds the name taken (409), or finds no Docker (503). The job
+ *     itself is covered in stack-ops.test.ts and jobs-routes.test.ts; the test preload stops
+ *     it from reaching Docker. In any case, the status is NOT 401 and NOT 422.
  *
  * Run: bun test tests/compose.test.ts
  */
@@ -97,7 +96,7 @@ describe("POST /api/compose/stacks — name validation", () => {
       { name: "my-test-stack", content: VALID_CONTENT },
       { headers: { Cookie: cookie } },
     );
-    // 422 = validation failure; 200/500 = validation passed, system ran
+    // 422 = validation failure; anything else = validation passed
     expect(response.status).not.toBe(422);
     expect(response.status).not.toBe(401);
   });

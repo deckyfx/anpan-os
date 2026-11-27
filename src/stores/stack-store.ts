@@ -58,6 +58,28 @@ export class StackStore {
     return result[0];
   }
 
+  /**
+   * Record that anpan-os installed this stack, with its metadata, creating the row if needed.
+   *
+   * `upsert` cannot do this. It never writes `managed` on conflict (so the Docker sync cannot
+   * flip it back), and the 5-second stack poll often inserts the row while an install is
+   * still deploying. An install that then called `upsert({ managed: true })` changed nothing,
+   * and the stack stayed unmanaged. This writes `managed` and every given field in a single
+   * statement, whether or not the row exists. Fields left undefined keep their stored value.
+   */
+  static async claim(id: string, meta: Partial<Omit<NewStack, "id" | "managed">> = {}): Promise<Stack> {
+    const given = Object.fromEntries(
+      Object.entries(meta).filter(([, v]) => v !== undefined),
+    ) as Partial<Omit<NewStack, "id" | "managed">>;
+    const result = await db
+      .insert(stacks)
+      .values({ ...given, id, managed: true })
+      .onConflictDoUpdate({ target: stacks.id, set: { ...given, managed: true, updatedAt: new Date() } })
+      .returning();
+    if (!result[0]) throw new Error(`claim failed for stack ${id}`);
+    return result[0];
+  }
+
   static async updateMeta(id: string, patch: Partial<Omit<NewStack, "id">>): Promise<Stack | null> {
     const result = await db
       .update(stacks)

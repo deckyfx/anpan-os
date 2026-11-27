@@ -28,7 +28,14 @@ passkey_allowed_origins = []
 # disable_login_method = []      # "form" disables password login/setup; "passkey" disables passkey auth/registration
 
 [compose]
-# folder = "..."   # defaults to $HOME/.anpanos/composes
+# folder = "..."   # defaults to <runtime dir>/composes (/var/lib/anpan-os/composes on Linux)
+
+[apps]
+# data_root = "/DATA/AppData"   # where each app keeps its data, one folder per app
+#                               # defaults to <runtime dir>/appdata
+# puid = 1000                   # $PUID / $PGID given to apps that ask for them (CasaOS-style)
+# pgid = 1000
+# tz = "Asia/Jakarta"           # $TZ given to apps; defaults to this machine's time zone
 
 [files]
 root = "/"   # root path the file manager is allowed to browse
@@ -66,6 +73,17 @@ interface ComposeConfig {
   folder?: string;
 }
 
+/** `[apps]`: values the app platform gives to installed apps. */
+interface AppsConfig {
+  /** Folder holding one data folder per app. CasaOS uses /DATA/AppData. */
+  data_root?: string;
+  /** User and group id handed to apps as $PUID and $PGID. */
+  puid?: number;
+  pgid?: number;
+  /** Time zone handed to apps as $TZ. */
+  tz?: string;
+}
+
 interface FilesConfig {
   root?: string;
   /**
@@ -88,6 +106,7 @@ interface AppConfig {
   server:  ServerConfig;
   auth:    AuthConfig;
   compose: ComposeConfig;
+  apps:    AppsConfig;
   files:   FilesConfig;
   samba:   SambaConfig;
 }
@@ -95,7 +114,7 @@ interface AppConfig {
 /** Reads RUNTIME_CONFIG_DIR/config.toml. Creates a template on first run. */
 class Config {
   private static instance: Config;
-  private data: AppConfig = { server: {}, auth: {}, compose: {}, files: {}, samba: {} };
+  private data: AppConfig = { server: {}, auth: {}, compose: {}, apps: {}, files: {}, samba: {} };
   private configPath: string;
   private _tlsEnabled = false;
 
@@ -129,6 +148,7 @@ class Config {
       server:  parsed.server  ?? {},
       auth:    parsed.auth    ?? {},
       compose: parsed.compose ?? {},
+      apps:    parsed.apps    ?? {},
       files:   parsed.files   ?? {},
       samba:   parsed.samba   ?? {},
     };
@@ -200,6 +220,22 @@ class Config {
   /** Compose stacks folder — defaults to RUNTIME_CONFIG_DIR/composes. */
   get composeFolder(): string {
     return this.data.compose.folder ?? join(envConfig.RUNTIME_CONFIG_DIR, "composes");
+  }
+
+  /** Folder holding one data folder per app — defaults to RUNTIME_CONFIG_DIR/appdata. */
+  get appDataRoot(): string {
+    return resolve(this.data.apps.data_root ?? join(envConfig.RUNTIME_CONFIG_DIR, "appdata"));
+  }
+
+  /** $PUID and $PGID for apps that ask for them. 1000 is the first regular user on most distros. */
+  get appIds(): { puid: number; pgid: number } {
+    const id = (v: unknown) => (Number.isInteger(v) && (v as number) >= 0 ? (v as number) : 1000);
+    return { puid: id(this.data.apps.puid), pgid: id(this.data.apps.pgid) };
+  }
+
+  /** $TZ for apps: the configured zone, else this machine's. */
+  get appTimeZone(): string {
+    return this.data.apps.tz || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
   }
 
   /** Root path the file manager is allowed to browse — defaults to "/". */

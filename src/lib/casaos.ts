@@ -2,6 +2,7 @@ import { parse } from "yaml";
 import { readdir } from "node:fs/promises";
 
 import { CASAOS_APPS_DIR } from "./platform";
+import type { StackMeta } from "./stack-ops";
 
 const APPS_DIR = CASAOS_APPS_DIR;
 
@@ -101,6 +102,27 @@ export function parseCasaOSMeta(raw: string): CasaOSApp | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * The stack tile's metadata from a CasaOS app's `x-casaos` block.
+ *
+ * Empty strings become undefined, so a deploy keeps what the stack already has rather
+ * than blanking it.
+ */
+export function casaosStackMeta(meta: CasaOSApp | null): StackMeta {
+  if (!meta) return {};
+  const v = (s: string) => s || undefined;
+  return {
+    title:       v(meta.title),
+    icon:        v(meta.icon),
+    tagline:     v(meta.tagline),
+    note:        v(meta.tips),
+    portMap:     v(meta.portMap),
+    scheme:      v(meta.scheme),
+    indexPath:   v(meta.index),
+    mainService: v(meta.mainService),
+  };
 }
 
 // ─── Remote App Store ─────────────────────────────────────────────────────────

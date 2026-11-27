@@ -19,3 +19,14 @@ process.env.RUNTIME_CONFIG_DIR = TEST_DIR;
 const sqlite = new Database(join(TEST_DIR, "storage.db"));
 try { await migrate(drizzle(sqlite), { migrationsFolder: "./drizzle" }); } catch { /* ignore */ }
 sqlite.close();
+
+// Jobs run `docker compose` through processRunner. A test that reaches it without stubbing
+// it would deploy real containers on a machine with Docker (the old install-route tests did
+// exactly that), so the default here refuses. Tests that exercise jobs replace run/capture
+// with spyOn, and mockRestore puts this refusal back.
+const { processRunner } = await import("../src/lib/jobs");
+const refuse = (argv: string[]): never => {
+  throw new Error(`Test tried to run "${argv.join(" ")}": stub processRunner in the test`);
+};
+processRunner.run = async (argv) => refuse(argv);
+processRunner.capture = async (argv) => refuse(argv);
