@@ -46,7 +46,7 @@ function PasswordRow() {
   }, [open]);
   return (
     <div className="space-y-3">
-      <Row icon={<Lock size={16} />} label="Password" detail="Changing it signs out your other sessions.">
+      <Row icon={<Lock size={16} />} label="Password" detail="Changing it signs out your other sessions and revokes every API key.">
         {!open && (
           <button
             ref={buttonRef}
