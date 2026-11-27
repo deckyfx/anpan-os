@@ -95,9 +95,12 @@ describe("/api/jobs", () => {
   test("lists jobs, and cancels a running one", async () => {
     const name = "route-cancel";
     await rm(stackDir(name), { recursive: true, force: true });
-    spies.push(spyOn(processRunner, "run").mockImplementation((_argv, opts) => new Promise<number>(resolve => {
-      opts.signal.addEventListener("abort", () => resolve(137), { once: true });
-    })));
+    // `up` runs until cancelled; the clean-up `down` that follows a cancelled install ends at once.
+    spies.push(spyOn(processRunner, "run").mockImplementation((argv, opts) => argv.includes("down")
+      ? Promise.resolve(0)
+      : new Promise<number>(resolve => {
+        opts.signal.addEventListener("abort", () => resolve(137), { once: true });
+      })));
     const started = await call("POST", "/api/compose/stacks", { name, content: COMPOSE });
     const job = started.body.job as JobSummary;
 

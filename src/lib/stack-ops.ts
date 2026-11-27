@@ -243,7 +243,33 @@ export async function runDeploy(ctx: JobContext, mode: "install" | "redeploy", r
   invalidateOriginCache(req.name);
 
   ctx.step("Starting containers");
-  await composeUp(ctx, req.name, dir);
+  try {
+    await composeUp(ctx, req.name, dir);
+  } catch (err) {
+    // A failed (or cancelled) install leaves nothing behind, so pressing Install again
+    // works: otherwise the folder and row it made would answer "already exists", and the
+    // user would have to find Delete for a stack that never started. A failed redeploy
+    // keeps its new files, which are what the user is trying to make work.
+    if (mode === "install") await undoInstall(ctx, req.name, dir);
+    throw err;
+  }
+}
+
+/**
+ * Remove what a failed install created: any containers and networks it got as far as
+ * making, the stack folder and the stack's row. Named volumes stay (`down` without -v).
+ *
+ * Runs even when the job was cancelled, so it does not use the job's own signal. It has a
+ * time limit of its own instead: a Docker that hangs must not keep the job running forever.
+ */
+async function undoInstall(ctx: JobContext, name: string, dir: string): Promise<void> {
+  ctx.log("Install failed: removing what it created");
+  const signal = AbortSignal.timeout(2 * 60_000);
+  await processRunner.run([docker(), "compose", "-p", name, "down", "--remove-orphans"], { cwd: dir, signal, onLine: line => ctx.log(line) })
+    .catch(() => 1);
+  await rm(dir, { recursive: true, force: true });
+  await StackStore.delete(name);
+  invalidateOriginCache(name);
 }
 
 /** Where `name`'s compose file lives: anpan-os's folder, else CasaOS's. */

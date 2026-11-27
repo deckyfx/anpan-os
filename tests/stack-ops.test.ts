@@ -114,6 +114,18 @@ describe("install", () => {
     expect(await StackStore.findById(name)).toBeNull();
   });
 
+  test("a failed docker compose up removes the install, so it can simply be tried again", async () => {
+    exitCodes = { "compose up": 18 };
+    const { job, log } = await runJob(ctx => runDeploy(ctx, "install", { name, compose: COMPOSE, meta: { title: "Ops" } }));
+    expect(job.status).toBe("failed");
+    expect(job.error).toBe("docker compose up failed (exit code 18)");
+    expect(ran).toContain(`compose -p ${name} down --remove-orphans`);
+    expect(log).toContain("Install failed: removing what it created");
+    expect(await exists(stackDir(name))).toBe(false);
+    expect(await StackStore.findById(name)).toBeNull();
+    expect(await checkInstall({ name, compose: COMPOSE })).toBeNull();
+  });
+
   test("creates missing bind folders under the data root, and only there", async () => {
     const inside = join(config.appDataRoot, name, "config");
     const outside = join(config.appDataRoot, "..", "elsewhere-ops");
