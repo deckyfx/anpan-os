@@ -7,9 +7,11 @@
  */
 import { test, expect, describe, afterEach, afterAll, beforeEach, spyOn } from "bun:test";
 import { join } from "node:path";
-import { rm, stat } from "node:fs/promises";
+import { rm, stat, readdir } from "node:fs/promises";
 import { JobManager, processRunner, type JobContext, type JobSummary } from "../src/lib/jobs";
-import { runDeploy, checkInstall, checkRedeploy, runUpdateAll, runMigrate, stackDir, type DeployRequest } from "../src/lib/stack-ops";
+import { runDeploy, checkInstall, checkRedeploy, runUpdateAll, runMigrate, runRepair, stackDir, ownerFor, type DeployRequest } from "../src/lib/stack-ops";
+import { mkdir, symlink, writeFile } from "node:fs/promises";
+import * as composeSource from "../src/lib/compose-source";
 import { StackStore } from "../src/stores/stack-store";
 import { DockerClient } from "../src/lib/docker";
 import { ports as portProvider } from "../src/lib/providers/ports";
@@ -48,7 +50,7 @@ beforeEach(() => {
   spies.push(spyOn(processRunner, "run").mockImplementation(async (argv, opts) => {
     const cmd = argv.slice(1).join(" ");
     ran.push(cmd);
-    if (cmd.startsWith("compose up")) await onUp(opts.cwd);
+    if (/^compose -p \S+ up/.test(cmd)) await onUp(opts.cwd);
     const code = Object.entries(exitCodes).find(([prefix]) => cmd.startsWith(prefix))?.[1] ?? 0;
     return code;
   }));
@@ -99,7 +101,7 @@ describe("install", () => {
     expect(atUp!.title).toBe("Ops");
     expect(atUp!.env).toStartWith("A=1\n");
     expect(atUp!.env).toContain(`TZ=${config.appTimeZone}`);   // the file uses $TZ
-    expect(ran).toEqual([`compose -p ${name} config --format json`, "compose up -d"]);
+    expect(ran).toEqual([`compose -p ${name} config --format json`, `compose -p ${name} up -d`]);
   });
 
   test("a port conflict stops before up and removes what the install wrote", async () => {
@@ -109,13 +111,13 @@ describe("install", () => {
 
     expect(job.status).toBe("failed");
     expect(job.error).toBe("Port conflict: port 8080/tcp (service web) is already used by process caddy (pid 7)");
-    expect(ran.some(c => c.startsWith("compose up"))).toBe(false);
+    expect(ran.some(c => c.includes(" up"))).toBe(false);
     expect(await exists(stackDir(name))).toBe(false);
     expect(await StackStore.findById(name)).toBeNull();
   });
 
   test("a failed docker compose up removes the install, so it can simply be tried again", async () => {
-    exitCodes = { "compose up": 18 };
+    exitCodes = { [`compose -p ${name} up`]: 18 };
     const { job, log } = await runJob(ctx => runDeploy(ctx, "install", { name, compose: COMPOSE, meta: { title: "Ops" } }));
     expect(job.status).toBe("failed");
     expect(job.error).toBe("docker compose up failed (exit code 18)");
@@ -124,6 +126,32 @@ describe("install", () => {
     expect(await exists(stackDir(name))).toBe(false);
     expect(await StackStore.findById(name)).toBeNull();
     expect(await checkInstall({ name, compose: COMPOSE })).toBeNull();
+  });
+
+  test("a failure before docker compose up undoes the install without running down", async () => {
+    spies.push(spyOn(StackStore, "claim").mockRejectedValue(new Error("database is locked")));
+    const { job } = await runJob(ctx => runDeploy(ctx, "install", { name, compose: COMPOSE }));
+    expect(job.error).toBe("database is locked");
+    expect(ran.some(c => c.includes(" down"))).toBe(false);
+    expect(await exists(stackDir(name))).toBe(false);
+  });
+
+  test("when docker compose down fails too, the files and row stay for a later clean-up", async () => {
+    exitCodes = { [`compose -p ${name} up`]: 18, [`compose -p ${name} down`]: 1 };
+    const { job, log } = await runJob(ctx => runDeploy(ctx, "install", { name, compose: COMPOSE }));
+    expect(job.status).toBe("failed");
+    expect(log.some(l => l.startsWith("Could not remove the stack's containers"))).toBe(true);
+    expect(await exists(join(stackDir(name), "docker-compose.yml"))).toBe(true);
+    expect((await StackStore.findById(name))?.managed).toBe(true);
+  });
+
+  test("checks again inside the job: a folder that appeared since the route checked is left untouched", async () => {
+    await mkdir(stackDir(name), { recursive: true });
+    await writeFile(join(stackDir(name), "notes.txt"), "mine");
+    const { job } = await runJob(ctx => runDeploy(ctx, "install", { name, compose: COMPOSE }));
+    expect(job.status).toBe("failed");
+    expect(job.error).toContain("already exists");
+    expect(await readdir(stackDir(name))).toEqual(["notes.txt"]);
   });
 
   test("creates missing bind folders under the data root, and only there", async () => {
@@ -144,6 +172,33 @@ describe("install", () => {
     expect(log.some(l => l.startsWith(`Created ${inside}`))).toBe(true);
   });
 
+  test("bind folders: create_host_path false and a symlink out of the data root are left alone", async () => {
+    const outside = join(config.appDataRoot, "..", "outside-ops");
+    await rm(outside, { recursive: true, force: true });
+    await mkdir(outside, { recursive: true });
+    await rm(join(config.appDataRoot, name), { recursive: true, force: true });
+    await mkdir(config.appDataRoot, { recursive: true });
+    await symlink(outside, join(config.appDataRoot, name));
+    const noCreate = join(config.appDataRoot, "ops-nocreate", "x");
+    await rm(join(config.appDataRoot, "ops-nocreate"), { recursive: true, force: true });
+    resolved = { services: { web: { volumes: [
+      { type: "bind", source: join(config.appDataRoot, name, "config"), target: "/config" },
+      { type: "bind", source: noCreate, target: "/x", bind: { create_host_path: false } },
+    ] } } };
+    const { job, log } = await runJob(ctx => runDeploy(ctx, "install", { name, compose: COMPOSE }));
+    expect(job.status).toBe("done");
+    expect(await exists(join(outside, "config"))).toBe(false);
+    expect(await exists(noCreate)).toBe(false);
+    expect(log.some(l => l.startsWith("Skipped") && l.includes("symlink"))).toBe(true);
+    await rm(join(config.appDataRoot, name), { force: true });
+    await rm(outside, { recursive: true, force: true });
+  });
+
+  test("folders are owned by the PUID and PGID in the stack's .env, else the configured ones", () => {
+    expect(ownerFor("PUID=2001\nPGID: 2002\n")).toEqual({ puid: 2001, pgid: 2002 });
+    expect(ownerFor("PUID=abc\n")).toEqual(config.appIds);
+  });
+
   test("checkInstall refuses a name that is taken, and a file with no services", async () => {
     expect(await checkInstall({ name, compose: "services: {}\n" })).toEqual({ status: 422, error: "The compose file defines no services" });
     expect((await checkInstall({ name, compose: "services: [" }))?.status).toBe(422);
@@ -157,6 +212,22 @@ describe("install", () => {
     expect(await checkInstall({ name, compose: COMPOSE })).toEqual({
       status: 409, error: `A stack named "${name}" already exists. Choose another name, or edit that stack.`,
     });
+  });
+
+  test("checkInstall: an existing folder is taken even without a compose file; Docker unreachable is 503", async () => {
+    await mkdir(stackDir(name), { recursive: true });
+    expect((await checkInstall({ name, compose: COMPOSE }))?.status).toBe(409);
+    await rm(stackDir(name), { recursive: true, force: true });
+    spies.push(spyOn(DockerClient, "listProjectContainers").mockResolvedValue({ ok: false, error: "socket unavailable" } as never));
+    expect((await checkInstall({ name, compose: COMPOSE }))?.status).toBe(503);
+  });
+
+  test("a top-level name: that is not the stack's is refused", async () => {
+    expect(await checkInstall({ name, compose: `name: other\n${COMPOSE}` })).toEqual({
+      status: 422,
+      error: `The compose file is named "other", but the stack is "${name}". Make them match, or remove the top-level name:.`,
+    });
+    expect(await checkInstall({ name, compose: `name: ${name}\n${COMPOSE}` })).toBeNull();
   });
 });
 
@@ -201,14 +272,14 @@ describe("update-all", () => {
     spies.push(spyOn(processRunner, "run").mockImplementation(async (argv, opts) => {
       const cmd = argv.slice(1).join(" ");
       ran.push(`${opts.cwd.split("/").pop()}: ${cmd}`);
-      return cmd === "compose pull" && ++pulls === 1 ? 1 : 0;
+      return cmd.endsWith(" pull") && ++pulls === 1 ? 1 : 0;
     }));
     const { job, log } = await runJob(ctx => runUpdateAll(ctx, ["ops-u1", "ops-missing", "ops-u2"]));
 
     expect(job.status).toBe("failed");
     expect(job.error).toBe("2 of 3 stacks did not update: ops-u1, ops-missing");
     expect(job.progress).toEqual({ done: 3, total: 3 });
-    expect(ran).toEqual(["ops-u1: compose pull", "ops-u2: compose pull", "ops-u2: compose up -d"]);
+    expect(ran).toEqual(["ops-u1: compose -p ops-u1 pull", "ops-u2: compose -p ops-u2 pull", "ops-u2: compose -p ops-u2 up -d"]);
     expect(log).toContain("✓ ops-u2 updated");
   });
 });
@@ -227,6 +298,28 @@ describe("migrate", () => {
     expect(await exists(stackDir(name))).toBe(false);
   });
 
+  test("a failed recreate that moved nothing removes the copy and leaves the stack unmanaged", async () => {
+    exitCodes = { [`compose -p ${name} up`]: 1 };
+    spies.push(spyOn(DockerClient, "listProjectComposeSources").mockResolvedValue({
+      ok: true, data: [{ container: "x", configFiles: ["/var/lib/casaos/apps/x/docker-compose.yml"], workingDir: "" }],
+    }));
+    const { job, log } = await runJob(ctx => runMigrate(ctx, name, "services:\n  web:\n    image: x\n", "/src.yml", { title: "M" }));
+    expect(job.status).toBe("failed");
+    expect(await exists(stackDir(name))).toBe(false);
+    expect((await StackStore.findById(name))?.managed ?? false).toBe(false);
+    expect(log.some(l => l.includes("still runs from CasaOS"))).toBe(true);
+  });
+
+  test("a failed recreate that moved some containers keeps the copy for Repair", async () => {
+    exitCodes = { [`compose -p ${name} up`]: 1 };
+    spies.push(spyOn(DockerClient, "listProjectComposeSources").mockResolvedValue({
+      ok: true, data: [{ container: "x", configFiles: [join(stackDir(name), "docker-compose.yml")], workingDir: "" }],
+    }));
+    const { log } = await runJob(ctx => runMigrate(ctx, name, "services:\n  web:\n    image: x\n", "/src.yml", {}));
+    expect(await exists(join(stackDir(name), "docker-compose.yml"))).toBe(true);
+    expect(log.some(l => l.includes("use Repair"))).toBe(true);
+  });
+
   test("copies the file, records the stack with its metadata, then recreates", async () => {
     const { job } = await runJob(ctx => runMigrate(ctx, name, "services:\n  web:\n    image: x\n", "/src.yml", { title: "Migrated" }));
     expect(job.status).toBe("done");
@@ -234,7 +327,7 @@ describe("migrate", () => {
     const row = await StackStore.findById(name);
     expect(row?.managed).toBe(true);
     expect(row?.title).toBe("Migrated");
-    expect(ran).toEqual(["compose up -d --remove-orphans --force-recreate"]);
+    expect(ran).toEqual([`compose -p ${name} up -d --remove-orphans --force-recreate`]);
   });
 });
 
@@ -249,5 +342,20 @@ describe("StackStore.claim", () => {
     const row = await StackStore.findById("ops-claim");
     expect(row?.managed).toBe(true);
     expect(row?.title).toBe("Mine");
+  });
+});
+
+describe("repair", () => {
+  test("refuses to take over an external stack without the caller's consent, checked inside the job", async () => {
+    spies.push(spyOn(composeSource, "buildComposeSourceReport").mockResolvedValue({
+      stack: "ops-ext", status: "external", needsRepair: false, expected: "/x", expectedExists: false,
+      containers: [], foreignPaths: ["/elsewhere/docker-compose.yml"],
+    } as never));
+    const adopt = spyOn(composeSource, "adoptComposeFile");
+    spies.push(adopt);
+    const { job } = await runJob(ctx => runRepair(ctx, "ops-ext"));
+    expect(job.status).toBe("failed");
+    expect(job.error).toContain("managed outside anpan-os");
+    expect(adopt).not.toHaveBeenCalled();
   });
 });

@@ -32,7 +32,9 @@ describe.skipIf(!FEATURES.casaosMigration)("CasaOS migrate", () => {
     // Reading `composePath` through an omitted body threw before the default path was chosen.
     // Here the refusal is "not root" (403) or "cannot read" (422), depending on who runs the
     // tests; never a 500 and never a started job.
-    const { status, text } = await migrate("some-app");
+    // A name no CasaOS install will have, so even a root test host with CasaOS and Docker
+    // cannot find a real app there and start a migration.
+    const { status, text } = await migrate(`no-such-app-${crypto.randomUUID().slice(0, 8)}`);
     expect([403, 422, 503]).toContain(status);
     expect(text).toContain('"error"');
     expect(text).not.toContain("undefined is not an object");

@@ -97,10 +97,36 @@ async function readLog(id: string): Promise<JobLog | null> {
 }
 
 export const useJobsStore = create<JobsState>((set, get) => {
-  /** Read `id`'s log from the server and replace what is held. */
+  /** Reads in flight, by job: `again` asks for one more read once the current one lands. */
+  const pending = new Map<string, { again: boolean }>();
+
+  /**
+   * Read `id`'s log from the server and take it, unless what is held already reaches
+   * further: lines streamed in while the read was on its way are newer than its answer.
+   *
+   * One read per job at a time. A watched job with a long log would otherwise start a full
+   * read for every line streamed before the first read returned; those requests now fold
+   * into a single follow-up read, which also covers any gap they reported.
+   */
   const refetch = async (id: string) => {
-    const log = await readLog(id).catch(() => null);
-    if (log && watchers.has(id)) set(s => ({ logs: { ...s.logs, [id]: log } }));
+    const inFlight = pending.get(id);
+    if (inFlight) { inFlight.again = true; return; }
+    const state = { again: false };
+    pending.set(id, state);
+    try {
+      do {
+        state.again = false;
+        const log = await readLog(id).catch(() => null);
+        if (!log || !watchers.has(id)) continue;
+        set(s => {
+          const held = s.logs[id];
+          if (held && log.firstSeq + log.lines.length < held.firstSeq + held.lines.length) return {};
+          return { logs: { ...s.logs, [id]: log } };
+        });
+      } while (state.again && watchers.has(id));
+    } finally {
+      pending.delete(id);
+    }
   };
 
   const applyLine = (jobId: string, seq: number, line: string) => {
@@ -210,16 +236,19 @@ export function runningJobFor(jobs: Record<string, JobSummary>, stack: string): 
 }
 
 /**
- * Read a job-starting route's answer: the job (started, or the one already holding the
- * stack) and the error to show, if any.
+ * Read a job-starting route's answer: the job and the error to show, if any.
+ *
+ * `started` tells the two jobs apart. True: this request started the job (202). False with
+ * a job: another job already holds the stack (409), and this request's work was NOT done.
+ * A caller must not treat that job's success as its own.
  */
-export function readStartAnswer(data: unknown, error: unknown): { job: JobSummary | null; error: string | null } {
+export function readStartAnswer(data: unknown, error: unknown): { job: JobSummary | null; error: string | null; started: boolean } {
   const ok = data as { job?: JobSummary } | null;
   if (ok?.job) {
     useJobsStore.getState().track(ok.job);
-    return { job: ok.job, error: null };
+    return { job: ok.job, error: null, started: true };
   }
   const value = (error as { value?: { error?: string; job?: JobSummary } } | null)?.value;
   if (value?.job) useJobsStore.getState().track(value.job);
-  return { job: value?.job ?? null, error: value?.error ?? "The request failed" };
+  return { job: value?.job ?? null, error: value?.error ?? "The request failed", started: false };
 }

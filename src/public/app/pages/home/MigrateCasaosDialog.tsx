@@ -38,7 +38,12 @@ function MigrateCasaosDialogInner({ stack, onClose, onDone }: {
   const defaultPath = `/var/lib/casaos/apps/${stack.name}/docker-compose.yml`;
   const title = stack.meta?.title ?? stack.name;
 
-  const alreadyRunning = useJobsStore(s => runningJobFor(s.jobs, stack.name));
+  // Reopened while this stack's migration still runs: show it. Any other kind of job on the
+  // stack is not a migration, and the request below would be told about it.
+  const alreadyRunning = useJobsStore(s => {
+    const job = runningJobFor(s.jobs, stack.name);
+    return job?.kind === "migrate" ? job : null;
+  });
   const [jobId,       setJobId]       = useState<string | null>(alreadyRunning?.id ?? null);
   const [starting,    setStarting]    = useState(false);
   const [needPath,    setNeedPath]    = useState(false);
@@ -54,11 +59,11 @@ function MigrateCasaosDialogInner({ stack, onClose, onDone }: {
         path ? { composePath: path } : {},
       );
       const answer = readStartAnswer(data, err);
-      if (answer.job) {
+      if (answer.job && answer.started) {
         setJobId(answer.job.id);
         setNeedPath(false);
       }
-      if (answer.error && !answer.job) {
+      if (answer.error && !answer.started) {
         setErrorMsg(answer.error);
         setNeedPath(Boolean((err as { value?: { needPath?: boolean } } | null)?.value?.needPath));
       }
@@ -101,7 +106,8 @@ function MigrateCasaosDialogInner({ stack, onClose, onDone }: {
             jobId={jobId}
             logHeight="h-56"
             onFinished={job => {
-              if (job.status !== "done") return;
+              // Only a migration's success is one: an update that held the stack is not.
+              if (job.status !== "done" || job.kind !== "migrate") return;
               useToastStore.getState().push(`Migrated ${title} to anpan-os`, "success");
               onDone();
             }}

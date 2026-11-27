@@ -40,8 +40,9 @@ describe("publishedPorts", () => {
     const ports = publishedPorts(RESOLVED);
     expect(ports.map(p => `${p.service} ${p.hostIp || "*"}:${p.port}/${p.proto}`)).toEqual([
       "web *:8080/tcp", "web 127.0.0.1:8443/tcp", "dns *:5353/udp",
-      "rng *:6000/tcp", "rng *:6001/tcp", "rng *:6002/tcp",
+      "rng *:6000/tcp",
     ]);
+    expect(ports.find(p => p.service === "rng")?.alternatives).toEqual([6000, 6001, 6002]);
   });
 
   test("nothing to read gives nothing", () => {
@@ -85,9 +86,34 @@ describe("findPortConflicts", () => {
     expect((await findPortConflicts(wanted, "mine")).map(c => c.port)).toEqual([8443]);
   });
 
-  test("a port in a range is checked", async () => {
-    world([{ port: 6001, address: "127.0.0.1%lo", process: "redis" }], []);
-    expect((await findPortConflicts(wanted, "mine")).map(c => c.port)).toEqual([6001]);
+  test("a published range is a choice: it clashes only when every port in it is taken", async () => {
+    world([{ port: 6000, process: "a" }, { port: 6002, address: "127.0.0.1%lo", process: "c" }], []);
+    expect(await findPortConflicts(wanted, "mine")).toEqual([]);             // 6001 is free
+    while (spies.length) spies.pop()!.mockRestore();
+    world([{ port: 6000, process: "a" }, { port: 6001, process: "b" }, { port: 6002, process: "c" }], []);
+    const [conflict] = await findPortConflicts(wanted, "mine");
+    expect(conflict).toMatchObject({ port: 6000, range: "6000-6002", heldBy: "process a" });
+    expect(describeConflicts([conflict!])).toBe("every port in 6000-6002/tcp (service rng) is in use, 6000 by process a");
+  });
+
+  test("a host process on another address of a port the stack itself maps is still caught", async () => {
+    // The stack maps 127.0.0.1:8443 itself (docker-proxy holds it); a host process holds
+    // 127.0.0.2:8443, which a redeploy that moves the bind there would collide with.
+    const want = [{ port: 8443, proto: "tcp" as const, hostIp: "127.0.0.2", service: "web" }];
+    world(
+      [{ port: 8443, address: "127.0.0.1", process: "docker-proxy" }, { port: 8443, address: "127.0.0.2", process: "nginx" }],
+      [container("mine", "mine-web-1", 8443, "127.0.0.1")],
+    );
+    expect((await findPortConflicts(want, "mine")).map(c => c.heldBy)).toEqual(["process nginx"]);
+  });
+
+  test("an IPv4 wildcard does not cover an explicit IPv6 address", async () => {
+    const want = [{ port: 9090, proto: "tcp" as const, hostIp: "::1", service: "web" }];
+    world([{ port: 9090, address: "0.0.0.0", process: "prom" }], []);
+    expect(await findPortConflicts(want, "mine")).toEqual([]);
+    while (spies.length) spies.pop()!.mockRestore();
+    world([{ port: 9090, address: "[::]", process: "prom" }], []);         // dual-stack does
+    expect((await findPortConflicts(want, "mine")).length).toBe(1);
   });
 
   test("no published ports means no lookups at all", async () => {

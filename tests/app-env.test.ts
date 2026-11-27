@@ -62,6 +62,12 @@ describe("withPlatformDefaults", () => {
   test("export prefixes and comments in .env are understood", () => {
     expect(envKeys("# comment\nexport PUID=1\n\nTZ = UTC\nnot a line\n")).toEqual(new Set(["PUID", "TZ"]));
   });
+
+  test("a KEY: value assignment counts as set, so no default is added over it", () => {
+    const { env, added } = withPlatformDefaults("PUID: 2001\n", "services:\n  a:\n    image: x\n    user: $PUID\n", "a");
+    expect(added).toEqual([]);
+    expect(env).toBe("PUID: 2001\n");
+  });
 });
 
 describe("rewriteDataRoot", () => {
@@ -80,6 +86,19 @@ describe("rewriteDataRoot", () => {
 
   test("a path that only starts with the same letters is not moved", () => {
     const text = "services:\n  a:\n    image: x\n    volumes:\n      - /DATA/AppDataOld/a:/a\n";
+    expect(rewriteDataRoot(text, "/srv/apps")).toBe(text);
+  });
+
+  test("volumes shared through a YAML anchor are rewritten once, where they are defined", () => {
+    const text = "x-vols: &vols\n  - /DATA/AppData/app/config:/config\nservices:\n  a:\n    image: x\n    volumes: *vols\n  b:\n    image: y\n    volumes: *vols\n";
+    const out = rewriteDataRoot(text, "/srv/apps");
+    expect(out).toContain("&vols\n  - /srv/apps/app/config:/config");
+    expect(out.match(/\/srv\/apps/g)?.length).toBe(1);
+    expect(out).toContain("volumes: *vols");
+  });
+
+  test("an anonymous volume (a container path only) is not mistaken for a host path", () => {
+    const text = "services:\n  a:\n    image: x\n    volumes:\n      - /DATA/AppData/cache\n";
     expect(rewriteDataRoot(text, "/srv/apps")).toBe(text);
   });
 

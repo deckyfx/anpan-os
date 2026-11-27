@@ -86,7 +86,10 @@ export function AnchoredMenu({ anchor, onClose, label, className = "", children 
       : e.key === "End" ? items.length - 1
       : at === -1 ? (e.key === "ArrowUp" ? items.length - 1 : 0)
       : (at + (e.key === "ArrowUp" ? -1 : 1) + items.length) % items.length;
+    // The page must not jump, but a menu taller than the screen scrolls inside itself, and
+    // the focused action has to be visible there.
     items[next]?.focus({ preventScroll: true });
+    items[next]?.scrollIntoView({ block: "nearest" });
   };
 
   useEffect(() => {

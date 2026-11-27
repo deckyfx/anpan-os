@@ -35,9 +35,16 @@ export function jobsPlugin(jwtSecret: string) {
       const timer = setInterval(() => keepalive.publish({ type: "heartbeat" }), 25_000);
       request.signal.addEventListener("abort", () => { clearInterval(timer); keepalive.closeAll(); }, { once: true });
 
+      // A subscriber that falls too far behind is dropped by the broadcast. The keepalive
+      // must stop with it, so the response ends and the client reconnects for a fresh
+      // snapshot, rather than staying open on heartbeats alone and missing every job event.
+      async function* jobEvents(): AsyncGenerator<JobEvent> {
+        try { yield* subscription.events; } finally { keepalive.closeAll(); }
+      }
+
       try {
         yield sse({ data: { type: "snapshot" as const, jobs: jobs.list() } satisfies { type: "snapshot"; jobs: JobSummary[] } });
-        for await (const event of mergeStreams(subscription.events, keepalive.subscribe(request.signal))) {
+        for await (const event of mergeStreams(jobEvents(), keepalive.attach(request.signal).events)) {
           yield sse({ data: event });
         }
       } finally {

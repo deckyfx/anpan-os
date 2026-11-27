@@ -161,6 +161,8 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent, 
   const [nonAppConfigTouched,  setNonAppConfigTouched]  = useState(false);
 
   const jobRunning = useJobsStore(s => (jobId ? s.jobs[jobId]?.status === "running" : false));
+  /** The job this dialog's own request started; other jobs it shows are someone else's. */
+  const ownJobRef = useRef<string | null>(null);
 
   // Reopened while this stack's job still runs: show its log first.
   useEffect(() => {
@@ -294,14 +296,23 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent, 
   const takeAnswer = (data: unknown, err: unknown) => {
     const answer = readStartAnswer(data, err);
     if (answer.job) {
+      ownJobRef.current = answer.started ? answer.job.id : null;
       setJobId(answer.job.id);
       setActiveTab("action-log");
     }
     if (answer.error) setError(answer.error);
   };
 
-  /** A job ended: on success the dialog is done; on failure it stays open with the log. */
+  /**
+   * A job ended. Only the job this dialog's own Install or Deploy started closes it on
+   * success. A job that was already running, or that blocked the request, says nothing
+   * about this draft: the dialog stays open so it can be sent again.
+   */
   const onJobFinished = (job: JobSummary) => {
+    if (job.id !== ownJobRef.current) {
+      if (job.status === "done") setError(`"${job.title}" has finished. Your changes have not been applied yet: ${isEdit ? "deploy" : "install"} again to apply them.`);
+      return;
+    }
     if (job.status !== "done") return;
     useToastStore.getState().push(isEdit ? "Stack updated and deployed" : "Stack installed", "success");
     onDone();

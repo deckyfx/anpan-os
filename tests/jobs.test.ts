@@ -139,18 +139,29 @@ describe("JobManager", () => {
     if (!holder.ok) throw new Error("not started");
 
     const ran: string[] = [];
+    let bulkGate!: () => void;
+    const afterStacks = new Promise<void>(r => { bulkGate = r; });
+    let reachedEnd = false;
     const bulk = manager.start({ kind: "update-all", title: "Update 2 stacks" }, async ctx => {
       for (const name of ["h", "i"]) {
         const ok = await ctx.withStack(name, async () => { ran.push(name); });
         if (!ok) ctx.log(`skipped ${name}`);
       }
+      reachedEnd = true;
+      await afterStacks;
     });
     if (!bulk.ok) throw new Error("not started");
+    while (!reachedEnd) await Bun.sleep(2);
+
+    // Still running, yet "i" is free again: withStack gave it back when its work ended,
+    // not only when the whole job finished.
+    expect(manager.get(bulk.job.id)!.job.status).toBe("running");
+    expect(manager.start({ kind: "redeploy", title: "Redeploy i", stack: "i" }, async () => {}).ok).toBe(true);
+
+    bulkGate();
     await settled(manager, bulk.job.id);
     expect(ran).toEqual(["i"]);
     expect(manager.get(bulk.job.id)!.log).toContain("skipped h");
-    // The bulk job gave "i" back.
-    expect(manager.activeFor("i")).toBeNull();
     release();
   });
 });

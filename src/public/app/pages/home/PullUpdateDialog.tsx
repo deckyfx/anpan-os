@@ -41,7 +41,7 @@ function PullUpdateDialogInner({ stack, onClose, onUpdated }: {
       const { data, error: err } = await api.api.compose.stacks({ name: stack.name }).pull.post();
       const answer = readStartAnswer(data, err);
       if (answer.job) setJobId(answer.job.id);
-      if (answer.error && !answer.job) setError(answer.error);
+      if (answer.error) setError(answer.error);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -82,7 +82,9 @@ function PullUpdateDialogInner({ stack, onClose, onUpdated }: {
         <JobView
           jobId={jobId}
           onFinished={job => {
-            if (job.status !== "done") return;
+            // A different job may hold the stack (an install, a migration): its success is
+            // not this update's.
+            if (job.status !== "done" || job.kind !== "update") return;
             useToastStore.getState().push(`Stack updated: ${title}`, "success");
             onUpdated();
           }}

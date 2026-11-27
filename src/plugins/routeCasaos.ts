@@ -100,7 +100,9 @@ export function casaosPlugin(jwtSecret: string) {
           set.status = 422;
           return { error: "Cannot read compose file — check the path", needPath: true };
         }
-        const bad = checkComposeText(raw);
+        const holder = jobs.activeFor(name);
+        if (holder) { set.status = 409; return { error: `"${holder.title}" is still running for this stack`, job: holder }; }
+        const bad = checkComposeText(raw, name);
         if (bad) { set.status = bad.status; return { error: bad.error }; }
 
         // Parse x-casaos metadata (optional — migration proceeds even without it)

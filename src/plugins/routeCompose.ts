@@ -39,6 +39,18 @@ const META_SCHEMA = t.Object({
  * The answer to a request that starts a job: 202 with the job, or 409 with the job already
  * working on the stack, so the client can show that one instead.
  */
+/**
+ * 409 with the job holding `stack`, if one is. Checked before a route's own refusals, so a
+ * second install of a name that a running install has just written gets that job to follow
+ * rather than a bare "already exists".
+ */
+function busy(set: { status?: number | string }, stack: string): { error: string; job: JobSummary } | null {
+  const holder = jobs.activeFor(stack);
+  if (!holder) return null;
+  set.status = 409;
+  return { error: `"${holder.title}" is still running for this stack`, job: holder };
+}
+
 function answer(
   set: { status?: number | string },
   started: ReturnType<typeof jobs.start>,
@@ -175,6 +187,8 @@ export function composePlugin(jwtSecret: string) {
       "/stacks",
       async ({ body, set }) => {
         const req: DeployRequest = { name: body.name, compose: body.content, env: body.env, meta: body.meta };
+        const holder = busy(set, req.name);
+        if (holder) return holder;
         const refused = await checkInstall(req);
         if (refused) { set.status = refused.status; return { error: refused.error }; }
         return answer(set, jobs.start(
@@ -198,6 +212,8 @@ export function composePlugin(jwtSecret: string) {
       "/stacks/:name/file",
       async ({ params, body, set }) => {
         const req: DeployRequest = { name: params.name, compose: body.content, env: body.env, meta: body.meta };
+        const holder = busy(set, req.name);
+        if (holder) return holder;
         const refused = await checkRedeploy(req);
         if (refused) { set.status = refused.status; return { error: refused.error }; }
         return answer(set, jobs.start(
@@ -217,6 +233,8 @@ export function composePlugin(jwtSecret: string) {
 
     /** Pull a stack's images and recreate what changed. Works on CasaOS stacks too. */
     .post("/stacks/:name/pull", async ({ params, set }) => {
+      const holder = busy(set, params.name);
+      if (holder) return holder;
       const dir = await updatableDir(params.name);
       if (!dir) { set.status = 404; return { error: "No compose file found for this stack" }; }
       return answer(set, jobs.start(
@@ -353,6 +371,8 @@ export function composePlugin(jwtSecret: string) {
      */
     .post("/stacks/:name/repair", async ({ params, query, set }) => {
       const { name } = params;
+      const holder = busy(set, name);
+      if (holder) return holder;
       const report = await buildComposeSourceReport(name);
 
       // Deliberately narrower than "reject whenever needsRepair is false": adopting an
@@ -368,7 +388,7 @@ export function composePlugin(jwtSecret: string) {
       }
       return answer(set, jobs.start(
         { kind: "repair", title: `Repair ${name}`, stack: name },
-        ctx => runRepair(ctx, name),
+        ctx => runRepair(ctx, name, mayAdoptExternal),
       ));
     }, {
       detail: { summary: "Re-anchor a stack on its managed compose file (starts a job)" },
@@ -398,6 +418,10 @@ export function composePlugin(jwtSecret: string) {
           set.status = 422;
           return { error: "Invalid stack name" };
         }
+        // A job holding the stack may have checked the current .env (ports, values) and be
+        // about to start it; a write now would change what Compose reads after the check.
+        const holder = busy(set, name);
+        if (holder) return holder;
         const envPath = join(config.composeFolder, name, ".env");
         try {
           await Bun.write(envPath, body.content);

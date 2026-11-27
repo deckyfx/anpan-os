@@ -37,9 +37,12 @@ export function JobsMenu() {
   const [viewing, setViewing] = useState<string | null>(null);
   const btnRef = useRef<HTMLButtonElement>(null);
 
-  const all = Object.values(jobs).sort((a, b) => b.startedAt - a.startedAt);
-  const running = all.filter(j => j.status === "running");
-  const shown = [...running, ...all.filter(j => j.status !== "running").slice(0, Math.max(0, RECENT - running.length))];
+  const all = Object.values(jobs);
+  const running = all.filter(j => j.status === "running").sort((a, b) => b.startedAt - a.startedAt);
+  // Finished jobs by when they finished: a long job that just ended belongs at the top of
+  // them, even if eight shorter ones started after it.
+  const finished = all.filter(j => j.status !== "running").sort((a, b) => (b.finishedAt ?? 0) - (a.finishedAt ?? 0));
+  const shown = [...running, ...finished.slice(0, Math.max(0, RECENT - running.length))];
   if (shown.length === 0 && !viewing) return null;
 
   const viewingJob = viewing ? jobs[viewing] : undefined;

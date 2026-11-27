@@ -174,8 +174,16 @@ export class JobContext {
     if (!stack) return;
     const path = stackLogPath(stack);
     mkdirSync(join(path, ".."), { recursive: true });
-    this.logFile = createWriteStream(path, { flags: "a" });
-    this.logFile.write(`--- ${label ?? this.job.summary.kind} ${new Date().toISOString()} ---\n`);
+    const file = createWriteStream(path, { flags: "a" });
+    // A stream reports a failed open or write as an "error" event, later, outside any
+    // try/catch; unhandled, it would end the process. The job carries on: its log is still
+    // kept in memory, only the copy on disk stops.
+    file.on("error", err => {
+      if (this.logFile === file) this.logFile = null;
+      this.manager.appendLog(this.job, `(Could not write the log file ${path}: ${err.message})`);
+    });
+    this.logFile = file;
+    file.write(`--- ${label ?? this.job.summary.kind} ${new Date().toISOString()} ---\n`);
   }
 
   /**
@@ -255,10 +263,12 @@ export class JobManager {
     this.publish(job);
 
     const ctx = new JobContext(job, this);
-    if (spec.stack) ctx.logToStack(spec.stack);
 
     void (async () => {
       try {
+        // Inside the try: a log folder that cannot be created must fail this job and give
+        // its stack back, not leave a job "running" forever with the stack held.
+        if (spec.stack) ctx.logToStack(spec.stack);
         await body(ctx);
         this.finish(job, ctx, job.abort.signal.aborted ? "cancelled" : "done", null);
       } catch (err) {

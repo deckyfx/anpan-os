@@ -15,6 +15,11 @@ export interface PublishedPort {
   /** Host address it binds; empty means every address. */
   hostIp:  string;
   service: string;
+  /**
+   * For `published: "8080-8082"` against one container port, the ports Compose may pick
+   * from. The publish fails only when every one of them is taken. `port` is the first.
+   */
+  alternatives?: number[];
 }
 
 /** A published port already in use, and what holds it. */
@@ -24,6 +29,8 @@ export interface PortConflict {
   service: string;
   /** e.g. `container "jellyfin" (stack media)` or `process sshd`. */
   heldBy:  string;
+  /** Set when the request was a range and every port in it is taken. */
+  range?:  string;
 }
 
 /** Most ports one range may expand to. A range wider than this is checked at its ends only. */
@@ -46,9 +53,12 @@ export function publishedPorts(resolved: unknown): PublishedPort[] {
       if (entry.published === undefined || entry.published === "") continue;
       const proto = entry.protocol === "udp" ? "udp" : "tcp";
       const hostIp = entry.host_ip ?? "";
-      for (const port of expandRange(String(entry.published))) {
-        out.push({ port, proto, hostIp, service });
-      }
+      const ports = expandRange(String(entry.published));
+      if (ports.length === 0) continue;
+      // One entry per container port: a published range here is a choice, not several binds.
+      out.push(ports.length === 1
+        ? { port: ports[0]!, proto, hostIp, service }
+        : { port: ports[0]!, proto, hostIp, service, alternatives: ports });
     }
   }
   return out;
@@ -62,15 +72,31 @@ function expandRange(spec: string): number[] {
   return Array.from({ length: b - a + 1 }, (_, i) => a + i);
 }
 
-const WILDCARD = new Set(["", "*", "0.0.0.0", "::"]);
-
-/** Two binds of one port clash unless they are on different specific addresses. */
-function overlaps(a: string, b: string): boolean {
-  // `ss` writes "[::1]" and "127.0.0.53%lo": brackets and an interface suffix are not part
-  // of the address.
-  const norm = (s: string) => s.replace(/%.*$/, "").replace(/^\[|\]$/g, "");
-  return WILDCARD.has(norm(a)) || WILDCARD.has(norm(b)) || norm(a) === norm(b);
+/** An address as `ss`, `lsof` and Docker write it, without brackets or an interface suffix. */
+function normalize(address: string): string {
+  return address.replace(/%.*$/, "").replace(/^\[|\]$/g, "");
 }
+
+/**
+ * Whether binds of one port on `a` and `b` clash.
+ *
+ * An empty address or `*` means every address, and `::` is taken as dual-stack (Linux's
+ * default), so all of those clash with anything. `0.0.0.0` covers IPv4 only: it does not
+ * clash with an explicit IPv6 address such as `::1`. Otherwise only the same address
+ * clashes.
+ */
+export function overlaps(a: string, b: string): boolean {
+  const x = normalize(a);
+  const y = normalize(b);
+  const every = (s: string) => s === "" || s === "*" || s === "::";
+  if (every(x) || every(y)) return true;
+  const v4 = (s: string) => !s.includes(":");
+  if (x === "0.0.0.0") return v4(y);
+  if (y === "0.0.0.0") return v4(x);
+  return x === y;
+}
+
+interface Mapping { owner: string; project: string; ip: string }
 
 /**
  * The ports in `wanted` that something other than `project` already holds.
@@ -79,8 +105,10 @@ function overlaps(a: string, b: string): boolean {
  * - Running containers' published ports, which name the container and stack.
  * - Listening sockets (`ss` or `lsof`), which also catch services outside Docker.
  *
- * The project's own containers are left out, so redeploying a stack does not clash with
- * itself.
+ * Docker's own proxy shows up among the sockets too. A socket is put down to a container
+ * only when a container maps that port on an overlapping address. So the project's own
+ * containers never clash with a redeploy of it, while a host process on another address of
+ * the same port is still caught.
  */
 export async function findPortConflicts(wanted: PublishedPort[], project: string): Promise<PortConflict[]> {
   if (wanted.length === 0) return [];
@@ -90,9 +118,7 @@ export async function findPortConflicts(wanted: PublishedPort[], project: string
     DockerClient.listContainers(),
   ]);
 
-  // Ports held by containers, by "port/proto". Docker's own proxy shows up among the
-  // listening sockets too, so this map also tells those apart from foreign processes.
-  const byContainer = new Map<string, { owner: string; project: string; ip: string }[]>();
+  const byContainer = new Map<string, Mapping[]>();
   for (const c of containers.ok ? containers.data : []) {
     const owner = c.Labels["com.docker.compose.project"] ?? "";
     const name = (c.Names[0] ?? c.Id.slice(0, 12)).replace(/^\//, "");
@@ -105,30 +131,34 @@ export async function findPortConflicts(wanted: PublishedPort[], project: string
     }
   }
 
+  /** What holds `port` on an address overlapping `hostIp`, or null when it is free. */
+  const holderOf = (port: number, proto: "tcp" | "udp", hostIp: string): string | null => {
+    const mappings = byContainer.get(`${port}/${proto}`) ?? [];
+    const foreign = mappings.find(m => m.project !== project && overlaps(m.ip, hostIp));
+    if (foreign) return foreign.owner;
+    for (const l of listeners) {
+      if (l.port !== port || l.proto !== proto || !overlaps(l.address, hostIp)) continue;
+      // This socket is a container's mapping (Docker's proxy), already judged above.
+      if (mappings.some(m => overlaps(m.ip, l.address))) continue;
+      return l.process ? `process ${l.process}${l.pid ? ` (pid ${l.pid})` : ""}` : "another program";
+    }
+    return null;
+  };
+
   const conflicts: PortConflict[] = [];
   const seen = new Set<string>();
   for (const want of wanted) {
-    const key = `${want.port}/${want.proto}`;
+    const candidates = want.alternatives ?? [want.port];
+    const key = `${candidates.join(",")}/${want.proto}@${want.hostIp}`;
     if (seen.has(key)) continue;
+    seen.add(key);
 
-    const held = byContainer.get(key) ?? [];
-    const foreignContainer = held.find(h => h.project !== project && overlaps(h.ip, want.hostIp));
-    if (foreignContainer) {
-      conflicts.push({ port: want.port, proto: want.proto, service: want.service, heldBy: foreignContainer.owner });
-      seen.add(key);
-      continue;
-    }
-    // A socket counts only when no container of any project explains it; this project's
-    // own containers hold their ports legitimately.
-    if (held.length > 0) continue;
-    const socket = listeners.find(l => l.port === want.port && l.proto === want.proto && overlaps(l.address, want.hostIp));
-    if (socket) {
-      conflicts.push({
-        port: want.port, proto: want.proto, service: want.service,
-        heldBy: socket.process ? `process ${socket.process}${socket.pid ? ` (pid ${socket.pid})` : ""}` : "another program",
-      });
-      seen.add(key);
-    }
+    const holders = candidates.map(port => holderOf(port, want.proto, want.hostIp));
+    if (holders.some(h => h === null)) continue;     // at least one port is free
+    conflicts.push({
+      port: want.port, proto: want.proto, service: want.service, heldBy: holders[0]!,
+      ...(want.alternatives ? { range: `${candidates[0]}-${candidates[candidates.length - 1]}` } : {}),
+    });
   }
   return conflicts;
 }
@@ -136,6 +166,8 @@ export async function findPortConflicts(wanted: PublishedPort[], project: string
 /** One line per conflict, for a job log or an error message. */
 export function describeConflicts(conflicts: PortConflict[]): string {
   return conflicts
-    .map(c => `port ${c.port}/${c.proto} (service ${c.service}) is already used by ${c.heldBy}`)
+    .map(c => c.range
+      ? `every port in ${c.range}/${c.proto} (service ${c.service}) is in use, ${c.port} by ${c.heldBy}`
+      : `port ${c.port}/${c.proto} (service ${c.service}) is already used by ${c.heldBy}`)
     .join("; ");
 }

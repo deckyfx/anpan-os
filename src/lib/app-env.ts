@@ -11,7 +11,7 @@
  * written there rather than into the compose file. The file stays as its author wrote it,
  * and the user can see and change every value in the stack's env editor.
  */
-import { parseDocument, isMap, isScalar, isSeq, type Document } from "yaml";
+import { parseDocument, isAlias, isMap, isScalar, isSeq, type Document } from "yaml";
 import { config } from "../config";
 
 /** Variables CasaOS apps expect the platform to provide. */
@@ -42,16 +42,33 @@ export function referencedVariables(compose: string): Set<string> {
   return names;
 }
 
-/** Keys an `.env` file sets. Comments, blank lines and an `export ` prefix are handled. */
-export function envKeys(env: string): Set<string> {
-  const keys = new Set<string>();
+/**
+ * The assignments in an `.env` file, in order, as Compose reads them: `KEY=value` or
+ * `KEY: value`, with an optional `export ` prefix. Comments and blank lines are skipped.
+ * Values are returned raw; only surrounding quotes are removed.
+ */
+function envAssignments(env: string): Array<[string, string]> {
+  const out: Array<[string, string]> = [];
   for (const raw of env.split("\n")) {
     const line = raw.trim().replace(/^export\s+/, "");
     if (!line || line.startsWith("#")) continue;
-    const eq = line.indexOf("=");
-    if (eq > 0) keys.add(line.slice(0, eq).trim());
+    const m = /^([A-Za-z_][A-Za-z0-9_.-]*)\s*(?:=|:\s)\s*(.*)$/.exec(line) ?? /^([A-Za-z_][A-Za-z0-9_.-]*)\s*[=:]$/.exec(line);
+    if (!m) continue;
+    out.push([m[1]!, (m[2] ?? "").trim().replace(/^(["'])(.*)\1$/, "$2")]);
   }
-  return keys;
+  return out;
+}
+
+/** Keys an `.env` file sets. */
+export function envKeys(env: string): Set<string> {
+  return new Set(envAssignments(env).map(([key]) => key));
+}
+
+/** The value `.env` gives `key`; the last assignment wins, as in Compose. Null when unset. */
+export function envValue(env: string, key: string): string | null {
+  let value: string | null = null;
+  for (const [k, v] of envAssignments(env)) if (k === key) value = v;
+  return value;
 }
 
 /**
@@ -92,19 +109,29 @@ export function rewriteDataRoot(compose: string, to: string = config.appDataRoot
   const swap = (path: string): string | null =>
     path === from || path.startsWith(`${from}/`) ? to + path.slice(from.length) : null;
 
-  const services = doc.get("services");
+  // A list or entry written once under an anchor (`&data`) and reused as `*data` is the
+  // same node everywhere: follow the alias, and edit each node once.
+  const deref = (node: unknown): unknown => (isAlias(node) ? node.resolve(doc) : node);
+  const seen = new Set<unknown>();
+
+  const services = deref(doc.get("services"));
   if (isMap(services)) {
     for (const item of services.items) {
-      const volumes = isMap(item.value) ? item.value.get("volumes") : null;
+      const service = deref(item.value);
+      const volumes = isMap(service) ? deref(service.get("volumes", true)) : null;
       if (!isSeq(volumes)) continue;
-      for (const entry of volumes.items) {
+      for (const raw of volumes.items) {
+        const entry = deref(raw);
+        if (seen.has(entry)) continue;
+        seen.add(entry);
         if (isScalar(entry) && typeof entry.value === "string") {
-          // Short syntax, "source:target[:mode]": only the source is a host path.
+          // Short syntax, "source:target[:mode]": only the source is a host path. With no
+          // colon, the entry is just a container path (an anonymous volume): not ours.
           const colon = entry.value.indexOf(":");
-          const source = colon === -1 ? entry.value : entry.value.slice(0, colon);
-          const next = swap(source);
+          if (colon === -1) continue;
+          const next = swap(entry.value.slice(0, colon));
           if (next !== null) {
-            entry.value = next + (colon === -1 ? "" : entry.value.slice(colon));
+            entry.value = next + entry.value.slice(colon);
             changed = true;
           }
         } else if (isMap(entry)) {

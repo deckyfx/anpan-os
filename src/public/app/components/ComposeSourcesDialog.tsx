@@ -52,7 +52,10 @@ function StackRow({ report, onRepaired }: {
   report: ComposeSourceReport;
   onRepaired: () => void;
 }) {
-  const alreadyRunning    = useJobsStore(s => runningJobFor(s.jobs, report.stack));
+  const alreadyRunning    = useJobsStore(s => {
+    const job = runningJobFor(s.jobs, report.stack);
+    return job?.kind === "repair" ? job : null;
+  });
   const [jobId, setJobId] = useState<string | null>(alreadyRunning?.id ?? null);
   const [starting, setStarting] = useState(false);
   const [err,  setErr]    = useState("");
@@ -66,7 +69,9 @@ function StackRow({ report, onRepaired }: {
     try {
       const { data, error } = await api.api.compose.stacks({ name: report.stack }).repair.post();
       const answer = readStartAnswer(data, error);
-      if (answer.job) setJobId(answer.job.id);
+      // A job that blocked the repair is named in the error; the Repair button stays, to be
+      // pressed again once it ends.
+      if (answer.job && answer.started) setJobId(answer.job.id);
       else setErr(answer.error ?? "Request failed");
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
@@ -128,7 +133,9 @@ function StackRow({ report, onRepaired }: {
             jobId={jobId}
             logHeight="max-h-40"
             onFinished={finished => {
-              if (finished.status !== "done") return;
+              // Another operation may have held the stack; only a repair's success is one.
+              // Repair stays available, so it can be run once that operation has ended.
+              if (finished.status !== "done" || finished.kind !== "repair") return;
               useToastStore.getState().push(`Repaired ${report.stack}`, "success");
               onRepaired();
             }}

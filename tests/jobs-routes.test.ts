@@ -31,7 +31,16 @@ beforeEach(() => {
   spies.push(spyOn(DockerClient, "listContainers").mockResolvedValue({ ok: true, data: [] }));
   spies.push(spyOn(portProvider, "listeners").mockResolvedValue([]));
 });
-afterEach(() => { releaseUp(); while (spies.length) spies.pop()!.mockRestore(); });
+/** Jobs this file started; each must end before the fakes behind it are removed. */
+const started: string[] = [];
+afterEach(async () => {
+  releaseUp();
+  for (const id of started.splice(0)) {
+    await call("POST", `/api/jobs/${id}/cancel`);
+    await finished(id);
+  }
+  while (spies.length) spies.pop()!.mockRestore();
+});
 afterAll(async () => {
   for (const name of ["route-job", "route-cancel"]) {
     await rm(stackDir(name), { recursive: true, force: true });
@@ -45,7 +54,10 @@ async function call(method: string, path: string, body?: unknown) {
     headers: { cookie, ...(body === undefined ? {} : { "content-type": "application/json" }) },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   }));
-  return { status: res.status, body: await res.json() as Record<string, unknown> };
+  const answer = await res.json() as Record<string, unknown>;
+  const job = answer.job as JobSummary | undefined;
+  if (res.status === 202 && job) started.push(job.id);
+  return { status: res.status, body: answer };
 }
 
 async function finished(id: string): Promise<JobSummary> {
@@ -75,6 +87,17 @@ describe("install through the route", () => {
     const second = await call("PUT", `/api/compose/stacks/${name}/file`, { content: COMPOSE });
     expect(second.status).toBe(409);
     expect((second.body.job as JobSummary).id).toBe(job.id);
+
+    // A second install of the name gets the running job too, not a bare "already exists"
+    // from the compose file the first one has written.
+    const again = await call("POST", "/api/compose/stacks", { name, content: COMPOSE });
+    expect(again.status).toBe(409);
+    expect((again.body.job as JobSummary).id).toBe(job.id);
+
+    // Nor may the .env change under the job, after its checks and before its `up`.
+    const env = await call("PUT", `/api/compose/stacks/${name}/envfile`, { content: "WEB_PORT=8081\n" });
+    expect(env.status).toBe(409);
+    expect((env.body.job as JobSummary).id).toBe(job.id);
 
     releaseUp();
     expect((await finished(job.id)).status).toBe("done");
@@ -118,6 +141,8 @@ describe("/api/jobs", () => {
   });
 
   test("the stream opens with a snapshot of every job", async () => {
+    const listed = ((await call("GET", "/api/jobs")).body.jobs as JobSummary[]).map(j => j.id);
+    expect(listed.length).toBeGreaterThan(0);     // earlier tests in this file left jobs behind
     const controller = new AbortController();
     const res = await app.handle(new Request("http://localhost/api/jobs/stream", { headers: { cookie }, signal: controller.signal }));
     const reader = res.body!.getReader();
@@ -125,8 +150,9 @@ describe("/api/jobs", () => {
     controller.abort();
     // In-process, Elysia may hand the chunk over as a string rather than bytes.
     const text = typeof value === "string" ? value : new TextDecoder().decode(value);
-    expect(text).toContain('"type":"snapshot"');
-    expect(text).toContain('"jobs":[');
+    const event = JSON.parse(text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1)) as { type: string; jobs: JobSummary[] };
+    expect(event.type).toBe("snapshot");
+    expect(event.jobs.map(j => j.id)).toEqual(listed);
   });
 
   test("needs a session", async () => {
