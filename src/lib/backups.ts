@@ -36,6 +36,7 @@ import { bins } from "./commands";
 import { composeCommand, COMPOSE_FILE } from "./compose-cmd";
 import { JobError, processRunner, type JobContext } from "./jobs";
 import { PENDING_DIR, PREVIOUS_SUFFIX, READY_MARKER, SYSTEM_ENTRIES } from "./pending-restore";
+import { reservePaths } from "./path-reservations";
 import { MigrationManager } from "../db/migration-manager";
 import { CASAOS_APPS_DIR } from "./platform";
 import { stackDir } from "./stack-ops";
@@ -119,13 +120,36 @@ function tar(): string {
   return path;
 }
 
+let gnuTar: boolean | null = null;
+
+/**
+ * Whether the system tar is GNU tar. Its exit code 1 means "some files changed while being
+ * read", a warning; bsdtar (macOS) uses 1 for real failures, such as an archive it could
+ * not finish writing.
+ */
+function isGnuTar(): boolean {
+  gnuTar ??= Bun.spawnSync([tar(), "--version"]).stdout.toString().includes("GNU tar");
+  return gnuTar;
+}
+
 function docker(): string {
   if (!bins.docker) throw new JobError("Docker is not available on this system");
   return bins.docker;
 }
 
-function exists(path: string): Promise<boolean> {
-  return stat(path).then(() => true, () => false);
+/**
+ * Whether `path` exists. Only "no such file" means no: a permission or I/O error is thrown,
+ * so that a restore never takes a folder it could not look at for one that is not there
+ * (and replaces it without a safety copy).
+ */
+async function exists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw err;
+  }
 }
 
 /**
@@ -451,8 +475,8 @@ async function runningServices(ctx: JobContext, name: string, dir: string): Prom
 
 /**
  * Archive the contents of `dir` into `out`. When `live`, a file that changed while it was
- * read is a warning (GNU tar's exit code 1), not a failure: that is what copying a running
- * app means, and the user chose it.
+ * read is a warning (GNU tar's exit code 1, and only GNU tar's), not a failure: that is what
+ * copying a running app means, and the user chose it.
  *
  * The backups folder is left out when it lies inside `dir`: the copy would otherwise take
  * every earlier backup, and the one being written.
@@ -464,7 +488,7 @@ async function archive(ctx: JobContext, dir: string, out: string, live: boolean)
   argv.push("-C", dir, ".");
   const code = await processRunner.run(argv, { cwd: dir, signal: ctx.signal, onLine: line => ctx.log(line) });
   ctx.throwIfCancelled();
-  if (code === 1 && live) { ctx.log(`  Some files in ${dir} changed while they were copied`); return; }
+  if (code === 1 && live && isGnuTar()) { ctx.log(`  Some files in ${dir} changed while they were copied`); return; }
   if (code !== 0) throw new JobError(`Could not archive ${dir} (tar: exit code ${code})`);
 }
 
@@ -731,91 +755,109 @@ async function restoreApp(ctx: JobContext, backup: string, m: BackupManifest, ap
     if (!within(real, realRoot)) throw new JobError(`${d.path} now leads to ${real}, outside ${root}; not restoring ${app.name}`);
   }
 
-  // A folder that was this app's alone when backed up may hold another app's data now,
-  // the stack folder included. Checked before anything is stopped or moved.
-  const others = await otherAppsBinds(app.name);
-  for (const path of [dir, ...dataDirs.map(d => d.path)]) {
-    await refuseShared(path, others, `restoring ${app.name} would replace its data`);
+  // Held for the whole restore: a deploy of another app must not start mounting these
+  // folders while they are replaced, nor this restore replace folders a deploy is taking.
+  const reserved = reservePaths(app.name, "restore", await Promise.all([dir, ...dataDirs.map(d => d.path)].map(realExisting)));
+  if (!reserved.ok) {
+    const { stack, what, path } = reserved.conflict;
+    throw new JobError(`${path} is in use by a ${what} of ${stack}; not restoring ${app.name}`);
   }
-
-  const hadStack = await Bun.file(join(dir, COMPOSE_FILE)).exists();
-  // The services running now, which a failed restore starts again (those, not the rest).
-  const runningBefore = hadStack ? await runningServices(ctx, app.name, dir) : [];
-  const rowBefore = await StackStore.findById(app.name);
-
-  // Paths moved aside, and paths this restore wrote.
-  const aside: { path: string; moved: string }[] = [];
-  const written: string[] = [];
-  let up = false;
-  let rowWritten = false;
-  const stamp = Date.now();
   try {
-    if (hadStack) {
-      ctx.log(`  Stopping ${app.name}`);
-      await ctx.exec([...composeCommand(docker(), app.name, dir), "stop"], dir, "docker compose stop");
-    }
+    // A folder that was this app's alone when backed up may hold another app's data now,
+    // the stack folder included. Checked before anything is stopped or moved.
+    const others = await otherAppsBinds(app.name);
     for (const path of [dir, ...dataDirs.map(d => d.path)]) {
-      if (!(await exists(path))) continue;
-      const moved = `${path}.pre-restore-${stamp}`;
-      await rename(path, moved);
-      aside.push({ path, moved });
+      await refuseShared(path, others, `restoring ${app.name} would replace its data`);
     }
 
-    ctx.log(`  Unpacking ${app.name}'s files`);
-    written.push(dir);
-    await extract(ctx, join(backup, app.stack), dir);
-    for (const d of dataDirs) {
-      ctx.log(`  Data: ${d.path}`);
-      written.push(d.path);
-      await extract(ctx, d.archive, d.path);
-    }
+    const hadStack = await Bun.file(join(dir, COMPOSE_FILE)).exists();
+    // The services running now, which a failed restore starts again (those, not the rest).
+    const runningBefore = hadStack ? await runningServices(ctx, app.name, dir) : [];
+    const rowBefore = await StackStore.findById(app.name);
 
-    const row = rowFrom(app.row);
-    if (row) {
-      rowWritten = true;
-      await StackStore.restore(app.name, row);
-    }
+    // Paths moved aside, and paths this restore wrote.
+    const aside: { path: string; moved: string }[] = [];
+    const written: string[] = [];
+    let up = false;
+    let rowWritten = false;
+    const stamp = Date.now();
+    try {
+      if (hadStack) {
+        ctx.log(`  Stopping ${app.name}`);
+        await ctx.exec([...composeCommand(docker(), app.name, dir), "stop"], dir, "docker compose stop");
+      }
+      for (const path of [dir, ...dataDirs.map(d => d.path)]) {
+        if (!(await exists(path))) continue;
+        const moved = `${path}.pre-restore-${stamp}`;
+        await rename(path, moved);
+        aside.push({ path, moved });
+      }
 
-    if (app.running.length > 0) {
-      ctx.log(`  Starting ${app.running.join(", ")}`);
-      ctx.throwIfCancelled();
-      up = true;
-      // --no-deps: the services recorded as running, not ones they depend on that were not.
-      await ctx.exec([...composeCommand(docker(), app.name, dir), "up", "-d", "--no-deps", ...app.running], dir, "docker compose up");
+      // An archive inside a folder just moved aside (the backups folder can lie in an app's
+      // data folder) is read from where it went.
+      const located = (path: string): string => {
+        const holder = aside.find(a => within(path, a.path));
+        return holder ? join(holder.moved, relative(holder.path, path)) : path;
+      };
+
+      ctx.log(`  Unpacking ${app.name}'s files`);
+      written.push(dir);
+      await extract(ctx, located(join(backup, app.stack)), dir);
+      for (const d of dataDirs) {
+        ctx.log(`  Data: ${d.path}`);
+        written.push(d.path);
+        await extract(ctx, located(d.archive), d.path);
+      }
+
+      const row = rowFrom(app.row);
+      if (row) {
+        rowWritten = true;
+        await StackStore.restore(app.name, row);
+      }
+
+      if (app.running.length > 0) {
+        ctx.log(`  Starting ${app.running.join(", ")}`);
+        ctx.throwIfCancelled();
+        up = true;
+        // --no-deps: the services recorded as running, not ones they depend on that were not.
+        await ctx.exec([...composeCommand(docker(), app.name, dir), "up", "-d", "--no-deps", ...app.running], dir, "docker compose up");
+      }
+    } catch (err) {
+      // Each step on its own: one that fails is reported and the rest still run, so a row
+      // that cannot be written back does not also leave the app down. The restore's own
+      // error is what the job reports. Not on the job's signal, which may be why we are here.
+      ctx.log(`  Restore of ${app.name} failed: putting back what was there`);
+      const recover = async (what: string, step: () => Promise<unknown>) => {
+        try { await step(); } catch (e) { ctx.log(`  ⚠ Could not ${what}: ${e instanceof Error ? e.message : String(e)}`); }
+      };
+      const compose = async (args: string[]) => {
+        const code = await processRunner.run([...composeCommand(docker(), app.name, dir), ...args], {
+          cwd: dir, signal: AbortSignal.timeout(2 * 60_000), onLine: line => ctx.log(line),
+        });
+        if (code !== 0) throw new Error(`docker compose ${args[0]}: exit code ${code}`);
+      };
+      if (up) await recover("stop the restored app", () => compose(["stop"]));
+      for (const path of written) await recover(`remove ${path}`, () => rm(path, { recursive: true, force: true }));
+      for (const { path, moved } of aside) await recover(`move ${moved} back to ${path}`, () => rename(moved, path));
+      if (rowWritten) {
+        await recover("put the app's settings back", async () => {
+          if (rowBefore) {
+            const { id: _id, updatedAt: _at, ...rest } = rowBefore;
+            await StackStore.restore(app.name, rest);
+          } else {
+            await StackStore.delete(app.name);
+          }
+        });
+      }
+      if (runningBefore.length > 0) await recover(`start ${app.name} again`, () => compose(["up", "-d", "--no-deps", ...runningBefore]));
+      throw err;
     }
-  } catch (err) {
-    // Each step on its own: one that fails is reported and the rest still run, so a row
-    // that cannot be written back does not also leave the app down. The restore's own
-    // error is what the job reports. Not on the job's signal, which may be why we are here.
-    ctx.log(`  Restore of ${app.name} failed: putting back what was there`);
-    const recover = async (what: string, step: () => Promise<unknown>) => {
-      try { await step(); } catch (e) { ctx.log(`  ⚠ Could not ${what}: ${e instanceof Error ? e.message : String(e)}`); }
-    };
-    const compose = async (args: string[]) => {
-      const code = await processRunner.run([...composeCommand(docker(), app.name, dir), ...args], {
-        cwd: dir, signal: AbortSignal.timeout(2 * 60_000), onLine: line => ctx.log(line),
-      });
-      if (code !== 0) throw new Error(`docker compose ${args[0]}: exit code ${code}`);
-    };
-    if (up) await recover("stop the restored app", () => compose(["stop"]));
-    for (const path of written) await recover(`remove ${path}`, () => rm(path, { recursive: true, force: true }));
-    for (const { path, moved } of aside) await recover(`move ${moved} back to ${path}`, () => rename(moved, path));
-    if (rowWritten) {
-      await recover("put the app's settings back", async () => {
-        if (rowBefore) {
-          const { id: _id, updatedAt: _at, ...rest } = rowBefore;
-          await StackStore.restore(app.name, rest);
-        } else {
-          await StackStore.delete(app.name);
-        }
-      });
-    }
-    if (runningBefore.length > 0) await recover(`start ${app.name} again`, () => compose(["up", "-d", "--no-deps", ...runningBefore]));
-    throw err;
+    // Committed: the app runs on the restored files. A safety copy that cannot be removed is
+    // named, not a reason to call the restore failed.
+    for (const { moved } of aside) await tidy(ctx, moved);
+  } finally {
+    reserved.release();
   }
-  // Committed: the app runs on the restored files. A safety copy that cannot be removed is
-  // named, not a reason to call the restore failed.
-  for (const { moved } of aside) await tidy(ctx, moved);
 }
 
 /** Restore apps, and stage the system part, from backup `req.id`. */

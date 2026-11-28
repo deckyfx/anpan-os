@@ -9,6 +9,7 @@ import { createApp } from "../src/app";
 import { TEST_JWT, loginAs } from "./helpers";
 import { jobs, processRunner, type JobSummary } from "../src/lib/jobs";
 import { config } from "../src/config";
+import { DockerClient } from "../src/lib/docker";
 import { uploadPath } from "../src/lib/backups";
 
 const app = createApp(TEST_JWT);
@@ -81,6 +82,32 @@ describe("refusals", () => {
     expect((await call("GET", "/api/backups/..%2F..%2Fetc")).status).toBe(404);
     expect((await call("DELETE", "/api/backups/not-an-id")).status).toBe(404);
     expect((await call("POST", "/api/backups/import", { upload: "../x" })).status).toBe(400);
+  });
+});
+
+describe("containers of an app being backed up", () => {
+  test("cannot be started or restarted by hand meanwhile", async () => {
+    spies.push(spyOn(DockerClient, "inspectContainer").mockResolvedValue({
+      ok: true, data: { Config: { Labels: { "com.docker.compose.project": "bk-held" } } },
+    } as never));
+    const start = spyOn(DockerClient, "startContainer").mockResolvedValue({ ok: true, data: undefined } as never);
+    spies.push(start);
+    let finish = () => {};
+    const gate = new Promise<void>(r => { finish = r; });
+    const started = jobs.start({ kind: "backup", title: "Back up bk-held" }, async ctx => {
+      await ctx.withStack("bk-held", () => gate);
+    });
+    if (!started.ok) throw new Error("not started");
+    try {
+      await Bun.sleep(10);
+      expect((await call("POST", "/api/docker/containers/abc/start")).status).toBe(409);
+      expect((await call("POST", "/api/docker/containers/abc/restart")).status).toBe(409);
+      expect(start).not.toHaveBeenCalled();
+    } finally {
+      finish();
+      await finished(started.job.id);
+    }
+    expect((await call("POST", "/api/docker/containers/abc/start")).status).toBe(200);
   });
 });
 

@@ -4,6 +4,7 @@ import { rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { authGuard } from "./authGuard";
 import { DockerClient } from "../lib/docker";
+import { jobs, type JobSummary } from "../lib/jobs";
 import { StackStore } from "../stores/stack-store";
 import { judgeStackBindPaths, judgeBindPath, otherStacksBindPaths } from "../lib/bind-paths";
 import { getDiskUsage, prune, type CleanupCategory } from "../lib/docker-cleanup";
@@ -18,6 +19,19 @@ type ComposeOrigin = "managed" | "casaos" | null;
 /** Cache origin detection results for 5 minutes to avoid subprocess spam on every poll. */
 const originCache = new Map<string, { origin: ComposeOrigin; expiresAt: number }>();
 const ORIGIN_TTL  = 5 * 60 * 1000;
+
+/**
+ * The backup or restore holding the stack container `id` belongs to, if any. A backup
+ * stops an app for a cold copy, and a restore replaces its files: a container started by
+ * hand meanwhile would write into the copy, or run on files being swapped.
+ */
+async function heldByBackup(id: string): Promise<JobSummary | null> {
+  const found = await DockerClient.inspectContainer(id);
+  if (!found.ok) return null;
+  const project = found.data.Config.Labels?.["com.docker.compose.project"];
+  const job = project ? jobs.activeFor(project) : null;
+  return job && (job.kind === "backup" || job.kind === "restore") ? job : null;
+}
 
 /** Invalidate a single stack's cached origin (call after create/delete/import). */
 export function invalidateOriginCache(name: string) { originCache.delete(name); }
@@ -388,6 +402,8 @@ export function dockerPlugin(jwtSecret: string) {
     })
 
     .post("/containers/:id/start", async ({ params, set }) => {
+      const held = await heldByBackup(params.id);
+      if (held) { set.status = 409; return { error: `"${held.title}" is working on this app: start it when that has finished`, job: held }; }
       const result = await DockerClient.startContainer(params.id);
       if (!result.ok) { set.status = 502; return { error: result.error }; }
       return { ok: true };
@@ -400,6 +416,8 @@ export function dockerPlugin(jwtSecret: string) {
     })
 
     .post("/containers/:id/restart", async ({ params, set }) => {
+      const held = await heldByBackup(params.id);
+      if (held) { set.status = 409; return { error: `"${held.title}" is working on this app: restart it when that has finished`, job: held }; }
       const result = await DockerClient.restartContainer(params.id);
       if (!result.ok) { set.status = 502; return { error: result.error }; }
       return { ok: true };

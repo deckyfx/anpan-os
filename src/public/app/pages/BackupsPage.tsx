@@ -31,9 +31,14 @@ async function reloadWhenRestarted(signal: AbortSignal): Promise<boolean> {
     // A deadline on each probe: a request caught by the restart may otherwise never settle.
     const res = await fetch("/api/backups", { signal: AbortSignal.any([signal, AbortSignal.timeout(3000)]) }).catch(() => null);
     if (!res || signal.aborted) continue;
-    const restarted = res.status === 401
-      || (res.ok && !((await res.json().catch(() => null)) as { restorePending?: boolean } | null)?.restorePending);
-    if (restarted) { location.reload(); return true; }
+    let restarted = res.status === 401;
+    if (res.ok) {
+      // Only an answer read in full counts: a body cut off by the restart, or by leaving
+      // the page, says nothing about which process sent it.
+      const body = await res.json().catch(() => null) as { restorePending?: unknown } | null;
+      restarted = body?.restorePending === false;
+    }
+    if (restarted && !signal.aborted) { location.reload(); return true; }
   }
   return false;
 }
@@ -86,8 +91,10 @@ export function BackupsPage({ onNavigate }: { onNavigate: (path: string) => void
   const jobId = runningId ?? shownJob;
   const job = useJobsStore(s => (jobId ? s.jobs[jobId] : undefined));
   // A job ending changes the list: a backup added, an import unpacked, a restore staged.
+  // jobId too: a job shown only once it had already finished (seen first in a snapshot
+  // after a reconnect) never changes status here, and must still refresh the list.
   const status = job?.status;
-  useEffect(() => { if (status && status !== "running") void load(); }, [status, load]);
+  useEffect(() => { if (status && status !== "running") void load(); }, [status, jobId, load]);
 
   // An upload in progress counts too: its import would be refused behind a new backup.
   const [uploading, setUploading] = useState(false);

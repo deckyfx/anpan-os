@@ -129,8 +129,9 @@ export function applyPendingRestore(runtimeDir: string): string[] {
 
 /**
  * Undo a start that failed before its commit: the entries it put in place go back to the
- * staging, then each original back into its slot, but only into a slot that is free. A
- * step that fails leaves both versions where they are, reported for the operator.
+ * staging, then each original back into its slot, but only into a slot that is free, and
+ * the database with its WAL and SHM as one. A step that fails leaves both versions where
+ * they are, reported for the operator.
  */
 function undo(runtimeDir: string, staged: string, renamedIn: string[]): void {
   const left: string[] = [];
@@ -140,12 +141,15 @@ function undo(runtimeDir: string, staged: string, renamedIn: string[]): void {
   }
   const originals = join(staged, ORIGINALS);
   for (const entry of SYSTEM_ENTRIES) {
+    // An entry and its companions go back together or not at all: the old database's WAL
+    // beside the restored database would be replayed into it.
+    if (!existsSync(join(originals, entry))) continue;
+    const live = join(runtimeDir, entry);
+    if (existsSync(live)) { left.push(`the original ${entry} is in ${originals}; ${live} holds the restored one`); continue; }
     for (const name of liveGroup(entry)) {
       const from = join(originals, name);
       if (!existsSync(from)) continue;
-      const live = join(runtimeDir, name);
-      if (existsSync(live)) { left.push(`the original ${name} is in ${originals}; ${live} holds the restored one`); continue; }
-      try { renameSync(from, live); }
+      try { renameSync(from, join(runtimeDir, name)); }
       catch (e) { left.push(`the original ${name} is in ${originals}: ${(e as Error).message}`); }
     }
   }

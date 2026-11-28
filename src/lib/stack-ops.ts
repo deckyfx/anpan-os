@@ -13,13 +13,14 @@
  * separate requests, so the first start ran without the env file, and a tab closed
  * mid-install left a stack with neither.
  */
-import { join, dirname } from "node:path";
-import { chown, mkdir, rm, rmdir, stat } from "node:fs/promises";
+import { join, dirname, resolve } from "node:path";
+import { chown, mkdir, realpath, rm, rmdir, stat } from "node:fs/promises";
 import { parse } from "yaml";
 import { config } from "../config";
 import { bins } from "./commands";
 import { DockerClient, normalizeComposePath } from "./docker";
 import { JobError, processRunner, type JobContext } from "./jobs";
+import { reservePaths } from "./path-reservations";
 import { withPlatformDefaults, resolvedEnvValue } from "./app-env";
 import { resolveWithin } from "./path-guard";
 import { describeConflicts, findPortConflicts, publishedPorts } from "./port-check";
@@ -302,6 +303,9 @@ export async function runDeploy(ctx: JobContext, mode: "install" | "redeploy", r
     ? { compose: await readIfExists(composePath), env: await readIfExists(envPath) }
     : null;
   const done: InstallProgress = { folder: false, dataDirs: [], row: { wrote: false, before: null }, up: false };
+  // The host folders this deploy mounts, held until it ends: a restore of another app must
+  // not replace them meanwhile, nor this deploy start on folders a restore is replacing.
+  let releasePaths = () => {};
 
   try {
     ctx.step("Writing files");
@@ -329,6 +333,13 @@ export async function runDeploy(ctx: JobContext, mode: "install" | "redeploy", r
       ctx.step("Checking ports");
       const conflicts = await findPortConflicts(publishedPorts(resolved), req.name);
       if (conflicts.length > 0) throw new JobError(`Port conflict: ${describeConflicts(conflicts)}`);
+
+      const reserved = reservePaths(req.name, mode, await bindSources(resolved));
+      if (!reserved.ok) {
+        const { stack, what, path } = reserved.conflict;
+        throw new JobError(`${path} is in use by a ${what} of ${stack}: try again when it has finished`);
+      }
+      releasePaths = reserved.release;
     } catch (err) {
       if (previous) {
         if (previous.compose !== null) await Bun.write(composePath, previous.compose);
@@ -355,7 +366,21 @@ export async function runDeploy(ctx: JobContext, mode: "install" | "redeploy", r
   } catch (err) {
     if (mode === "install" && done.folder) await undoInstall(ctx, req.name, dir, done);
     throw err;
+  } finally {
+    releasePaths();
   }
+}
+
+/** The host folders a resolved compose configuration bind-mounts, with links followed. */
+async function bindSources(resolved: unknown): Promise<string[]> {
+  const services = (resolved as { services?: Record<string, { volumes?: { type?: string; source?: string }[] }> }).services ?? {};
+  const out: string[] = [];
+  for (const service of Object.values(services)) {
+    for (const v of service.volumes ?? []) {
+      if (v.type === "bind" && v.source) out.push(await realpath(v.source).catch(() => resolve(v.source!)));
+    }
+  }
+  return out;
 }
 
 function snapshotOf(row: Awaited<ReturnType<typeof StackStore.findById>>): RowSnapshot | null {

@@ -7,7 +7,7 @@
 import { test, expect, describe, afterEach, afterAll, beforeEach, spyOn } from "bun:test";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { mkdir, readdir, rm, symlink, writeFile } from "node:fs/promises";
-import { chmodSync, existsSync, mkdirSync, renameSync, writeFileSync, readFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, realpathSync, renameSync, writeFileSync, readFileSync } from "node:fs";
 import { JobManager, processRunner, type JobContext, type JobSummary } from "../src/lib/jobs";
 import {
   backupIdFor, backupPath, getBackup, listBackups, parseManifest, prepareUploads, runBackup, runImport, runRestore, uploadPath,
@@ -15,6 +15,7 @@ import {
 } from "../src/lib/backups";
 import { applyPendingRestore, PENDING_DIR, READY_MARKER } from "../src/lib/pending-restore";
 import { stackDir } from "../src/lib/stack-ops";
+import { reservePaths } from "../src/lib/path-reservations";
 import { StackStore } from "../src/stores/stack-store";
 import { DockerClient } from "../src/lib/docker";
 import { config } from "../src/config";
@@ -244,6 +245,27 @@ describe("taking a backup", () => {
     expect(readFileSync(join(dataDir, "theirs", "keep.txt"), "utf8")).toBe("theirs-v2");
   });
 
+  test("refuses to restore folders a deploy of another app holds", async () => {
+    const id = await backUp();
+    // With links followed, as every caller passes them.
+    const held = reservePaths("other-app", "install", [realpathSync(join(dataDir, "config"))]);
+    if (!held.ok) throw new Error("not reserved");
+    try {
+      ran = [];
+      const { job, log } = await runJob(ctx => runRestore(ctx, { id, system: false, apps: [APP] }));
+      expect(job.status).toBe("failed");
+      expect(log.some(l => l.includes("other-app"))).toBe(true);
+      expect(ran.some(c => c.endsWith(" stop"))).toBe(false);
+    } finally {
+      held.release();
+    }
+    // Released, the restore goes ahead, and gives its own hold back when done.
+    expect((await runJob(ctx => runRestore(ctx, { id, system: false, apps: [APP] }))).job.status).toBe("done");
+    const again = reservePaths("other-app", "install", [realpathSync(dataDir)]);
+    expect(again.ok).toBe(true);
+    if (again.ok) again.release();
+  });
+
   test("refuses to restore over a folder another app has started using", async () => {
     const id = await backUp();
     otherBinds = [join(dataDir, "config")];
@@ -272,6 +294,12 @@ describe("taking a backup", () => {
       const list = Bun.spawnSync(["tar", "-tzf", join(resolve(inside), id, "apps", APP, "data-0.tar.gz")]).stdout.toString();
       expect(list).toContain("settings.json");
       expect(list).not.toContain("backups-here");
+
+      // And it restores, though moving the data folder aside moves the backup with it.
+      await writeFile(join(dataDir, "config", "settings.json"), "data-v2");
+      const { job, log } = await runJob(ctx => runRestore(ctx, { id, system: false, apps: [APP] }));
+      expect(job.status, log.join("\n")).toBe("done");
+      expect(readFileSync(join(dataDir, "config", "settings.json"), "utf8")).toBe("data-v1");
     } finally {
       delete (config as { backupsFolder?: string }).backupsFolder;
     }
@@ -534,6 +562,26 @@ describe("applying a staged system restore", () => {
     // And the next start, with the cause fixed, applies it.
     expect(applyPendingRestore(dir)).toEqual(["config.toml", "storage.db", "certs"]);
     expect(readFileSync(join(dir, "config.toml"), "utf8")).toBe("new");
+  });
+
+  test.if(canFailRename)("keeps the old WAL with the old database when undoing a later start", () => {
+    writeFileSync(join(dir, PENDING_DIR, READY_MARKER), "x");
+    // An earlier start put storage.db in place (its original and WAL in .originals), then
+    // stopped. This start fails on certs.
+    mkdirSync(join(dir, PENDING_DIR, ".originals"));
+    renameSync(join(dir, "storage.db"), join(dir, PENDING_DIR, ".originals", "storage.db"));
+    renameSync(join(dir, "storage.db-wal"), join(dir, PENDING_DIR, ".originals", "storage.db-wal"));
+    renameSync(join(dir, PENDING_DIR, "storage.db"), join(dir, "storage.db"));
+    chmodSync(join(dir, PENDING_DIR, "certs"), 0o555);
+    try {
+      expect(() => applyPendingRestore(dir)).toThrow();
+    } finally {
+      chmodSync(join(dir, PENDING_DIR, "certs"), 0o755);
+    }
+    // The restored database stays; its old WAL does not come back beside it.
+    expect(readFileSync(join(dir, "storage.db"), "utf8")).toBe("new-db");
+    expect(existsSync(join(dir, "storage.db-wal"))).toBe(false);
+    expect(existsSync(join(dir, PENDING_DIR, ".originals", "storage.db-wal"))).toBe(true);
   });
 
   test("a restore staged over another and cut short still applies the earlier one", () => {
