@@ -75,6 +75,9 @@ export function BackUpNowSection({ busy, onStart }: {
         </button>
       }
     >
+      {/* What to back up, as one group: a fieldset, named by its legend. */}
+      <fieldset>
+      <legend className="sr-only">What to back up</legend>
       <label className={`flex items-start gap-3 py-2 cursor-pointer ${TARGET}`}>
         <input type="checkbox" checked={system} onChange={e => setSystem(e.target.checked)} className="mt-0.5 accent-blue-500" />
         <span>
@@ -137,6 +140,7 @@ export function BackUpNowSection({ busy, onStart }: {
           })}
         </ul>
       )}
+      </fieldset>
     </Section>
   );
 }

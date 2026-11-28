@@ -134,12 +134,15 @@ function RestorePanel({ backup, busy, onClose, onRestore }: {
   };
 
   return (
-    <div role="group" aria-labelledby={headingId} className="mt-3 rounded-lg border border-gray-700 bg-gray-950/60 p-4 space-y-3">
+    <section aria-labelledby={headingId} className="mt-3 rounded-lg border border-gray-700 bg-gray-950/60 p-4 space-y-3">
       <div className="flex items-center gap-2">
         <h3 id={headingId} className="flex-1 text-xs font-semibold text-gray-300">Restore from this backup</h3>
         <button type="button" onClick={onClose} aria-label="Close" className={`${QUIET_BUTTON} px-1.5`}><X size={12} /></button>
       </div>
 
+      {/* The parts to choose, as one group: a fieldset, named by its legend. */}
+      <fieldset className="space-y-3">
+        <legend className="sr-only">Parts to restore</legend>
       {backup.system && (
         <label className={`flex items-start gap-3 cursor-pointer ${TARGET}`}>
           <input type="checkbox" checked={system} onChange={e => { setSystem(e.target.checked); setConfirming(false); }} className="mt-0.5 accent-blue-500" />
@@ -163,6 +166,7 @@ function RestorePanel({ backup, busy, onClose, onRestore }: {
           </span>
         </label>
       ))}
+      </fieldset>
 
       <p className="text-xs text-gray-400 leading-relaxed">
         Each app chosen is stopped, and its stack folder and data are replaced by the backup's; anything added since is
@@ -184,7 +188,7 @@ function RestorePanel({ backup, busy, onClose, onRestore }: {
           onConfirm={() => void send()}
         />
       </div>
-    </div>
+    </section>
   );
 }
 
@@ -223,7 +227,7 @@ function UploadButton({ disabled, onUploaded, onUploading }: {
       <div className="flex items-center gap-2 text-xs text-gray-400">
         <label className="flex items-center gap-2">
           <span className="truncate max-w-40" title={progress.name}>Uploading {percent}%</span>
-          <progress value={progress.loaded} max={progress.total || 1} className="w-28 h-1.5 accent-blue-500" />
+          <progress value={progress.loaded} max={progress.total || 1} className="progress-bar w-28" />
         </label>
         <button type="button" onClick={() => control.current.cancel()} className={QUIET_BUTTON}>Cancel</button>
       </div>

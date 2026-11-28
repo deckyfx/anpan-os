@@ -121,7 +121,9 @@ export function BackupsPage({ onNavigate }: { onNavigate: (path: string) => void
   };
 
   return (
-    <div className="flex flex-col h-screen bg-gray-950 text-white overflow-hidden">
+    // color-scheme: the native checkboxes and progress bar here are drawn for a dark page,
+    // not as light boxes on it.
+    <div className="flex flex-col h-screen bg-gray-950 text-white overflow-hidden [color-scheme:dark]">
       <TopBar version={version} onNavigate={onNavigate} currentPath={path} showUpdates={false} />
       <main className="flex-1 min-h-0 overflow-y-auto px-4 py-6 sm:px-6">
         <div className="max-w-3xl mx-auto space-y-5">
