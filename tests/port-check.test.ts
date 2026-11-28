@@ -86,6 +86,13 @@ describe("findPortConflicts", () => {
     expect((await findPortConflicts(wanted, "mine")).map(c => c.port)).toEqual([8443]);
   });
 
+  test("a wide range is checked port by port: taken ends with a free port inside are no clash", async () => {
+    const wide = publishedPorts({ services: { app: { ports: [{ target: 80, published: "5000-7000" }] } } });
+    expect(wide[0]!.alternatives).toHaveLength(2001);
+    world([{ port: 5000, process: "a" }, { port: 7000, process: "b" }], []);
+    expect(await findPortConflicts(wide, "mine")).toEqual([]);
+  });
+
   test("a published range is a choice: it clashes only when every port in it is taken", async () => {
     world([{ port: 6000, process: "a" }, { port: 6002, address: "127.0.0.1%lo", process: "c" }], []);
     expect(await findPortConflicts(wanted, "mine")).toEqual([]);             // 6001 is free

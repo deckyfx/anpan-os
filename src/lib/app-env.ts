@@ -42,19 +42,49 @@ export function referencedVariables(compose: string): Set<string> {
   return names;
 }
 
+/** Where the quote closing a value opened with `quote` is in `body`, or -1. `\"` does not close. */
+function closingQuote(body: string, quote: string): number {
+  for (let i = 0; i < body.length; i++) {
+    if (quote === '"' && body[i] === "\\") { i++; continue; }
+    if (body[i] === quote) return i;
+  }
+  return -1;
+}
+
 /**
  * The assignments in an `.env` file, in order, as Compose reads them: `KEY=value` or
  * `KEY: value`, with an optional `export ` prefix. Comments and blank lines are skipped.
- * Values are returned raw; only surrounding quotes are removed.
+ *
+ * Values follow Compose's rules, so that what this reads is what Compose substitutes:
+ * - A quoted value runs to its closing quote, across lines if need be. Lines inside it are
+ *   part of the value, not assignments: `NOTES='a\nTZ=x\nb'` does not set TZ.
+ * - In an unquoted value, ` #` starts a comment: `PUID=2001 # app user` is 2001. A quoted
+ *   value keeps its `#`.
+ * Escapes inside double quotes are not expanded; nothing here needs them.
  */
 function envAssignments(env: string): Array<[string, string]> {
   const out: Array<[string, string]> = [];
-  for (const raw of env.split("\n")) {
-    const line = raw.trim().replace(/^export\s+/, "");
+  const lines = env.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!.trim().replace(/^export\s+/, "");
     if (!line || line.startsWith("#")) continue;
-    const m = /^([A-Za-z_][A-Za-z0-9_.-]*)\s*(?:=|:\s)\s*(.*)$/.exec(line) ?? /^([A-Za-z_][A-Za-z0-9_.-]*)\s*[=:]$/.exec(line);
+    const m = /^([A-Za-z_][A-Za-z0-9_.-]*)\s*(?:=|:(?=\s|$))\s*(.*)$/.exec(line);
     if (!m) continue;
-    out.push([m[1]!, (m[2] ?? "").trim().replace(/^(["'])(.*)\1$/, "$2")]);
+    const rest = m[2] ?? "";
+    const quote = rest[0];
+    let value: string;
+    if (quote === '"' || quote === "'") {
+      let body = rest.slice(1);
+      let end = closingQuote(body, quote);
+      while (end < 0 && i + 1 < lines.length) {
+        body += `\n${lines[++i]}`;
+        end = closingQuote(body, quote);
+      }
+      value = end < 0 ? body : body.slice(0, end);
+    } else {
+      value = rest.split(" #")[0]!.trimEnd();
+    }
+    out.push([m[1]!, value]);
   }
   return out;
 }
@@ -135,8 +165,10 @@ export function rewriteDataRoot(compose: string, to: string = config.appDataRoot
             changed = true;
           }
         } else if (isMap(entry)) {
-          const source = entry.get("source");
-          const next = typeof source === "string" ? swap(source) : null;
+          // `source: *src` is an alias: read what it names. The rewritten path replaces this
+          // use only, so the anchor (perhaps under an `x-` key) keeps its own value.
+          const source = deref(entry.get("source", true));
+          const next = isScalar(source) && typeof source.value === "string" ? swap(source.value) : null;
           if (next !== null) {
             entry.set("source", next);
             changed = true;

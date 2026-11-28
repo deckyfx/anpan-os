@@ -16,6 +16,7 @@ import { buildComposeSourceReport, scanComposeSources } from "../lib/compose-sou
 import type { ComposeSourceReport } from "../lib/compose-source";
 import { CASAOS_APPS_DIR } from "../lib/platform";
 import { STACK_NAME_RE } from "../constants/stack";
+import { COMPOSE_FILE, composeCommand } from "../lib/compose-cmd";
 import { listTags } from "../lib/registry";
 import { loadDockerCredentials } from "../lib/docker-credentials";
 
@@ -264,23 +265,37 @@ export function composePlugin(jwtSecret: string) {
       detail: { summary: "Update several stacks in sequence (starts a job)" },
     })
 
+    // These three run Compose the way the jobs do (composeCommand: `-p <stack>` and the
+    // stack's own file), so `down` stops the project an install started, whatever the
+    // stack's .env says COMPOSE_PROJECT_NAME is. Stopping or restarting a stack a job is
+    // working on is refused with that job, as every other stack-changing route is.
     .post("/stacks/:name/down", async ({ params, set }) => {
+      if (!STACK_NAME_RE.test(params.name)) { set.status = 422; return { ok: false, error: "Invalid stack name" }; }
+      const held = busy(set, params.name);
+      if (held) return { ok: false, ...held };
       const stackDir = join(config.composeFolder, params.name);
-      const result = await Bun.$`${docker!} compose down`.cwd(stackDir).nothrow();
+      if (!(await Bun.file(join(stackDir, COMPOSE_FILE)).exists())) { set.status = 404; return { ok: false, error: `Stack "${params.name}" is not managed by anpan-os` }; }
+      const result = await Bun.$`${composeCommand(docker!, params.name, stackDir)} down`.cwd(stackDir).nothrow().quiet();
       if (result.exitCode !== 0) return { ok: false, error: result.stderr.toString() };
       return { ok: true };
     })
 
     .post("/stacks/:name/restart", async ({ params, set }) => {
+      if (!STACK_NAME_RE.test(params.name)) { set.status = 422; return { ok: false, error: "Invalid stack name" }; }
+      const held = busy(set, params.name);
+      if (held) return { ok: false, ...held };
       const stackDir = join(config.composeFolder, params.name);
-      const result = await Bun.$`${docker!} compose restart`.cwd(stackDir).nothrow();
+      if (!(await Bun.file(join(stackDir, COMPOSE_FILE)).exists())) { set.status = 404; return { ok: false, error: `Stack "${params.name}" is not managed by anpan-os` }; }
+      const result = await Bun.$`${composeCommand(docker!, params.name, stackDir)} restart`.cwd(stackDir).nothrow().quiet();
       if (result.exitCode !== 0) return { ok: false, error: result.stderr.toString() };
       return { ok: true };
     })
 
     .get("/stacks/:name/logs", async ({ params, set }) => {
+      if (!STACK_NAME_RE.test(params.name)) { set.status = 422; return { error: "Invalid stack name" }; }
       const stackDir = join(config.composeFolder, params.name);
-      const result = await Bun.$`${docker!} compose logs --tail=100`.cwd(stackDir).nothrow();
+      if (!(await Bun.file(join(stackDir, COMPOSE_FILE)).exists())) { set.status = 404; return { ok: false, error: `Stack "${params.name}" is not managed by anpan-os` }; }
+      const result = await Bun.$`${composeCommand(docker!, params.name, stackDir)} logs --tail=100`.cwd(stackDir).nothrow().quiet();
       return { logs: result.stdout.toString() };
     })
 

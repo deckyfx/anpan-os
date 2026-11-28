@@ -31,6 +31,8 @@ function PullUpdateDialogInner({ stack, onClose, onUpdated }: {
   const title = stack.meta?.title ?? stack.name;
   const alreadyRunning = useJobsStore(s => runningJobFor(s.jobs, stack.name));
   const [jobId, setJobId] = useState<string | null>(alreadyRunning?.id ?? null);
+  /** The job this dialog's own request started: only its success is reported as this update's. */
+  const [ownJobId, setOwnJobId] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState("");
 
@@ -40,7 +42,9 @@ function PullUpdateDialogInner({ stack, onClose, onUpdated }: {
     try {
       const { data, error: err } = await api.api.compose.stacks({ name: stack.name }).pull.post();
       const answer = readStartAnswer(data, err);
+      // A 409 hands over the job already on the stack: shown, but not this request's.
       if (answer.job) setJobId(answer.job.id);
+      if (answer.job && answer.started) setOwnJobId(answer.job.id);
       if (answer.error) setError(answer.error);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -82,9 +86,10 @@ function PullUpdateDialogInner({ stack, onClose, onUpdated }: {
         <JobView
           jobId={jobId}
           onFinished={job => {
-            // A different job may hold the stack (an install, a migration): its success is
-            // not this update's.
-            if (job.status !== "done" || job.kind !== "update") return;
+            // Another job may hold the stack: an install, a migration, or an update started
+            // from another tab. Its success is not this request's; the stacks list refreshes
+            // on its own when any job ends.
+            if (job.status !== "done" || job.id !== ownJobId) return;
             useToastStore.getState().push(`Stack updated: ${title}`, "success");
             onUpdated();
           }}

@@ -124,8 +124,40 @@ function putScalar(doc: Doc, map: YAMLMap<unknown, unknown>, key: string, value:
   else map.set(doc.createNode(key), doc.createNode(value));
 }
 
+/**
+ * The node at `path`, following aliases on the way and at the end, as Compose reads it.
+ * `doc.getIn` stops at an alias: `healthcheck: *hc` has no `interval` to it.
+ */
+function resolveIn(doc: Doc, path: Path): unknown {
+  let node: unknown = doc.contents;
+  for (const key of path) {
+    if (isAlias(node)) node = node.resolve(doc);
+    if (!isMap(node) && !isSeq(node)) return undefined;
+    node = node.get(key, true);
+  }
+  return isAlias(node) ? node.resolve(doc) : node;
+}
+
+/**
+ * Give the first `depth` steps of `path` nodes of their own: each alias to a collection on
+ * the way becomes a copy of what it names, so the edit that follows keeps the keys it does
+ * not touch. Writing through the alias instead would change the anchor and with it every
+ * other service that uses it; this is how an aliased service is already edited.
+ */
+function ownPath(doc: Doc, path: Path, depth = path.length): void {
+  for (let i = 1; i <= depth; i++) {
+    const sub  = path.slice(0, i);
+    const node = doc.getIn(sub, true);
+    if (!isAlias(node)) continue;
+    const target = node.resolve(doc);
+    if (!isMap(target) && !isSeq(target)) continue;
+    doc.setIn(sub, doc.createNode(js(doc, node), { aliasDuplicateObjects: false }));
+  }
+}
+
 /** Make sure every collection above `path` is a map, so `setIn` can descend. */
 function ensureParents(doc: Doc, path: Path): void {
+  ownPath(doc, path, path.length - 1);
   for (let i = 1; i < path.length; i++) {
     const sub  = path.slice(0, i);
     const node = doc.getIn(sub, true);
@@ -135,6 +167,7 @@ function ensureParents(doc: Doc, path: Path): void {
 
 /** Set a scalar at `path`, editing the existing node when there is one. */
 function setScalar(doc: Doc, path: Path, value: Prim): void {
+  ownPath(doc, path, path.length - 1);
   const node = doc.getIn(path, true);
   if (isScalar(node)) {
     node.value = coerceLike(node.value, value);
@@ -155,7 +188,8 @@ function setValue(doc: Doc, path: Path, value: unknown): void {
  * `keepDepth` (the service itself stays even if it ends up empty).
  */
 function deletePath(doc: Doc, path: Path, keepDepth: number): void {
-  if (!doc.hasIn(path)) return;
+  if (resolveIn(doc, path) === undefined) return;
+  ownPath(doc, path, path.length - 1);
   doc.deleteIn(path);
   for (let len = path.length - 1; len > keepDepth; len--) {
     const parent = doc.getIn(path.slice(0, len), true);
@@ -311,10 +345,20 @@ interface FieldCodecs<T> {
  * holds the rows as last read, cleaned the same way as `next`.
  */
 function patchListField<T>(doc: Doc, path: Path, base: readonly T[], next: readonly T[], codecs: FieldCodecs<T>, keepDepth: number): void {
-  if (next.length === 0) { deletePath(doc, path, keepDepth); return; }
+  // The form had no rows and still has none (a blank row was added, say): nothing to
+  // write, and rows added to the YAML by hand stay.
+  if (next.length === 0 && base.length === 0) return;
+  if (resolveIn(doc, path) !== undefined) ownPath(doc, path);
   const node = doc.getIn(path, true);
-  if (isSeq(node) && codecs.seq) { patchItems(node, next, codecs.seq, base); return; }
-  if (isMap(node) && codecs.map) { patchItems(node, next, codecs.map, base); return; }
+  // Patched row by row even when the form emptied the list, so hand-added rows survive;
+  // the field goes only when nothing is left in it.
+  const codec = isSeq(node) ? codecs.seq : isMap(node) ? codecs.map : undefined;
+  if (codec && (isSeq(node) || isMap(node))) {
+    patchItems(node, next, codec, base);
+    if (node.items.length === 0) deletePath(doc, path, keepDepth);
+    return;
+  }
+  if (next.length === 0) { deletePath(doc, path, keepDepth); return; }
   if (isScalar(node) && codecs.scalar && next.length === 1) { node.value = coerceLike(node.value, codecs.scalar(next[0]!)); return; }
   setValue(doc, path, codecs.fresh(next));
 }
@@ -378,7 +422,7 @@ const byName = (r: { name: string }) => r.name;
 
 /** True when the node at `path` is a map (so keyed rows must be deduplicated). */
 function isMapAt(doc: Doc, path: Path): boolean {
-  return isMap(doc.getIn(path, true));
+  return isMap(resolveIn(doc, path));
 }
 
 // ═══ Stack-level fields ══════════════════════════════════════════════════════
@@ -562,12 +606,12 @@ function patchService(doc: Doc, name: string, base: ServiceForm, nextRaw: Servic
   const flag = (key: string, value: boolean) => value ? setScalar(doc, at(key), true) : deletePath(doc, at(key), KEEP);
 
   if (changed("imageName", "imageTag")) {
-    const curImage = String(js(doc, doc.getIn(at("image"), true)) ?? "");
+    const curImage = String(js(doc, resolveIn(doc, at("image"))) ?? "");
     const image    = formatImage(next.imageName, next.imageTag, splitImageRef(curImage).tag !== null);
     str("image", image);
   }
   if (changed("restart")) {
-    if (next.restart === "no" && String(js(doc, doc.getIn(at("restart"), true)) ?? "") !== "no") deletePath(doc, at("restart"), KEEP);
+    if (next.restart === "no" && String(js(doc, resolveIn(doc, at("restart"))) ?? "") !== "no") deletePath(doc, at("restart"), KEEP);
     else setScalar(doc, at("restart"), next.restart);
   }
   if (changed("containerName")) str("container_name", next.containerName);
@@ -763,7 +807,7 @@ function patchLabels(doc: Doc, path: Path, base: readonly LabelEntry[], next: re
 function patchLimit(doc: Doc, svc: Path, flatKey: string, deployKey: string, value: string | null): void {
   const flat   = [...svc, flatKey];
   const deploy = [...svc, "deploy", "resources", "limits", deployKey];
-  const where  = [flat, deploy].filter(p => doc.hasIn(p));
+  const where  = [flat, deploy].filter(p => resolveIn(doc, p) !== undefined);
   if (value === null) { for (const p of where) deletePath(doc, p, svc.length); return; }
   for (const p of where.length > 0 ? where : [deploy]) setScalar(doc, p, value);
 }
@@ -777,6 +821,7 @@ function patchLimit(doc: Doc, svc: Path, flatKey: string, deployKey: string, val
  */
 function patchArgs(doc: Doc, path: Path, value: string, keep: number): void {
   if (!value.trim()) { deletePath(doc, path, keep); return; }
+  if (resolveIn(doc, path) !== undefined) ownPath(doc, path);
   const node = doc.getIn(path, true);
   if (!isSeq(node)) { setScalar(doc, path, value); return; }
   const tokens = splitArgs(value);
@@ -791,6 +836,7 @@ function patchArgs(doc: Doc, path: Path, value: string, keep: number): void {
  */
 function patchHealthcheckTest(doc: Doc, path: Path, value: string, keep: number): void {
   if (!value.trim()) { deletePath(doc, path, keep); return; }
+  if (resolveIn(doc, path) !== undefined) ownPath(doc, path);
   const node = doc.getIn(path, true);
   if (isScalar(node)) { node.value = value; return; }
   const shell = ["CMD-SHELL", value];

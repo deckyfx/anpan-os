@@ -3,7 +3,7 @@
  * root rewrite for App Store installs.
  */
 import { test, expect, describe } from "bun:test";
-import { referencedVariables, envKeys, withPlatformDefaults, rewriteDataRoot, platformValues } from "../src/lib/app-env";
+import { referencedVariables, envKeys, envValue, withPlatformDefaults, rewriteDataRoot, platformValues } from "../src/lib/app-env";
 
 const CASAOS = `name: jellyfin
 services:
@@ -102,7 +102,35 @@ describe("rewriteDataRoot", () => {
     expect(rewriteDataRoot(text, "/srv/apps")).toBe(text);
   });
 
+  test("a long-form source given by an alias is rewritten for that volume; the anchor keeps its value", () => {
+    const text = "x-paths:\n  config: &src /DATA/AppData/app/config\nservices:\n  a:\n    image: x\n    volumes:\n      - type: bind\n        source: *src\n        target: /config\n";
+    const out = rewriteDataRoot(text, "/srv/apps");
+    expect(out).toContain("source: /srv/apps/app/config");
+    expect(out).toContain("config: &src /DATA/AppData/app/config");
+  });
+
   test("invalid YAML is returned as it was, for the install's own check to report", () => {
     expect(rewriteDataRoot("services: [", "/srv/apps")).toBe("services: [");
+  });
+});
+
+describe("reading .env as Compose does", () => {
+  test("an unquoted value ends at an inline comment; a quoted one keeps its #", () => {
+    expect(envValue("PUID=2001 # app user\n", "PUID")).toBe("2001");
+    expect(envValue('PASS="a #b" # note\n', "PASS")).toBe("a #b");
+    expect(envValue("TAG=v1#2\n", "TAG")).toBe("v1#2");     // no space before #: not a comment
+  });
+
+  test("lines inside a multi-line quoted value are not assignments", () => {
+    const env = "NOTES='header\nTZ=Europe/Berlin\nfooter'\nA=1\n";
+    expect(envKeys(env)).toEqual(new Set(["NOTES", "A"]));
+    expect(envValue(env, "NOTES")).toBe("header\nTZ=Europe/Berlin\nfooter");
+    const { added } = withPlatformDefaults(env, "services:\n  a:\n    environment:\n      TZ: $TZ\n", "app");
+    expect(added).toContain("TZ");
+  });
+
+  test("a real TZ assignment still counts as set", () => {
+    const { added } = withPlatformDefaults("TZ=Asia/Tokyo\n", "services:\n  a:\n    environment:\n      TZ: $TZ\n", "app");
+    expect(added).not.toContain("TZ");
   });
 });

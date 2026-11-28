@@ -71,6 +71,11 @@ export function casaosPlugin(jwtSecret: string) {
         // The shared rule allows no dots, as Compose project names do not either.
         if (!STACK_NAME_RE.test(name)) { set.status = 422; return { error: "Invalid stack name" }; }
 
+        // A job already on the stack is the answer, before any file is read: a second dialog
+        // should follow the running migration, not be asked for a compose path.
+        const holder = jobs.activeFor(name);
+        if (holder) { set.status = 409; return { error: `"${holder.title}" is still running for this stack`, job: holder }; }
+
         // A custom path is a real feature: when CasaOS's own copy cannot be read, the dialog
         // asks for the file's actual location. But it is read as root, and taken straight
         // from the request it would bypass a narrowed files root. Hold it to the boundary the
@@ -100,8 +105,6 @@ export function casaosPlugin(jwtSecret: string) {
           set.status = 422;
           return { error: "Cannot read compose file — check the path", needPath: true };
         }
-        const holder = jobs.activeFor(name);
-        if (holder) { set.status = 409; return { error: `"${holder.title}" is still running for this stack`, job: holder }; }
         const bad = checkComposeText(raw, name);
         if (bad) { set.status = bad.status; return { error: bad.error }; }
 

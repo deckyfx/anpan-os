@@ -6,7 +6,7 @@ import { test, expect, describe, beforeAll, beforeEach, afterEach, afterAll, spy
 import { rm } from "node:fs/promises";
 import { createApp } from "../src/app";
 import { TEST_JWT, loginAs } from "./helpers";
-import { processRunner, type JobSummary } from "../src/lib/jobs";
+import { jobs, processRunner, type JobSummary } from "../src/lib/jobs";
 import { stackDir } from "../src/lib/stack-ops";
 import { commands } from "../src/lib/commands";
 import { DockerClient } from "../src/lib/docker";
@@ -141,8 +141,11 @@ describe("/api/jobs", () => {
   });
 
   test("the stream opens with a snapshot of every job", async () => {
+    // A job of its own, so the test holds when run alone (--test-name-pattern).
+    const own = jobs.start({ kind: "update-all", title: "snapshot test" }, async () => {});
+    if (!own.ok) throw new Error("could not start the test job");
     const listed = ((await call("GET", "/api/jobs")).body.jobs as JobSummary[]).map(j => j.id);
-    expect(listed.length).toBeGreaterThan(0);     // earlier tests in this file left jobs behind
+    expect(listed).toContain(own.job.id);
     const controller = new AbortController();
     const res = await app.handle(new Request("http://localhost/api/jobs/stream", { headers: { cookie }, signal: controller.signal }));
     const reader = res.body!.getReader();

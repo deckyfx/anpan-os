@@ -33,9 +33,6 @@ export interface PortConflict {
   range?:  string;
 }
 
-/** Most ports one range may expand to. A range wider than this is checked at its ends only. */
-const MAX_RANGE = 1000;
-
 /**
  * Published host ports from `docker compose config --format json` output.
  *
@@ -64,12 +61,18 @@ export function publishedPorts(resolved: unknown): PublishedPort[] {
   return out;
 }
 
+/**
+ * Every port a published spec may use: `8080` is one, `5000-7000` is all 2001 of them.
+ *
+ * The whole interval, never a sample of it: Compose may take any free port inside, so the
+ * range is exhausted only when every one is in use. Ports stop at 65535.
+ */
 function expandRange(spec: string): number[] {
   const [a, b] = spec.split("-").map(n => Number.parseInt(n, 10));
   if (a === undefined || !Number.isInteger(a)) return [];
   if (b === undefined || !Number.isInteger(b) || b < a) return [a];
-  if (b - a > MAX_RANGE) return [a, b];
-  return Array.from({ length: b - a + 1 }, (_, i) => a + i);
+  const last = Math.min(b, 65_535);
+  return Array.from({ length: Math.max(1, last - a + 1) }, (_, i) => a + i);
 }
 
 /** An address as `ss`, `lsof` and Docker write it, without brackets or an interface suffix. */
@@ -149,14 +152,21 @@ export async function findPortConflicts(wanted: PublishedPort[], project: string
   const seen = new Set<string>();
   for (const want of wanted) {
     const candidates = want.alternatives ?? [want.port];
-    const key = `${candidates.join(",")}/${want.proto}@${want.hostIp}`;
+    const key = `${candidates[0]}-${candidates[candidates.length - 1]}/${want.proto}@${want.hostIp}`;
     if (seen.has(key)) continue;
     seen.add(key);
 
-    const holders = candidates.map(port => holderOf(port, want.proto, want.hostIp));
-    if (holders.some(h => h === null)) continue;     // at least one port is free
+    // Exhausted only if no port in it is free; the first free one settles it.
+    let firstHolder: string | null = null;
+    let free = false;
+    for (const port of candidates) {
+      const holder = holderOf(port, want.proto, want.hostIp);
+      if (holder === null) { free = true; break; }
+      firstHolder ??= holder;
+    }
+    if (free) continue;
     conflicts.push({
-      port: want.port, proto: want.proto, service: want.service, heldBy: holders[0]!,
+      port: want.port, proto: want.proto, service: want.service, heldBy: firstHolder!,
       ...(want.alternatives ? { range: `${candidates[0]}-${candidates[candidates.length - 1]}` } : {}),
     });
   }

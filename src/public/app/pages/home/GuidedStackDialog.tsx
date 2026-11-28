@@ -16,7 +16,8 @@ import { parseComposeDoc, parseService, parseStackConfig } from "./guided/compos
 import { applyFormChanges, type FormSnapshot } from "./guided/composePatch";
 import type { AppConfigState, OpenMode, ServiceForm, StackConfig } from "./guided/types";
 
-const NAME_RE = /^[a-zA-Z0-9_-]+$/;
+/** What Docker Compose accepts as a project name; the server applies the same rule. */
+const NAME_RE = /^[a-z0-9][a-z0-9_-]*$/;
 
 function toSlug(s: string): string {
   return s
@@ -333,7 +334,7 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent, 
 
     const name = stackConfig.name.trim();
     if (!name || !NAME_RE.test(name)) {
-      setError("Stack Name is required and must only contain letters, numbers, dashes, or underscores.");
+      setError("Stack Name is required: lowercase letters, numbers, dashes or underscores, starting with a letter or number.");
       return;
     }
 

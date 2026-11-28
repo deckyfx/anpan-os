@@ -603,3 +603,40 @@ describe("applyFormChanges — fields compose would reject or misread", () => {
     expect(applyFormChanges(yaml, base, next)).toBe(yaml.replace("nginx:1", "nginx:2"));
   });
 });
+
+describe("applyFormChanges — aliases and hand-added rows", () => {
+  test("an aliased healthcheck keeps its other keys when one is edited; the anchor stays", () => {
+    const yaml = "x-hc: &hc\n  test: [\"CMD\", \"true\"]\n  interval: 30s\n  retries: 3\nservices:\n  app:\n    image: nginx\n    healthcheck: *hc\n  other:\n    image: nginx\n    healthcheck: *hc\n";
+    const base = snapshot(yaml);
+    const next = editService(base, "app", f => ({ ...f, healthcheckInterval: "1m" }));
+    const out  = parse(applyFormChanges(yaml, base, next));
+    expect(out.services.app.healthcheck).toEqual({ test: ["CMD", "true"], interval: "1m", retries: 3 });
+    expect(out.services.other.healthcheck.interval).toBe("30s");
+    expect(out["x-hc"].interval).toBe("30s");
+  });
+
+  test("clearing a key under an aliased healthcheck removes it from this service only", () => {
+    const yaml = "x-hc: &hc\n  test: [\"CMD\", \"true\"]\n  retries: 3\nservices:\n  app:\n    image: nginx\n    healthcheck: *hc\n";
+    const base = snapshot(yaml);
+    const next = editService(base, "app", f => ({ ...f, healthcheckRetries: 0 }));
+    const out  = parse(applyFormChanges(yaml, base, next));
+    expect(out.services.app.healthcheck).toEqual({ test: ["CMD", "true"] });
+    expect(out["x-hc"].retries).toBe(3);
+  });
+
+  test("a blank row added to an empty list leaves rows added by hand in the YAML", () => {
+    const base = snapshot("services:\n  app:\n    image: nginx\n");
+    const withRow = "services:\n  app:\n    image: nginx\n    ports:\n      - \"80:80\"\n";   // typed in the YAML tab since
+    const next = editService(base, "app", f => ({ ...f, ports: [{ host: "", container: "", protocol: "tcp" }] }));
+    expect(parse(applyFormChanges(withRow, base, next)).services.app.ports).toEqual(["80:80"]);
+  });
+
+  test("deleting the form's only row keeps a row added by hand; with none, the key goes", () => {
+    const yaml = "services:\n  app:\n    image: nginx\n    ports:\n      - \"80:80\"\n";
+    const base = snapshot(yaml);
+    const next = editService(base, "app", f => ({ ...f, ports: [] }));
+    const handAdded = yaml + "      - \"443:443\"\n";
+    expect(parse(applyFormChanges(handAdded, base, next)).services.app.ports).toEqual(["443:443"]);
+    expect(parse(applyFormChanges(yaml, base, next)).services.app.ports).toBeUndefined();
+  });
+});

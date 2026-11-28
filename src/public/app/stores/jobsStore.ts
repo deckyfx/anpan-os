@@ -107,10 +107,15 @@ export const useJobsStore = create<JobsState>((set, get) => {
    * One read per job at a time. A watched job with a long log would otherwise start a full
    * read for every line streamed before the first read returned; those requests now fold
    * into a single follow-up read, which also covers any gap they reported.
+   *
+   * `fresh` starts a new read even with one in flight, which it supersedes: after a
+   * reconnect, a read sent over the old connection may be stuck, and the log must not wait
+   * for it. The old read stops after its answer, and that answer only lands if it still
+   * reaches further than what is held, so it cannot undo newer lines.
    */
-  const refetch = async (id: string) => {
+  const refetch = async (id: string, fresh = false) => {
     const inFlight = pending.get(id);
-    if (inFlight) { inFlight.again = true; return; }
+    if (inFlight && !fresh) { inFlight.again = true; return; }
     const state = { again: false };
     pending.set(id, state);
     try {
@@ -123,9 +128,9 @@ export const useJobsStore = create<JobsState>((set, get) => {
           if (held && log.firstSeq + log.lines.length < held.firstSeq + held.lines.length) return {};
           return { logs: { ...s.logs, [id]: log } };
         });
-      } while (state.again && watchers.has(id));
+      } while (state.again && watchers.has(id) && pending.get(id) === state);
     } finally {
-      pending.delete(id);
+      if (pending.get(id) === state) pending.delete(id);
     }
   };
 
@@ -168,7 +173,7 @@ export const useJobsStore = create<JobsState>((set, get) => {
                 // Jobs that ended while disconnected still need their side effects.
                 for (const j of msg.jobs) if (j.status !== "running" && get().jobs[j.id]?.status === "running") onSettled(j);
                 set({ jobs });
-                for (const id of watchers.keys()) void refetch(id);
+                for (const id of watchers.keys()) void refetch(id, true);
                 break;
               }
               case "job":

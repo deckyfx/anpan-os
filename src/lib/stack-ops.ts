@@ -14,17 +14,19 @@
  * mid-install left a stack with neither.
  */
 import { join, dirname } from "node:path";
-import { chown, mkdir, rm, stat } from "node:fs/promises";
+import { chown, mkdir, rm, rmdir, stat } from "node:fs/promises";
 import { parse } from "yaml";
 import { config } from "../config";
 import { bins } from "./commands";
-import { DockerClient } from "./docker";
+import { DockerClient, normalizeComposePath } from "./docker";
 import { JobError, processRunner, type JobContext } from "./jobs";
 import { withPlatformDefaults, envValue } from "./app-env";
 import { resolveWithin } from "./path-guard";
 import { describeConflicts, findPortConflicts, publishedPorts } from "./port-check";
 import { StackStore } from "../stores/stack-store";
 import { CASAOS_APPS_DIR } from "./platform";
+import { COMPOSE_FILE, composeCommand } from "./compose-cmd";
+import { PROJECT_NAME_RE } from "../constants/stack";
 import { invalidateOriginCache } from "../plugins/routeDocker";
 import { buildComposeSourceReport, adoptComposeFile, findOrphanServices } from "./compose-source";
 
@@ -55,8 +57,6 @@ export interface Refusal {
   status: 404 | 409 | 422 | 503;
   error:  string;
 }
-
-const COMPOSE_FILE = "docker-compose.yml";
 
 export function stackDir(name: string): string {
   return join(config.composeFolder, name);
@@ -114,6 +114,9 @@ export function checkComposeText(compose: string, stack?: string): Refusal | nul
  * because another install of the same name may have finished in between.
  */
 export async function checkInstall(req: DeployRequest): Promise<Refusal | null> {
+  if (!PROJECT_NAME_RE.test(req.name)) {
+    return { status: 422, error: `"${req.name}" cannot be a stack name: use lowercase letters, digits, "-" and "_", starting with a letter or digit.` };
+  }
   const bad = checkComposeText(req.compose, req.name);
   if (bad) return bad;
   if (await exists(stackDir(req.name))) {
@@ -139,19 +142,29 @@ export async function checkRedeploy(req: DeployRequest): Promise<Refusal | null>
   return null;
 }
 
-/** The start of every Compose command for `name`: the project is always the stack's name. */
-function compose(name: string): string[] {
-  return [docker(), "compose", "-p", name];
+/** The start of every Compose command for `name`; see {@link composeCommand}. */
+function compose(name: string, dir: string): string[] {
+  return composeCommand(docker(), name, dir);
 }
 
-/** `docker compose up` for `name`, with --force-recreate when containers came from another file. */
-async function composeUp(ctx: JobContext, name: string, dir: string, extra: string[] = []): Promise<void> {
-  const args = [...compose(name), "up", "-d", ...extra];
+/**
+ * `docker compose up` for `name`, with --force-recreate when containers came from another file.
+ *
+ * `onLaunch` runs just before Compose starts, after every check that could still stop it
+ * (cancellation included). A caller that must clean up after `up` knows from it that there
+ * may be something to clean.
+ */
+async function composeUp(ctx: JobContext, name: string, dir: string, extra: string[] = [], onLaunch?: () => void): Promise<void> {
+  const args = [...compose(name, dir), "up", "-d", ...extra];
   // Containers created from a different compose file keep that file's labels unless
   // recreated, which leaves the project split across two sources.
   if (!extra.includes("--force-recreate") && await DockerClient.hasComposeDrift(name, join(dir, COMPOSE_FILE))) {
     args.push("--force-recreate");
   }
+  // ctx.exec checks for cancellation and then spawns, with nothing in between; checking
+  // here first means onLaunch only runs when that check will pass.
+  ctx.throwIfCancelled();
+  onLaunch?.();
   await ctx.exec(args, dir, "docker compose up");
 }
 
@@ -160,7 +173,7 @@ async function composeUp(ctx: JobContext, name: string, dir: string, extra: stri
  * substituted, and return the resolved configuration.
  */
 async function resolveConfig(ctx: JobContext, name: string, dir: string): Promise<unknown> {
-  const out = await processRunner.capture([...compose(name), "config", "--format", "json"], { cwd: dir, signal: ctx.signal });
+  const out = await processRunner.capture([...compose(name, dir), "config", "--format", "json"], { cwd: dir, signal: ctx.signal });
   ctx.throwIfCancelled();
   if (out.code !== 0) {
     const detail = out.stderr.trim().split("\n").slice(-3).join(" ");
@@ -174,16 +187,18 @@ async function resolveConfig(ctx: JobContext, name: string, dir: string): Promis
 }
 
 /**
- * The user and group the stack's files should belong to: `PUID`/`PGID` from its `.env` when
- * set there, else `[apps]` in config.toml. Those are the values Compose gives the services
- * that ask for them.
+ * The user and group the stack's files should belong to: the `PUID`/`PGID` Compose gives
+ * the services that ask for them, else `[apps]` in config.toml.
+ *
+ * Compose takes a variable from its own environment before `.env`, and it runs with
+ * anpan-os's environment. So a `PUID` anpan-os was started with wins over the stack's
+ * `.env`, here as in Compose. A value that is not a plain number (empty, say) falls back.
  */
-export function ownerFor(env: string): { puid: number; pgid: number } {
+export function ownerFor(env: string, shell: Record<string, string | undefined> = process.env): { puid: number; pgid: number } {
   const fallback = config.appIds;
   const read = (key: string, dflt: number) => {
-    const raw = envValue(env, key);
-    const n = raw === null ? NaN : Number(raw);
-    return Number.isInteger(n) && n >= 0 ? n : dflt;
+    const raw = shell[key] ?? envValue(env, key);
+    return raw !== null && /^\d+$/.test(raw.trim()) ? Number(raw.trim()) : dflt;
   };
   return { puid: read("PUID", fallback.puid), pgid: read("PGID", fallback.pgid) };
 }
@@ -196,8 +211,13 @@ export function ownerFor(env: string): { puid: number; pgid: number } {
  * created, and only when the path stays there through every symlink on the way; anywhere
  * else on the host is the user's business. A bind with `create_host_path: false` is left
  * alone, as Compose would leave it.
+ *
+ * Every folder created is pushed onto `created`, deepest first, as it is made, so a failed
+ * install can remove them again even when this throws part way.
  */
-async function prepareDataFolders(ctx: JobContext, resolved: unknown, owner: { puid: number; pgid: number }): Promise<void> {
+async function prepareDataFolders(
+  ctx: JobContext, resolved: unknown, owner: { puid: number; pgid: number }, created: string[],
+): Promise<void> {
   const root = config.appDataRoot;
   const services = (resolved as { services?: Record<string, { volumes?: unknown[] }> } | null)?.services ?? {};
   const sources = new Set<string>();
@@ -223,12 +243,30 @@ async function prepareDataFolders(ctx: JobContext, resolved: unknown, owner: { p
     }
     // The folders this creates: from the source up to the first one that already exists,
     // never above the data root. Only those change owner.
-    const created: string[] = [];
-    for (let dir = source; dir.startsWith(`${root}/`) && !(await exists(dir)); dir = dirname(dir)) created.push(dir);
-    await mkdir(source, { recursive: true });
-    if (asRoot) for (const dir of created) await chown(dir, owner.puid, owner.pgid).catch(() => {});
+    const missing: string[] = [];
+    for (let dir = source; dir.startsWith(`${root}/`) && !(await exists(dir)); dir = dirname(dir)) missing.push(dir);
+    // Top down, one at a time, so `created` only ever names folders this made.
+    for (const dir of [...missing].reverse()) {
+      await mkdir(dir);
+      created.unshift(dir);
+      if (asRoot) await chown(dir, owner.puid, owner.pgid).catch(() => {});
+    }
     ctx.log(`Created ${source}${asRoot ? ` (owner ${owner.puid}:${owner.pgid})` : ""}`);
   }
+}
+
+/** The metadata a stack row holds, without its key and timestamp: what an undo puts back. */
+type RowSnapshot = Omit<NonNullable<Awaited<ReturnType<typeof StackStore.findById>>>, "id" | "updatedAt">;
+
+/** How far an install got, so a failure undoes exactly that. */
+interface InstallProgress {
+  folder: boolean;
+  /** Bind folders under the data root this install made, deepest first. */
+  dataDirs: string[];
+  /** Whether `claim` wrote the row, and what the row was before (null: there was none). */
+  row: { wrote: boolean; before: RowSnapshot | null };
+  /** Whether `docker compose up` was launched; set only once nothing can stop it first. */
+  up: boolean;
 }
 
 /**
@@ -238,8 +276,9 @@ async function prepareDataFolders(ctx: JobContext, resolved: unknown, owner: { p
  * (relative paths and `env_file:` resolve there).
  *
  * When something fails:
- * - A redeploy whose check fails restores the previous files. One that fails later keeps
- *   its new files, which are what the user is trying to make work.
+ * - A redeploy that fails writing or checking its files restores the previous ones. One that
+ *   fails later keeps its new files, which passed the checks and are what the user is trying
+ *   to make work.
  * - An install undoes everything it did, so pressing Install again works. Otherwise the
  *   folder and row it made would answer "already exists" for a stack that never started.
  */
@@ -258,8 +297,7 @@ export async function runDeploy(ctx: JobContext, mode: "install" | "redeploy", r
   const previous = mode === "redeploy"
     ? { compose: await readIfExists(composePath), env: await readIfExists(envPath) }
     : null;
-  /** How far an install got, so a failure undoes exactly that. */
-  const done = { folder: false, row: false, up: false };
+  const done: InstallProgress = { folder: false, dataDirs: [], row: { wrote: false, before: null }, up: false };
 
   try {
     ctx.step("Writing files");
@@ -271,13 +309,16 @@ export async function runDeploy(ctx: JobContext, mode: "install" | "redeploy", r
     }
     const baseEnv = req.env ?? previous?.env ?? "";
     const { env, added } = withPlatformDefaults(baseEnv, req.compose, req.name);
-    await Bun.write(composePath, req.compose);
-    // An install with nothing to put in .env writes none; a redeploy that had one updates it.
-    if (env || (previous && previous.env !== null)) await Bun.write(envPath, env);
-    if (added.length > 0) ctx.log(`Added to .env: ${added.join(", ")}`);
 
     let resolved: unknown;
     try {
+      // Inside the restore boundary: a redeploy whose .env write fails after the compose
+      // write must not leave the new, unchecked compose file beside the old .env.
+      await Bun.write(composePath, req.compose);
+      // An install with nothing to put in .env writes none; a redeploy that had one updates it.
+      if (env || (previous && previous.env !== null)) await Bun.write(envPath, env);
+      if (added.length > 0) ctx.log(`Added to .env: ${added.join(", ")}`);
+
       ctx.step("Checking the compose file");
       resolved = await resolveConfig(ctx, req.name, dir);
 
@@ -294,27 +335,38 @@ export async function runDeploy(ctx: JobContext, mode: "install" | "redeploy", r
       throw err;
     }
 
-    await prepareDataFolders(ctx, resolved, ownerFor(env));
+    await prepareDataFolders(ctx, resolved, ownerFor(env), done.dataDirs);
 
     // The row is written before `up`, with managed set, so the stack is anpan-os's from the
-    // moment its containers exist, whatever the home page's poll sees first.
+    // moment its containers exist, whatever the home page's poll sees first. The row as it
+    // was is kept first: the poll may have made one, and an undo must not delete or keep
+    // overwriting what it did not create.
+    if (mode === "install") done.row.before = snapshotOf(await StackStore.findById(req.name));
     await StackStore.claim(req.name, req.meta ?? {});
-    done.row = true;
+    done.row.wrote = true;
     invalidateOriginCache(req.name);
 
     ctx.step("Starting containers");
-    done.up = true;
-    await composeUp(ctx, req.name, dir);
+    await composeUp(ctx, req.name, dir, [], () => { done.up = true; });
   } catch (err) {
     if (mode === "install" && done.folder) await undoInstall(ctx, req.name, dir, done);
     throw err;
   }
 }
 
+function snapshotOf(row: Awaited<ReturnType<typeof StackStore.findById>>): RowSnapshot | null {
+  if (!row) return null;
+  const { id: _id, updatedAt: _at, ...rest } = row;
+  return rest;
+}
+
 /**
  * Undo a failed install: whatever containers and networks `up` got as far as making, then
- * the stack folder and its row. Named volumes stay (`down` without -v). `done` says which
- * of those the install reached.
+ * the stack folder, the empty data folders it made, and its row. Named volumes stay (`down`
+ * without -v). `done` says which of those the install reached.
+ *
+ * The row goes only if this install created it. One that was there before (the stack poll
+ * makes rows for what Docker shows) gets its earlier fields and `managed` back.
  *
  * When `down` itself fails, containers may remain, so the folder and row are kept: they
  * are what deleting the stack from the dashboard, or a retry of `down`, needs.
@@ -322,10 +374,10 @@ export async function runDeploy(ctx: JobContext, mode: "install" | "redeploy", r
  * Runs even when the job was cancelled, so it does not use the job's own signal. It has a
  * time limit of its own instead: a Docker that hangs must not keep the job running forever.
  */
-async function undoInstall(ctx: JobContext, name: string, dir: string, done: { row: boolean; up: boolean }): Promise<void> {
+async function undoInstall(ctx: JobContext, name: string, dir: string, done: InstallProgress): Promise<void> {
   ctx.log("Install failed: removing what it created");
   if (done.up) {
-    const code = await processRunner.run([...compose(name), "down", "--remove-orphans"], {
+    const code = await processRunner.run([...compose(name, dir), "down", "--remove-orphans"], {
       cwd: dir, signal: AbortSignal.timeout(2 * 60_000), onLine: line => ctx.log(line),
     }).catch(() => -1);
     if (code !== 0) {
@@ -335,8 +387,11 @@ async function undoInstall(ctx: JobContext, name: string, dir: string, done: { r
     }
   }
   await rm(dir, { recursive: true, force: true });
-  if (done.row) {
-    await StackStore.delete(name);
+  // Deepest first, and only while empty: a folder something wrote into stays.
+  for (const created of done.dataDirs) await rmdir(created).catch(() => {});
+  if (done.row.wrote) {
+    if (done.row.before) await StackStore.updateMeta(name, done.row.before);
+    else await StackStore.delete(name);
     invalidateOriginCache(name);
   }
 }
@@ -351,7 +406,7 @@ export async function updatableDir(name: string): Promise<string | null> {
 /** Pull a stack's images and recreate what changed. */
 export async function runUpdate(ctx: JobContext, name: string, dir: string): Promise<void> {
   ctx.step(`Pulling images for ${name}`);
-  await ctx.exec([...compose(name), "pull"], dir, "docker compose pull");
+  await ctx.exec([...compose(name, dir), "pull"], dir, "docker compose pull");
   ctx.step(`Restarting ${name} on the new images`);
   await composeUp(ctx, name, dir);
 }
@@ -472,7 +527,8 @@ export async function runMigrate(ctx: JobContext, name: string, raw: string, sou
  */
 async function undoMigrate(ctx: JobContext, name: string, target: string, before: string | null, hadFolder: boolean): Promise<void> {
   const sources = await DockerClient.listProjectComposeSources(name);
-  const moved = !sources.ok || sources.data.some(c => c.configFiles.includes(target));
+  const copy = normalizeComposePath(target);
+  const moved = !sources.ok || sources.data.some(c => c.configFiles.map(normalizeComposePath).includes(copy));
   if (moved) {
     ctx.log(`Some containers already run from ${target}. It is kept: use Repair in System Doctor to finish moving the stack.`);
     return;

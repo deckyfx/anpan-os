@@ -29,8 +29,15 @@ afterAll(async () => {
   await rm(join(config.appDataRoot, "ops-install"), { recursive: true, force: true });
 });
 
-/** Commands the job ran, in order. */
+/** Commands the job ran, in order, without `docker` and the `-f <file>` every one passes. */
 let ran: string[] = [];
+/** The compose file each command named with -f, in order. */
+let files: string[] = [];
+function record(argv: string[]): string {
+  const f = argv.indexOf("-f");
+  if (f !== -1) files.push(argv[f + 1]!);
+  return argv.slice(1).filter((_, i) => f === -1 || (i !== f - 1 && i !== f)).join(" ");
+}
 /** What `docker compose config` answers. */
 let resolved: unknown = { services: {} };
 /** Runs at `docker compose up`, to inspect the state at that moment. */
@@ -40,15 +47,16 @@ let exitCodes: Record<string, number> = {};
 
 beforeEach(() => {
   ran = [];
+  files = [];
   resolved = { services: { web: { image: "nginx" } } };
   onUp = () => {};
   exitCodes = {};
   spies.push(spyOn(processRunner, "capture").mockImplementation(async argv => {
-    ran.push(argv.slice(1).join(" "));
+    ran.push(record(argv));
     return { code: 0, stdout: JSON.stringify(resolved), stderr: "" };
   }));
   spies.push(spyOn(processRunner, "run").mockImplementation(async (argv, opts) => {
-    const cmd = argv.slice(1).join(" ");
+    const cmd = record(argv);
     ran.push(cmd);
     if (/^compose -p \S+ up/.test(cmd)) await onUp(opts.cwd);
     const code = Object.entries(exitCodes).find(([prefix]) => cmd.startsWith(prefix))?.[1] ?? 0;
@@ -102,6 +110,8 @@ describe("install", () => {
     expect(atUp!.env).toStartWith("A=1\n");
     expect(atUp!.env).toContain(`TZ=${config.appTimeZone}`);   // the file uses $TZ
     expect(ran).toEqual([`compose -p ${name} config --format json`, `compose -p ${name} up -d`]);
+    // Every command names the stack's own file, so Compose cannot pick a compose.yaml beside it.
+    expect(files).toEqual([join(stackDir(name), "docker-compose.yml"), join(stackDir(name), "docker-compose.yml")]);
   });
 
   test("a port conflict stops before up and removes what the install wrote", async () => {
@@ -195,8 +205,67 @@ describe("install", () => {
   });
 
   test("folders are owned by the PUID and PGID in the stack's .env, else the configured ones", () => {
-    expect(ownerFor("PUID=2001\nPGID: 2002\n")).toEqual({ puid: 2001, pgid: 2002 });
-    expect(ownerFor("PUID=abc\n")).toEqual(config.appIds);
+    expect(ownerFor("PUID=2001\nPGID: 2002\n", {})).toEqual({ puid: 2001, pgid: 2002 });
+    expect(ownerFor("PUID=abc\n", {})).toEqual(config.appIds);
+    expect(ownerFor("PUID=2001 # app user\nPGID='2002'\n", {})).toEqual({ puid: 2001, pgid: 2002 });
+    expect(ownerFor("PUID=\n", {})).toEqual(config.appIds);     // empty is not uid 0
+  });
+
+  test("a PUID anpan-os runs with wins over .env, as it does in Compose", () => {
+    expect(ownerFor("PUID=1000\nPGID=1000\n", { PUID: "2000" })).toEqual({ puid: 2000, pgid: 1000 });
+  });
+
+  test("an install name Compose cannot use as a project name is refused before anything runs", async () => {
+    for (const bad of ["Photos", "-photos", "_x"]) {
+      expect((await checkInstall({ name: bad, compose: COMPOSE }))?.status).toBe(422);
+    }
+    expect(await checkInstall({ name: "photos-2", compose: COMPOSE })).toBeNull();
+  });
+
+  test("an undone install puts back a row that was there before, instead of deleting it", async () => {
+    await StackStore.upsert({ id: name, title: "Found by the poll", icon: "box" });
+    exitCodes = { [`compose -p ${name} up`]: 18 };
+    const { job } = await runJob(ctx => runDeploy(ctx, "install", { name, compose: COMPOSE, meta: { title: "Ops" } }));
+    expect(job.status).toBe("failed");
+    const row = await StackStore.findById(name);
+    expect(row?.title).toBe("Found by the poll");
+    expect(row?.icon).toBe("box");
+    expect(row?.managed).toBe(false);
+  });
+
+  test("an undone install removes the empty data folders it made, and keeps the rest", async () => {
+    const appRoot = join(config.appDataRoot, name);
+    await rm(appRoot, { recursive: true, force: true });
+    const keep = join(config.appDataRoot, "ops-existing");
+    await mkdir(keep, { recursive: true });
+    resolved = { services: { web: { volumes: [
+      { type: "bind", source: join(appRoot, "config"), target: "/config" },
+      { type: "bind", source: join(appRoot, "data"), target: "/data" },
+      { type: "bind", source: join(keep, "sub"), target: "/sub" },
+    ] } } };
+    // Something writes into one folder before up fails: that one, and its parent, stay.
+    onUp = async () => { await writeFile(join(appRoot, "data", "written.db"), "x"); };
+    exitCodes = { [`compose -p ${name} up`]: 18 };
+    const { job } = await runJob(ctx => runDeploy(ctx, "install", { name, compose: COMPOSE }));
+    expect(job.status).toBe("failed");
+    expect(await exists(join(appRoot, "config"))).toBe(false);
+    expect(await exists(join(appRoot, "data", "written.db"))).toBe(true);
+    expect(await exists(join(keep, "sub"))).toBe(false);
+    expect(await exists(keep)).toBe(true);     // it was there before the install
+    await rm(appRoot, { recursive: true, force: true });
+    await rm(keep, { recursive: true, force: true });
+  });
+
+  test("cancelled before up launches: no down is run, and the install is undone", async () => {
+    let cancel = () => {};
+    spies.push(spyOn(DockerClient, "hasComposeDrift").mockImplementation(async () => { cancel(); return false; }));
+    const started = manager.start({ kind: "install", title: "test" }, ctx => runDeploy(ctx, "install", { name, compose: COMPOSE }));
+    if (!started.ok) throw new Error("not started");
+    cancel = () => manager.cancel(started.job.id);
+    for (let i = 0; i < 400 && manager.get(started.job.id)!.job.status === "running"; i++) await Bun.sleep(5);
+    expect(manager.get(started.job.id)!.job.status).toBe("cancelled");
+    expect(ran.some(c => c.includes(" up") || c.includes(" down"))).toBe(false);
+    expect(await exists(stackDir(name))).toBe(false);
   });
 
   test("checkInstall refuses a name that is taken, and a file with no services", async () => {
@@ -270,7 +339,7 @@ describe("update-all", () => {
   test("carries on past a failure and names every stack that did not update", async () => {
     let pulls = 0;
     spies.push(spyOn(processRunner, "run").mockImplementation(async (argv, opts) => {
-      const cmd = argv.slice(1).join(" ");
+      const cmd = record(argv);
       ran.push(`${opts.cwd.split("/").pop()}: ${cmd}`);
       return cmd.endsWith(" pull") && ++pulls === 1 ? 1 : 0;
     }));

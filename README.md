@@ -24,7 +24,7 @@ Manage Docker Compose stacks, browse files, monitor system resources, and instal
 - **Compose dashboard** — install, start, stop, restart, and delete stacks
 - **Guided Compose Editor** — Monaco-based YAML editor with syntax highlighting, starter templates, and in-place editing
 - **Installs that finish without you** — installs, deploys, updates and migrations run as server jobs: close the tab and they carry on, and the **Jobs** menu in the top bar shows them and their logs again
-- **Checked before it starts** — the compose file, `.env` and tile settings are saved before the first start; a port another app or container already uses stops the install before anything runs; a failed install removes its stack folder, its containers and its record (named volumes stay)
+- **Checked before it starts** — the compose file, `.env` and tile settings are saved before the first start; a port another app or container already uses stops the install before anything runs; a failed install removes its stack folder, its containers, the empty data folders it made and its record (named volumes stay); if Docker cannot remove the containers, the folder and record are kept so that deleting the stack from the dashboard cleans up
 - **Live container logs** — per-tab streaming log viewer for running containers
 - **Pull & update** — one-click image pull and stack redeploy, or update every outdated stack in one job
 - **Compose source doctor** — reports which compose file each container was actually created from, flagging stacks left anchored to a foreign or deleted path
