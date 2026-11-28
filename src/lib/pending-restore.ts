@@ -55,29 +55,41 @@ export function applyPendingRestore(runtimeDir: string): string[] {
   if (!existsSync(join(staged, READY_MARKER))) return [];
   const plan = SYSTEM_ENTRIES.filter(entry => existsSync(join(staged, entry)));
 
-  // 1. Move the live entries aside.
-  for (const entry of plan) {
-    for (const path of liveGroup(runtimeDir, entry)) {
-      if (existsSync(path + ASIDE)) rmSync(path, { recursive: true, force: true }); // the original is already aside
-      else if (existsSync(path)) renameSync(path, path + ASIDE);
-    }
-  }
-
-  // 2. Rename the staged entries in; on a failure, undo this run.
-  const done: string[] = [];
+  // What this run moved, so a failure undoes exactly that, and never takes an aside copy an
+  // interrupted earlier start left (the original) for one of its own.
+  const movedAside: string[] = [];
+  const renamedIn: string[] = [];
   try {
-    for (const entry of plan) {
-      renameSync(join(staged, entry), join(runtimeDir, entry));
-      done.push(entry);
-    }
-  } catch (err) {
-    for (const entry of done) renameSync(join(runtimeDir, entry), join(staged, entry));
+    // 1. Move the live entries aside.
     for (const entry of plan) {
       for (const path of liveGroup(runtimeDir, entry)) {
-        if (!existsSync(path + ASIDE)) continue;
+        if (existsSync(path + ASIDE)) { rmSync(path, { recursive: true, force: true }); continue; } // the original is already aside
+        if (!existsSync(path)) continue;
+        renameSync(path, path + ASIDE);
+        movedAside.push(path);
+      }
+    }
+    // 2. Rename the staged entries in.
+    for (const entry of plan) {
+      renameSync(join(staged, entry), join(runtimeDir, entry));
+      renamedIn.push(entry);
+    }
+  } catch (err) {
+    // Undo this run, each step on its own: one that fails is reported and the rest still
+    // run. The original error is what is thrown.
+    const left: string[] = [];
+    const attempt = (what: string, step: () => void) => {
+      try { step(); } catch (e) { left.push(`${what}: ${e instanceof Error ? e.message : String(e)}`); }
+    };
+    for (const entry of renamedIn) attempt(`move ${entry} back to the staging`, () => renameSync(join(runtimeDir, entry), join(staged, entry)));
+    for (const path of movedAside) {
+      attempt(`put ${path} back from ${path + ASIDE}`, () => {
         rmSync(path, { recursive: true, force: true });
         renameSync(path + ASIDE, path);
-      }
+      });
+    }
+    if (left.length > 0) {
+      console.error(`   Could not undo everything; the files moved aside end in ${ASIDE}:\n   - ${left.join("\n   - ")}`);
     }
     throw err;
   }

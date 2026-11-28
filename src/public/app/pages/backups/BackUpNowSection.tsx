@@ -68,7 +68,8 @@ export function BackUpNowSection({ busy, onStart }: {
       title="Back up now"
       description="Apps are stopped while their files are copied and started again after, unless set to copy while running."
       actions={
-        <button type="button" onClick={() => void start()} disabled={busy || starting || nothing} className={PRIMARY_BUTTON}>
+        // Not while a "copy while running" change is being saved: the backup reads it.
+        <button type="button" onClick={() => void start()} disabled={busy || starting || nothing || saving !== null} className={PRIMARY_BUTTON}>
           {starting ? <Loader2 size={12} className="animate-spin" /> : <Archive size={12} />}
           Back up now
         </button>

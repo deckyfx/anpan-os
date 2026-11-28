@@ -85,7 +85,7 @@ export function BackupsPage({ onNavigate }: { onNavigate: (path: string) => void
       useToastStore.getState().push((error.value as { error?: string } | null)?.error ?? "Could not restart", "error");
       return;
     }
-    if (!(data as { restarted?: boolean }).restarted) {
+    if (!(data as { requested?: boolean }).requested) {
       setRestarting(false);
       useToastStore.getState().push("Restart anpan-os yourself to apply the restore: it is not running as the installed service", "error");
       return;

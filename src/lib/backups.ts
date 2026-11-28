@@ -29,6 +29,7 @@ import { config } from "../config";
 import { envConfig } from "../env-config";
 import { snapshotDatabase } from "../db";
 import { StackStore } from "../stores/stack-store";
+import { DockerClient } from "./docker";
 import type { NewStack } from "../db/schema";
 import { bins } from "./commands";
 import { composeCommand, COMPOSE_FILE } from "./compose-cmd";
@@ -54,11 +55,15 @@ export interface BackupApp {
   origin:     "anpan" | "casaos";
   /** Copied while running rather than stopped for the copy. */
   live:       boolean;
-  /** Running when backed up; a restore starts it again only then. */
-  wasRunning: boolean;
+  /** The services running when backed up; a restore starts these again, and only these. */
+  running:    string[];
   /** The stack folder's archive, relative to the backup folder. */
   stack:      string;
-  /** Data folders: `dir` is the folder's name under the data root. */
+  /**
+   * Data folders: `dir` is the folder's path under the data root, usually the app's own
+   * folder there (`jellyfin`), or a folder deeper down when the app shares its first-level
+   * folder with another app (`shared/jellyfin`).
+   */
   data:       { dir: string; archive: string }[];
   /** The app's row (tile settings), without id and timestamp; null when it had none. */
   row:        Record<string, unknown> | null;
@@ -139,7 +144,10 @@ async function freeId(id: string): Promise<string> {
 
 // ─── Manifest ───────────────────────────────────────────────────────────────
 
-const DATA_DIR_RE = /^[^/\\\0]+$/;
+/** One path segment of a data folder: not empty, not `.` or `..`, no backslash or NUL. */
+const SEGMENT_RE = /^[^/\\\0]+$/;
+/** A Compose service name. */
+const SERVICE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const DATA_ARCHIVE_RE = /^data-\d{1,4}\.tar\.gz$/;
 
 /** The stack archive's name for app `name`; nothing else is accepted in its place. */
@@ -149,6 +157,17 @@ const isDataArchive = (name: string, archive: string) => {
   const prefix = `apps/${name}/`;
   return archive.startsWith(prefix) && DATA_ARCHIVE_RE.test(archive.slice(prefix.length));
 };
+
+/** Whether `dir` is a relative path of plain segments: `jellyfin` or `shared/jellyfin`. */
+function isDataDir(dir: string): boolean {
+  const parts = dir.split("/");
+  return parts.length <= 16 && parts.every(p => SEGMENT_RE.test(p) && p !== "." && p !== "..");
+}
+
+/** Whether `a` is `b` or inside it, as `/`-separated relative paths. */
+function nestedIn(a: string, b: string): boolean {
+  return a === b || a.startsWith(`${b}/`);
+}
 
 /**
  * Read a manifest, checking every field. Null when it is not one this code wrote.
@@ -176,27 +195,25 @@ export function parseManifest(text: string): BackupManifest | null {
     if (!str(app.name) || !STACK_NAME_RE.test(app.name) || names.has(app.name)) return null;
     names.add(app.name);
     if (app.origin !== "anpan" && app.origin !== "casaos") return null;
-    if (typeof app.live !== "boolean" || typeof app.wasRunning !== "boolean") return null;
+    if (typeof app.live !== "boolean") return null;
+    if (!Array.isArray(app.running) || !app.running.every(r => str(r) && SERVICE_RE.test(r))) return null;
     if (app.stack !== stackArchive(app.name)) return null;
     if (!Array.isArray(app.data)) return null;
     const data: BackupApp["data"] = [];
-    const dirs = new Set<string>();
     for (const d of app.data as unknown[]) {
       const entry = d as Record<string, unknown> | null;
       if (!entry || !str(entry.dir) || !str(entry.archive)) return null;
-      if (!DATA_DIR_RE.test(entry.dir) || entry.dir === "." || entry.dir === "..") return null;
-      if (!isDataArchive(app.name, entry.archive)) return null;
-      // One archive per folder: two unpacked into the same folder could have the first
-      // plant a link that the second then writes through.
-      if (dirs.has(entry.dir)) return null;
-      dirs.add(entry.dir);
+      if (!isDataDir(entry.dir) || !isDataArchive(app.name, entry.archive)) return null;
+      // No folder in or at another: two archives unpacked into one tree could have the
+      // first plant a link that the second then writes through.
+      if (data.some(o => nestedIn(o.dir, entry.dir as string) || nestedIn(entry.dir as string, o.dir))) return null;
       data.push({ dir: entry.dir, archive: entry.archive });
     }
     const row = app.row === null || (typeof app.row === "object" && !Array.isArray(app.row))
       ? app.row as Record<string, unknown> | null
       : undefined;
     if (row === undefined) return null;
-    apps.push({ name: app.name, origin: app.origin, live: app.live, wasRunning: app.wasRunning, stack: app.stack, data, row });
+    apps.push({ name: app.name, origin: app.origin, live: app.live, running: app.running as string[], stack: app.stack, data, row });
   }
   return {
     format: FORMAT, id: m.id, createdAt: m.createdAt, version: m.version, hostname: m.hostname,
@@ -241,7 +258,7 @@ export async function listBackups(): Promise<BackupSummary[]> {
     out.push({
       id, createdAt: m.createdAt, version: m.version, hostname: m.hostname, dataRoot: m.dataRoot,
       system: m.system !== null,
-      apps: m.apps.map(a => ({ name: a.name, live: a.live, wasRunning: a.wasRunning, dataDirs: a.data.map(d => d.dir) })),
+      apps: m.apps.map(a => ({ name: a.name, live: a.live, wasRunning: a.running.length > 0, dataDirs: a.data.map(d => d.dir) })),
       size: sizes.reduce((sum, n) => sum + n, 0),
     });
   }
@@ -293,9 +310,31 @@ function within(child: string, parent: string): boolean {
 }
 
 /**
- * The data folders of a stack, read from Compose's resolved configuration: the first
- * folder under the data root of each bind source there. Everything else the stack mounts
- * is logged as not included.
+ * Bind mounts of every container but `stack`'s, by source, from Docker: what other apps
+ * use, so one app's backup and restore leave it alone. Empty when Docker cannot be read.
+ */
+async function otherAppsBinds(stack: string): Promise<string[]> {
+  const containers = await DockerClient.listContainers();
+  if (!containers.ok) return [];
+  const out: string[] = [];
+  const foreign = containers.data.filter(c => (c.Labels?.["com.docker.compose.project"] ?? "") !== stack);
+  for (const r of await Promise.all(foreign.map(c => DockerClient.inspectContainer(c.Id)))) {
+    if (!r.ok) continue;
+    for (const m of r.data.Mounts) if (m.Type === "bind") out.push(resolve(m.Source));
+  }
+  return out;
+}
+
+/**
+ * The data folders of a stack, read from Compose's resolved configuration.
+ *
+ * Usually the app's first-level folder under the data root, holding every bind source of
+ * the app there (`jellyfin` for `jellyfin/config` and `jellyfin/cache`). When another app
+ * mounts something inside that folder too, it is not this app's alone: then only this
+ * app's own bind sources there are taken, so that restoring this app never replaces the
+ * other's data, and a cold copy does not take files the other is still writing.
+ *
+ * Everything else the stack mounts is logged as not included.
  */
 async function dataFolders(ctx: JobContext, name: string, dir: string): Promise<string[]> {
   const out = await processRunner.capture([...composeCommand(docker(), name, dir), "config", "--format", "json"], { cwd: dir, signal: ctx.signal });
@@ -308,7 +347,7 @@ async function dataFolders(ctx: JobContext, name: string, dir: string): Promise<
   try { resolved = JSON.parse(out.stdout); } catch { throw new JobError(`Could not read ${name}'s compose configuration`); }
 
   const root = config.appDataRoot;
-  const folders = new Set<string>();
+  const sources: string[] = [];
   const skipped = new Set<string>();
   for (const service of Object.values(resolved.services ?? {})) {
     for (const v of service.volumes ?? []) {
@@ -317,26 +356,36 @@ async function dataFolders(ctx: JobContext, name: string, dir: string): Promise<
       if (v.type !== "bind") continue;
       const source = resolve(v.source);
       if (within(source, dir)) continue; // in the stack folder's own archive
-      if (source !== root && within(source, root)) {
-        folders.add(join(root, relative(root, source).split(sep)[0]!));
-      } else {
-        skipped.add(source);
-      }
+      if (source !== root && within(source, root)) sources.push(source);
+      else skipped.add(`${source} (outside ${root})`);
     }
   }
-  for (const what of [...skipped].sort()) ctx.log(`  Not included: ${what} (outside ${root})`);
 
-  // Only folders that are there: a bind to a path Docker has not created yet holds nothing.
-  // And only folders that are under the data root once links are followed: tar would read
-  // through a link to another drive, and a restore would put a real folder in its place.
+  const others = sources.length > 0 ? await otherAppsBinds(name) : [];
+  const candidates = new Set<string>();
+  for (const source of sources) {
+    const first = join(root, relative(root, source).split(sep)[0]!);
+    const shared = others.some(o => within(o, first));
+    if (!shared) { candidates.add(first); continue; }
+    // Shared with another app: this app's own folder only. A single file cannot be
+    // replaced on its own by a restore, so it is left out.
+    if ((await stat(source).catch(() => null))?.isDirectory()) candidates.add(source);
+    else skipped.add(`${source} (a single file in ${first}, which other apps use too)`);
+  }
+
+  // Only folders that are there (a bind to a path Docker has not created yet holds
+  // nothing), outermost only, and under the data root once links are followed: tar would
+  // read through a link to another drive, and a restore would put a real folder in its place.
   const realRoot = await realpath(root).catch(() => root);
   const present: string[] = [];
-  for (const f of [...folders].sort()) {
+  for (const f of [...candidates].sort()) {
+    if (present.some(p => within(f, p))) continue;
     if (!(await stat(f).catch(() => null))?.isDirectory()) continue;
     const real = await realpath(f).catch(() => f);
     if (within(real, realRoot)) present.push(f);
-    else ctx.log(`  Not included: ${f} (a link to ${real}, outside ${root})`);
+    else skipped.add(`${f} (a link to ${real}, outside ${root})`);
   }
+  for (const what of [...skipped].sort()) ctx.log(`  Not included: ${what}`);
   return present;
 }
 
@@ -352,19 +401,27 @@ async function runningServices(ctx: JobContext, name: string, dir: string): Prom
  * Archive the contents of `dir` into `out`. When `live`, a file that changed while it was
  * read is a warning (GNU tar's exit code 1), not a failure: that is what copying a running
  * app means, and the user chose it.
+ *
+ * The backups folder is left out when it lies inside `dir`: the copy would otherwise take
+ * every earlier backup, and the one being written.
  */
 async function archive(ctx: JobContext, dir: string, out: string, live: boolean): Promise<void> {
   ctx.throwIfCancelled();
-  const code = await processRunner.run([tar(), "-czf", out, "--numeric-owner", "-C", dir, "."], {
-    cwd: dir, signal: ctx.signal, onLine: line => ctx.log(line),
-  });
+  const argv = [tar(), "-czf", out, "--numeric-owner"];
+  if (within(folder(), dir) && folder() !== dir) argv.push(`--exclude=./${relative(dir, folder())}`);
+  argv.push("-C", dir, ".");
+  const code = await processRunner.run(argv, { cwd: dir, signal: ctx.signal, onLine: line => ctx.log(line) });
   ctx.throwIfCancelled();
   if (code === 1 && live) { ctx.log(`  Some files in ${dir} changed while they were copied`); return; }
   if (code !== 0) throw new JobError(`Could not archive ${dir} (tar: exit code ${code})`);
 }
 
-/** Back up one app into `<partial>/apps/<name>/`. */
-async function backUpApp(ctx: JobContext, name: string, partial: string): Promise<BackupApp> {
+/**
+ * Back up one app into `<partial>/apps/<name>/`. `restartFailed` is set when the app was
+ * stopped for the copy and could not be started again: the copy is good, but the job must
+ * say the app is down.
+ */
+async function backUpApp(ctx: JobContext, name: string, partial: string): Promise<{ entry: BackupApp; restartFailed: boolean }> {
   const found = await appFolder(name);
   if (!found) throw new JobError(`${name} has no compose file`);
   const { dir, origin } = found;
@@ -373,13 +430,11 @@ async function backUpApp(ctx: JobContext, name: string, partial: string): Promis
 
   const data = await dataFolders(ctx, name, dir);
   const running = await runningServices(ctx, name, dir);
-  const target = join(partial, "apps", name);
-  await mkdir(target, { recursive: true });
+  await mkdir(join(partial, "apps", name), { recursive: true });
 
   const stop = !live && running.length > 0;
-  const entry: BackupApp = {
-    name, origin, live, wasRunning: running.length > 0, stack: stackArchive(name), data: [], row: null,
-  };
+  const entry: BackupApp = { name, origin, live, running, stack: stackArchive(name), data: [], row: null };
+  let restartFailed = false;
   try {
     // Inside the try: a stop that fails or is cancelled half way may already have stopped
     // some services, and the finally starts them again.
@@ -392,7 +447,7 @@ async function backUpApp(ctx: JobContext, name: string, partial: string): Promis
       const archiveName = `apps/${name}/data-${i}.tar.gz`;
       ctx.log(`  Data: ${folder}`);
       await archive(ctx, folder, join(partial, archiveName), live);
-      entry.data.push({ dir: relative(config.appDataRoot, folder), archive: archiveName });
+      entry.data.push({ dir: relative(config.appDataRoot, folder).split(sep).join("/"), archive: archiveName });
     }
   } finally {
     if (stop) {
@@ -403,14 +458,17 @@ async function backUpApp(ctx: JobContext, name: string, partial: string): Promis
       const code = await processRunner.run([...composeCommand(docker(), name, dir), "start", ...running], {
         cwd: dir, signal: AbortSignal.timeout(5 * 60_000), onLine: line => ctx.log(line),
       }).catch(() => -1);
-      if (code !== 0) ctx.log(`  ⚠ Could not start ${name} again (docker compose start: ${code === -1 ? "did not run" : `exit code ${code}`}); start it from the dashboard`);
+      if (code !== 0) {
+        restartFailed = true;
+        ctx.log(`  ⚠ Could not start ${name} again (docker compose start: ${code === -1 ? "did not run" : `exit code ${code}`}); start it from the dashboard`);
+      }
     }
   }
   if (row) {
     const { id: _id, updatedAt: _at, ...rest } = row;
     entry.row = rest;
   }
-  return entry;
+  return { entry, restartFailed };
 }
 
 /** Archive config.toml, a database snapshot, samba.conf and certs/ into `<partial>/system.tar.gz`. */
@@ -464,11 +522,16 @@ export async function runBackup(ctx: JobContext, req: BackupRequest): Promise<st
     }
 
     const failed: string[] = [];
+    const down: string[] = [];
     for (const name of req.apps) {
       ctx.throwIfCancelled();
       ctx.step(`Backing up ${name}`);
       try {
-        const held = await ctx.withStack(name, async () => { manifest.apps.push(await backUpApp(ctx, name, partial)); });
+        const held = await ctx.withStack(name, async () => {
+          const { entry, restartFailed } = await backUpApp(ctx, name, partial);
+          manifest.apps.push(entry);
+          if (restartFailed) down.push(name);
+        });
         if (!held) { ctx.log(`  Skipped: another job is working on ${name}`); failed.push(name); }
       } catch (err) {
         if (ctx.signal.aborted) throw err;
@@ -483,7 +546,11 @@ export async function runBackup(ctx: JobContext, req: BackupRequest): Promise<st
     await writeFile(join(partial, MANIFEST), JSON.stringify(manifest, null, 2) + "\n", { mode: 0o600 });
     await rename(partial, backupPath(id));
     ctx.log(`Backup ${id} saved in ${folder()}`);
-    if (failed.length > 0) throw new JobError(`Backup ${id} saved without: ${failed.join(", ")}`);
+    const problems = [
+      failed.length > 0 ? `saved without: ${failed.join(", ")}` : null,
+      down.length > 0 ? `could not start again: ${down.join(", ")}` : null,
+    ].filter(Boolean);
+    if (problems.length > 0) throw new JobError(`Backup ${id} ${problems.join("; ")}`);
     return id;
   } catch (err) {
     await rm(partial, { recursive: true, force: true });
@@ -544,20 +611,28 @@ async function stageSystem(ctx: JobContext, backup: string, m: BackupManifest): 
     await rm(previous, { recursive: true, force: true });
     if (await exists(staged)) { await rename(staged, previous); movedPrevious = true; }
     await rename(partial, staged);
-    await rm(previous, { recursive: true, force: true });
   } catch (err) {
-    await rm(partial, { recursive: true, force: true });
-    if (movedPrevious && !(await exists(staged))) await rename(previous, staged).catch(() => {});
+    // Each step on its own, the earlier staging first; the original error is what is thrown.
+    if (movedPrevious && !(await exists(staged))) {
+      await rename(previous, staged).catch(e => ctx.log(`⚠ Could not put back the restore staged before (it is in ${previous}): ${(e as Error).message}`));
+    }
+    await rm(partial, { recursive: true, force: true }).catch(() => {});
     throw err;
   }
+  // Committed: the new staging is in place. The earlier one is only clutter now.
+  await rm(previous, { recursive: true, force: true }).catch(() => {});
   ctx.log("System settings and database staged: restart anpan-os to apply them");
 }
 
 /**
  * Restore one app: stop it if it is here, move its folder and data folders aside, unpack
- * the backup in their place, put its row back, and start it if it was running when backed
- * up. The moved-aside copies are deleted only once all of that worked; on failure the new
- * files go and the old ones are moved back.
+ * the backup in their place, put its row back, and start the services that were running
+ * when it was backed up. The moved-aside copies are deleted only once all of that worked;
+ * on failure the new files go and the old ones are moved back.
+ *
+ * Stopped, not taken down: `down` removes the containers, and with them the link to any
+ * anonymous volume, which a later `up` would replace with an empty one. `up` after the
+ * restore recreates what the restored compose file changed and keeps those volumes.
  */
 async function restoreApp(ctx: JobContext, backup: string, m: BackupManifest, app: BackupApp): Promise<void> {
   const dir = folderFor(app.name, app.origin);
@@ -584,7 +659,7 @@ async function restoreApp(ctx: JobContext, backup: string, m: BackupManifest, ap
   try {
     if (hadStack) {
       ctx.log(`  Stopping ${app.name}`);
-      await ctx.exec([...composeCommand(docker(), app.name, dir), "down"], dir, "docker compose down");
+      await ctx.exec([...composeCommand(docker(), app.name, dir), "stop"], dir, "docker compose stop");
     }
     for (const path of [dir, ...dataDirs.map(d => d.path)]) {
       if (!(await exists(path))) continue;
@@ -608,11 +683,11 @@ async function restoreApp(ctx: JobContext, backup: string, m: BackupManifest, ap
       await StackStore.restore(app.name, row);
     }
 
-    if (app.wasRunning) {
-      ctx.log(`  Starting ${app.name}`);
+    if (app.running.length > 0) {
+      ctx.log(`  Starting ${app.running.join(", ")}`);
       ctx.throwIfCancelled();
       up = true;
-      await ctx.exec([...composeCommand(docker(), app.name, dir), "up", "-d"], dir, "docker compose up");
+      await ctx.exec([...composeCommand(docker(), app.name, dir), "up", "-d", ...app.running], dir, "docker compose up");
     }
   } catch (err) {
     // Each step on its own: one that fails is reported and the rest still run, so a row
@@ -628,7 +703,7 @@ async function restoreApp(ctx: JobContext, backup: string, m: BackupManifest, ap
       });
       if (code !== 0) throw new Error(`docker compose ${args[0]}: exit code ${code}`);
     };
-    if (up) await recover("stop the restored app", () => compose(["down"]));
+    if (up) await recover("stop the restored app", () => compose(["stop"]));
     for (const path of written) await recover(`remove ${path}`, () => rm(path, { recursive: true, force: true }));
     for (const { path, moved } of aside) await recover(`move ${moved} back to ${path}`, () => rename(moved, path));
     if (rowWritten) {

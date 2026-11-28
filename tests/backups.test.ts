@@ -16,6 +16,7 @@ import {
 import { applyPendingRestore, PENDING_DIR, READY_MARKER } from "../src/lib/pending-restore";
 import { stackDir } from "../src/lib/stack-ops";
 import { StackStore } from "../src/stores/stack-store";
+import { DockerClient } from "../src/lib/docker";
 import { config } from "../src/config";
 import { envConfig } from "../src/env-config";
 
@@ -57,6 +58,8 @@ let ran: string[] = [];
 let running: string[] = [];
 /** Exit code per recorded command prefix. */
 let exitCodes: Record<string, number> = {};
+/** Bind sources of other apps' containers, as Docker reports them. */
+let otherBinds: string[] = [];
 
 function record(argv: string[]): string {
   if (argv[0]!.endsWith("tar")) return "tar";
@@ -85,6 +88,15 @@ beforeEach(async () => {
   ran = [];
   running = ["web"];
   exitCodes = {};
+  otherBinds = [];
+  spies.push(spyOn(DockerClient, "listContainers").mockImplementation(async () => ({
+    ok: true as const,
+    data: otherBinds.length === 0 ? [] : [{ Id: "other", Labels: { "com.docker.compose.project": "other-app" } }] as never,
+  })));
+  spies.push(spyOn(DockerClient, "inspectContainer").mockImplementation(async () => ({
+    ok: true as const,
+    data: { Mounts: otherBinds.map(Source => ({ Type: "bind", Source, Destination: "/x" })) } as never,
+  })));
   spies.push(spyOn(processRunner, "capture").mockImplementation(async (argv, opts) => {
     const cmd = record(argv);
     ran.push(cmd);
@@ -139,7 +151,7 @@ describe("taking a backup", () => {
     const m = (await getBackup(id))!;
     expect(m.apps).toHaveLength(1);
     const app = m.apps[0]!;
-    expect(app).toMatchObject({ name: APP, origin: "anpan", live: false, wasRunning: true, stack: `apps/${APP}/stack.tar.gz` });
+    expect(app).toMatchObject({ name: APP, origin: "anpan", live: false, running: ["web"], stack: `apps/${APP}/stack.tar.gz` });
     // One data folder, the app's own under the data root: config and cache are both in it,
     // and cache does not exist so it adds nothing.
     expect(app.data).toEqual([{ dir: APP, archive: `apps/${APP}/data-0.tar.gz` }]);
@@ -174,7 +186,7 @@ describe("taking a backup", () => {
   test("leaves a stopped app stopped", async () => {
     running = [];
     const id = await backUp();
-    expect((await getBackup(id))!.apps[0]!.wasRunning).toBe(false);
+    expect((await getBackup(id))!.apps[0]!.running).toEqual([]);
     expect(ran.some(c => c.endsWith(" stop") || c.includes(" start"))).toBe(false);
   });
 
@@ -199,6 +211,38 @@ describe("taking a backup", () => {
     const { job } = await runJob(async ctx => { await runBackup(ctx, { system: false, apps: [APP] }); });
     expect(job.status).toBe("failed");
     expect(ran).toContain(`compose ${APP} start web`);
+  });
+
+  test("takes only its own folders from a data folder another app uses too", async () => {
+    otherBinds = [join(dataDir, "theirs")];
+    await mkdir(join(dataDir, "theirs"), { recursive: true });
+    await writeFile(join(dataDir, "theirs", "keep.txt"), "theirs-v1");
+    const id = await backUp();
+    // config exists; cache does not, so only config is taken.
+    expect((await getBackup(id))!.apps[0]!.data).toEqual([{ dir: `${APP}/config`, archive: `apps/${APP}/data-0.tar.gz` }]);
+
+    // Restoring this app leaves the other app's folder as it is now.
+    await writeFile(join(dataDir, "theirs", "keep.txt"), "theirs-v2");
+    await writeFile(join(dataDir, "config", "settings.json"), "data-v2");
+    const { job } = await runJob(ctx => runRestore(ctx, { id, system: false, apps: [APP] }));
+    expect(job.status).toBe("done");
+    expect(readFileSync(join(dataDir, "config", "settings.json"), "utf8")).toBe("data-v1");
+    expect(readFileSync(join(dataDir, "theirs", "keep.txt"), "utf8")).toBe("theirs-v2");
+  });
+
+  test("leaves the backups folder out of a folder that holds it", async () => {
+    // A data folder that holds the backups folder: point [backups] folder inside it.
+    const inside = join(dataDir, "config", "backups-here");
+    // An own property shadows the class's getter; deleting it brings the getter back.
+    Object.defineProperty(config, "backupsFolder", { get: () => resolve(inside), configurable: true });
+    try {
+      const id = await backUp();
+      const list = Bun.spawnSync(["tar", "-tzf", join(resolve(inside), id, "apps", APP, "data-0.tar.gz")]).stdout.toString();
+      expect(list).toContain("settings.json");
+      expect(list).not.toContain("backups-here");
+    } finally {
+      delete (config as { backupsFolder?: string }).backupsFolder;
+    }
   });
 
   test("leaves out a data folder that is a link to outside the data root", async () => {
@@ -254,8 +298,8 @@ describe("restoring", () => {
     // Replaced, not merged: a file added since the backup is gone.
     expect(existsSync(join(dataDir, "config", "added-later.txt"))).toBe(false);
     expect((await StackStore.findById(APP))!.title).toBe("Backup App");
-    // Down with the old files, up with the restored ones.
-    expect(ran.filter(c => c.startsWith("compose"))).toEqual([`compose ${APP} ps --status running --services`, `compose ${APP} down`, `compose ${APP} up -d`]);
+    // Stopped (not down: anonymous volumes stay attached), then what was running started.
+    expect(ran.filter(c => c.startsWith("compose"))).toEqual([`compose ${APP} ps --status running --services`, `compose ${APP} stop`, `compose ${APP} up -d web`]);
     // The safety copies are deleted once it worked.
     expect((await readdir(config.composeFolder)).some(n => n.includes(".pre-restore-"))).toBe(false);
     expect((await readdir(config.appDataRoot)).some(n => n.includes(".pre-restore-"))).toBe(false);
@@ -275,8 +319,8 @@ describe("restoring", () => {
     expect((await StackStore.findById(APP))!.title).toBe("Renamed");
     expect((await readdir(config.appDataRoot)).some(n => n.includes(".pre-restore-"))).toBe(false);
     // It was running before, so what was running is started again, on its own files.
-    expect(ran.filter(c => c === `compose ${APP} up -d`)).toHaveLength(1);
-    expect(ran.at(-1)).toBe(`compose ${APP} up -d web`);
+    expect(ran.filter(c => c === `compose ${APP} up -d web`)).toHaveLength(2);
+    expect(ran).toContain(`compose ${APP} stop`);
   });
 
   test("restores an app that is no longer installed", async () => {
@@ -472,7 +516,7 @@ describe("manifest", () => {
     format: 1, id: "20261128-093000", createdAt: "2026-11-28T09:30:00.000Z", version: "0.14.0",
     hostname: "ser8", dataRoot: "/DATA/AppData", system: "system.tar.gz",
     apps: [{
-      name: "jellyfin", origin: "anpan", live: false, wasRunning: true,
+      name: "jellyfin", origin: "anpan", live: false, running: ["web"],
       stack: "apps/jellyfin/stack.tar.gz", data: [{ dir: "jellyfin", archive: "apps/jellyfin/data-0.tar.gz" }],
       row: { title: "Jellyfin" },
     }],
@@ -493,17 +537,23 @@ describe("manifest", () => {
     expect(parseManifest(withApp({ stack: "apps/jellyfin/data-0.tar.gz" }))).toBeNull();
     expect(parseManifest(withApp({ data: [{ dir: "jellyfin", archive: "apps/jellyfin/stack.tar.gz" }] }))).toBeNull();
     expect(parseManifest(withApp({ data: [{ dir: "..", archive: "apps/jellyfin/data-0.tar.gz" }] }))).toBeNull();
-    expect(parseManifest(withApp({ data: [{ dir: "a/b", archive: "apps/jellyfin/data-0.tar.gz" }] }))).toBeNull();
+    expect(parseManifest(withApp({ data: [{ dir: "a/../b", archive: "apps/jellyfin/data-0.tar.gz" }] }))).toBeNull();
+    expect(parseManifest(withApp({ data: [{ dir: "/etc", archive: "apps/jellyfin/data-0.tar.gz" }] }))).toBeNull();
+    expect(parseManifest(withApp({ data: [{ dir: "a//b", archive: "apps/jellyfin/data-0.tar.gz" }] }))).toBeNull();
+    expect(parseManifest(withApp({ running: ["../x"] }))).toBeNull();
     expect(parseManifest(withApp({ name: "../x" }))).toBeNull();
     expect(parseManifest(JSON.stringify({ ...good(), system: "/etc/shadow" }))).toBeNull();
     expect(parseManifest(JSON.stringify({ ...good(), id: "../x" }))).toBeNull();
   });
 
-  test("refuses two archives for one data folder", () => {
-    expect(parseManifest(withApp({ data: [
-      { dir: "jellyfin", archive: "apps/jellyfin/data-0.tar.gz" },
-      { dir: "jellyfin", archive: "apps/jellyfin/data-1.tar.gz" },
-    ] }))).toBeNull();
+  test("takes a folder deeper down, but no folder in or at another", () => {
+    expect(parseManifest(withApp({ data: [{ dir: "shared/jellyfin", archive: "apps/jellyfin/data-0.tar.gz" }] }))).not.toBeNull();
+    for (const [a, b] of [["jellyfin", "jellyfin"], ["shared", "shared/jellyfin"], ["shared/jellyfin", "shared"]]) {
+      expect(parseManifest(withApp({ data: [
+        { dir: a, archive: "apps/jellyfin/data-0.tar.gz" },
+        { dir: b, archive: "apps/jellyfin/data-1.tar.gz" },
+      ] }))).toBeNull();
+    }
   });
 
   test("refuses the same app twice", () => {

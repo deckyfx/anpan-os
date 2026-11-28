@@ -17,6 +17,13 @@ import { service } from "../lib/providers";
 /** Kinds of job that read or write the backups folder; one runs at a time. */
 const BACKUP_KINDS: ReadonlySet<JobKind> = new Set(["backup", "restore", "backup-import"]);
 
+/**
+ * Backups being deleted now. A delete awaits the removal, and a restore must not start on
+ * the backup in the meantime: checked and set without an await between, so a request
+ * either sees the other or comes after it.
+ */
+const deleting = new Set<string>();
+
 /** The backup, restore or import job running now, if any. */
 function backupJobRunning(): JobSummary | null {
   return jobs.list().find(j => j.status === "running" && BACKUP_KINDS.has(j.kind)) ?? null;
@@ -117,10 +124,11 @@ export function backupsPlugin(jwtSecret: string) {
 
     .delete("/upload", async ({ query, set }) => {
       if (!UPLOAD_ID_RE.test(query.id)) return Response.json({ error: "Invalid upload id" }, { status: 400 });
+      // The partial file, and the finished one if the last chunk already arrived, unless an
+      // import has taken it: checked after the await, right before the removal.
+      await abandonUpload(uploadPath(query.id), query.id);
       const running = jobs.list().find(j => j.status === "running" && j.kind === "backup-import");
       if (running) return busy(set, running);
-      // The partial file, and the finished one if the last chunk already arrived.
-      await abandonUpload(uploadPath(query.id), query.id);
       await rm(uploadPath(query.id), { force: true });
       return { ok: true };
     }, {
@@ -152,9 +160,11 @@ export function backupsPlugin(jwtSecret: string) {
       const running = backupJobRunning();
       if (running) return busy(set, running);
       const restart = envConfig.IS_BINARY_MODE ? service.restartSelfCommand() : null;
-      // Fire and forget: the answer is sent before the process stops.
+      // Asked for, not confirmed: the answer has to be sent before the process stops. The
+      // page then waits for the server and reloads; a restore still pending afterwards
+      // shows the banner again.
       if (restart) void Bun.$`${restart}`.quiet().nothrow();
-      return { ok: true, restarted: restart !== null };
+      return { ok: true, requested: restart !== null };
     }, {
       detail: { summary: "Restart anpan-os to apply a staged system restore" },
     })
@@ -176,6 +186,7 @@ export function backupsPlugin(jwtSecret: string) {
       if (body.system && !manifest.system) { set.status = 422; return { error: "This backup has no system part" }; }
       const absent = apps.filter(name => !manifest.apps.some(a => a.name === name));
       if (absent.length > 0) { set.status = 422; return { error: `Not in this backup: ${absent.join(", ")}` }; }
+      if (deleting.has(params.id)) { set.status = 404; return { error: "No such backup" }; }
       const running = backupJobRunning();
       if (running) return busy(set, running);
 
@@ -197,7 +208,13 @@ export function backupsPlugin(jwtSecret: string) {
       // A restore or import may be reading it.
       const running = backupJobRunning();
       if (running) return busy(set, running);
-      if (!(await deleteBackup(params.id))) { set.status = 404; return { error: "No such backup" }; }
+      if (deleting.has(params.id)) { set.status = 409; return { error: "This backup is already being deleted" }; }
+      deleting.add(params.id);
+      try {
+        if (!(await deleteBackup(params.id))) { set.status = 404; return { error: "No such backup" }; }
+      } finally {
+        deleting.delete(params.id);
+      }
       return { ok: true };
     }, {
       detail: { summary: "Delete a backup" },

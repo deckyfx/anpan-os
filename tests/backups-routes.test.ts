@@ -23,7 +23,7 @@ const ID = "20261128-093000";
 const MANIFEST = {
   format: 1, id: ID, createdAt: "2026-11-28T09:30:00.000Z", version: "test", hostname: "test",
   dataRoot: config.appDataRoot, system: null,
-  apps: [{ name: "bk-route", origin: "anpan", live: false, wasRunning: false, stack: "apps/bk-route/stack.tar.gz", data: [], row: null }],
+  apps: [{ name: "bk-route", origin: "anpan", live: false, running: [], stack: "apps/bk-route/stack.tar.gz", data: [], row: null }],
 };
 
 const spies: Array<{ mockRestore: () => void }> = [];
