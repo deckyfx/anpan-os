@@ -120,7 +120,9 @@ export function BackUpNowSection({ busy, onStart }: {
                     aria-checked={live}
                     aria-labelledby={`live-${stack.name}`}
                     aria-describedby={`live-${stack.name}-hint`}
-                    disabled={saving === stack.name}
+                    // One change at a time: Back up now waits for it, and two in flight
+                    // would let the first to finish release that wait early.
+                    disabled={saving !== null}
                     onClick={() => void setLive(stack, !live)}
                     className={`relative inline-flex w-9 h-5 shrink-0 rounded-full transition-colors disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500 ${live ? "bg-amber-500" : "bg-gray-700"}`}
                   >

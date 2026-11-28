@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2, RotateCw, X } from "lucide-react";
 import { TopBar } from "./home/TopBar";
 import { Section } from "./account/Section";
@@ -45,17 +45,26 @@ export function BackupsPage({ onNavigate }: { onNavigate: (path: string) => void
   // The top bar's version and the app list come from the stacks store.
   useEffect(() => { useStacksStore.getState().initialize(); }, []);
 
+  // Each load has a number; only the newest one's answer is shown. An older request that
+  // answers late must not put back a list from before the latest change.
+  const generation = useRef(0);
   const load = useCallback(async () => {
+    const mine = ++generation.current;
     try {
       const { data, error } = await api.api.backups.get();
+      if (mine !== generation.current) return;
       if (error) throw new Error((error.value as { error?: string } | null)?.error ?? "Could not list the backups");
       setListing(data as BackupsListing);
       setLoadError("");
     } catch (e) {
-      setLoadError(e instanceof Error ? e.message : String(e));
+      if (mine === generation.current) setLoadError(e instanceof Error ? e.message : String(e));
     }
   }, []);
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    void load();
+    // Leaving the page: whatever is still on its way is not shown.
+    return () => { generation.current++; };
+  }, [load]);
 
   // The backup job running now, from any tab, else the last one shown until dismissed. A new
   // job replaces a finished one, so its end is what the list refreshes on.
@@ -67,7 +76,9 @@ export function BackupsPage({ onNavigate }: { onNavigate: (path: string) => void
   const status = job?.status;
   useEffect(() => { if (status && status !== "running") void load(); }, [status, load]);
 
-  const busy = runningId !== null;
+  // An upload in progress counts too: its import would be refused behind a new backup.
+  const [uploading, setUploading] = useState(false);
+  const busy = runningId !== null || uploading;
 
   /** Start a job and show it; a refusal is a toast. */
   const startJob = async (request: Promise<{ data: unknown; error: unknown }>) => {
@@ -148,6 +159,7 @@ export function BackupsPage({ onNavigate }: { onNavigate: (path: string) => void
             busy={busy}
             onRestore={(id, body) => startJob(api.api.backups({ id }).restore.post(body))}
             onImport={upload => startJob(api.api.backups.import.post({ upload }))}
+            onUploading={setUploading}
             onChanged={() => void load()}
           />
         </div>

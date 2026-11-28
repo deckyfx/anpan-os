@@ -12,13 +12,15 @@ import { describeContents, formatBytes, type BackupSummary } from "./types";
  * The backups in the folder, each with Restore, Download and Delete, and Upload to add one
  * downloaded earlier (from this machine or another).
  */
-export function BackupListSection({ folder, backups, busy, onRestore, onImport, onChanged }: {
+export function BackupListSection({ folder, backups, busy, onRestore, onImport, onUploading, onChanged }: {
   folder: string;
   backups: BackupSummary[] | null;
   busy: boolean;
   onRestore: (id: string, body: { system: boolean; apps: string[] }) => Promise<void>;
   /** An upload finished: unpack it into a backup. */
   onImport: (uploadId: string) => Promise<void>;
+  /** An upload started or ended; the page holds other work back meanwhile. */
+  onUploading: (uploading: boolean) => void;
   onChanged: () => void;
 }) {
   const [restoring, setRestoring] = useState<string | null>(null);
@@ -42,7 +44,7 @@ export function BackupListSection({ folder, backups, busy, onRestore, onImport, 
     <Section
       title="Backups"
       description={<>Kept in <code className="font-mono text-gray-400">{folder}</code>. Set <code className="font-mono text-gray-400">[backups] folder</code> in config.toml to keep them elsewhere, such as a mounted drive.</>}
-      actions={<UploadButton disabled={busy} onUploaded={onImport} />}
+      actions={<UploadButton disabled={busy} onUploaded={onImport} onUploading={onUploading} />}
     >
       {backups === null ? (
         <p className="text-xs text-gray-500">Loading…</p>
@@ -186,7 +188,11 @@ function RestorePanel({ backup, busy, onClose, onRestore }: {
 }
 
 /** Pick a backup archive and upload it in chunks, with progress and Cancel. */
-function UploadButton({ disabled, onUploaded }: { disabled: boolean; onUploaded: (uploadId: string) => Promise<void> }) {
+function UploadButton({ disabled, onUploaded, onUploading }: {
+  disabled: boolean;
+  onUploaded: (uploadId: string) => Promise<void>;
+  onUploading: (uploading: boolean) => void;
+}) {
   const inputRef = useRef<HTMLInputElement>(null);
   const control = useRef(new UploadControl());
   const [progress, setProgress] = useState<{ name: string; loaded: number; total: number } | null>(null);
@@ -195,6 +201,7 @@ function UploadButton({ disabled, onUploaded }: { disabled: boolean; onUploaded:
     const id = crypto.randomUUID();
     control.current.reset();
     setProgress({ name: file.name, loaded: 0, total: file.size });
+    onUploading(true);
     try {
       const failure = await uploadInChunks(`/api/backups/upload?id=${id}`, file, loaded => setProgress(p => p && { ...p, loaded }), control.current);
       if (failure) {
@@ -204,6 +211,7 @@ function UploadButton({ disabled, onUploaded }: { disabled: boolean; onUploaded:
       await onUploaded(id);
     } finally {
       setProgress(null);
+      onUploading(false);
       if (inputRef.current) inputRef.current.value = "";
     }
   };

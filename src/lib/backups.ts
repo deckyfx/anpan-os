@@ -146,8 +146,11 @@ async function freeId(id: string): Promise<string> {
 
 /** One path segment of a data folder: not empty, not `.` or `..`, no backslash or NUL. */
 const SEGMENT_RE = /^[^/\\\0]+$/;
-/** A Compose service name. */
-const SERVICE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+/**
+ * A Compose service name (the spec's `[a-zA-Z0-9._-]+`), except one starting with `-`,
+ * which a command line would read as an option. Such a service is not recorded as running.
+ */
+const SERVICE_RE = /^[A-Za-z0-9._][A-Za-z0-9._-]*$/;
 const DATA_ARCHIVE_RE = /^data-\d{1,4}\.tar\.gz$/;
 
 /** The stack archive's name for app `name`; nothing else is accepted in its place. */
@@ -311,18 +314,26 @@ function within(child: string, parent: string): boolean {
 
 /**
  * Bind mounts of every container but `stack`'s, by source, from Docker: what other apps
- * use, so one app's backup and restore leave it alone. Empty when Docker cannot be read.
+ * use, so one app's backup and restore leave it alone.
+ *
+ * Throws when Docker cannot say: an empty answer would make every folder look like this
+ * app's alone, and a restore could then replace another app's data.
  */
 async function otherAppsBinds(stack: string): Promise<string[]> {
   const containers = await DockerClient.listContainers();
-  if (!containers.ok) return [];
+  if (!containers.ok) throw new JobError(`Could not read from Docker which folders other apps use: ${containers.error}`);
   const out: string[] = [];
   const foreign = containers.data.filter(c => (c.Labels?.["com.docker.compose.project"] ?? "") !== stack);
   for (const r of await Promise.all(foreign.map(c => DockerClient.inspectContainer(c.Id)))) {
-    if (!r.ok) continue;
+    if (!r.ok) throw new JobError(`Could not read from Docker which folders other apps use: ${r.error}`);
     for (const m of r.data.Mounts) if (m.Type === "bind") out.push(resolve(m.Source));
   }
   return out;
+}
+
+/** Whether `a` and `b` are one folder, or one is inside the other. */
+function overlaps(a: string, b: string): boolean {
+  return within(a, b) || within(b, a);
 }
 
 /**
@@ -367,9 +378,11 @@ async function dataFolders(ctx: JobContext, name: string, dir: string): Promise<
     const first = join(root, relative(root, source).split(sep)[0]!);
     const shared = others.some(o => within(o, first));
     if (!shared) { candidates.add(first); continue; }
-    // Shared with another app: this app's own folder only. A single file cannot be
-    // replaced on its own by a restore, so it is left out.
-    if ((await stat(source).catch(() => null))?.isDirectory()) candidates.add(source);
+    // Shared with another app: this app's own folder only, and only when no other app
+    // uses it or anything in it. A single file cannot be replaced on its own by a
+    // restore, so it is left out.
+    if (others.some(o => overlaps(o, source))) skipped.add(`${source} (another app uses it too)`);
+    else if ((await stat(source).catch(() => null))?.isDirectory()) candidates.add(source);
     else skipped.add(`${source} (a single file in ${first}, which other apps use too)`);
   }
 
@@ -394,7 +407,7 @@ async function runningServices(ctx: JobContext, name: string, dir: string): Prom
   const out = await processRunner.capture([...composeCommand(docker(), name, dir), "ps", "--status", "running", "--services"], { cwd: dir, signal: ctx.signal });
   ctx.throwIfCancelled();
   if (out.code !== 0) throw new JobError(`Could not read ${name}'s state (docker compose ps: exit code ${out.code})`);
-  return out.stdout.split("\n").map(s => s.trim()).filter(Boolean);
+  return out.stdout.split("\n").map(s => s.trim()).filter(s => SERVICE_RE.test(s));
 }
 
 /**
@@ -635,7 +648,9 @@ async function stageSystem(ctx: JobContext, backup: string, m: BackupManifest): 
  * restore recreates what the restored compose file changed and keeps those volumes.
  */
 async function restoreApp(ctx: JobContext, backup: string, m: BackupManifest, app: BackupApp): Promise<void> {
-  const dir = folderFor(app.name, app.origin);
+  // Where the app is now, if it is here (it may have moved from CasaOS's folder to
+  // anpan-os's since); else where it was.
+  const dir = (await appFolder(app.name))?.dir ?? folderFor(app.name, app.origin);
   const root = config.appDataRoot;
   if (app.data.length > 0 && resolve(m.dataRoot) !== root) {
     throw new JobError(
@@ -644,6 +659,14 @@ async function restoreApp(ctx: JobContext, backup: string, m: BackupManifest, ap
     );
   }
   const dataDirs = app.data.map(d => ({ path: join(root, d.dir), archive: join(backup, d.archive) }));
+
+  // A folder that was this app's alone when backed up may hold another app's data now.
+  // Checked before anything is stopped or moved.
+  if (dataDirs.length > 0) {
+    const others = await otherAppsBinds(app.name);
+    const taken = dataDirs.filter(d => others.some(o => overlaps(o, d.path))).map(d => d.path);
+    if (taken.length > 0) throw new JobError(`Another app now uses ${taken.join(", ")}; restoring ${app.name} would replace its data`);
+  }
 
   const hadStack = await Bun.file(join(dir, COMPOSE_FILE)).exists();
   // The services running now, which a failed restore starts again (those, not the rest).
@@ -687,7 +710,8 @@ async function restoreApp(ctx: JobContext, backup: string, m: BackupManifest, ap
       ctx.log(`  Starting ${app.running.join(", ")}`);
       ctx.throwIfCancelled();
       up = true;
-      await ctx.exec([...composeCommand(docker(), app.name, dir), "up", "-d", ...app.running], dir, "docker compose up");
+      // --no-deps: the services recorded as running, not ones they depend on that were not.
+      await ctx.exec([...composeCommand(docker(), app.name, dir), "up", "-d", "--no-deps", ...app.running], dir, "docker compose up");
     }
   } catch (err) {
     // Each step on its own: one that fails is reported and the rest still run, so a row
@@ -716,7 +740,7 @@ async function restoreApp(ctx: JobContext, backup: string, m: BackupManifest, ap
         }
       });
     }
-    if (runningBefore.length > 0) await recover(`start ${app.name} again`, () => compose(["up", "-d", ...runningBefore]));
+    if (runningBefore.length > 0) await recover(`start ${app.name} again`, () => compose(["up", "-d", "--no-deps", ...runningBefore]));
     throw err;
   }
   for (const { moved } of aside) await rm(moved, { recursive: true, force: true });

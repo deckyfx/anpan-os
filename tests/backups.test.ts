@@ -60,6 +60,8 @@ let running: string[] = [];
 let exitCodes: Record<string, number> = {};
 /** Bind sources of other apps' containers, as Docker reports them. */
 let otherBinds: string[] = [];
+/** Docker cannot be read. */
+let dockerDown = false;
 
 function record(argv: string[]): string {
   if (argv[0]!.endsWith("tar")) return "tar";
@@ -89,7 +91,8 @@ beforeEach(async () => {
   running = ["web"];
   exitCodes = {};
   otherBinds = [];
-  spies.push(spyOn(DockerClient, "listContainers").mockImplementation(async () => ({
+  dockerDown = false;
+  spies.push(spyOn(DockerClient, "listContainers").mockImplementation(async () => dockerDown ? { ok: false as const, error: "no socket" } as never : ({
     ok: true as const,
     data: otherBinds.length === 0 ? [] : [{ Id: "other", Labels: { "com.docker.compose.project": "other-app" } }] as never,
   })));
@@ -230,6 +233,24 @@ describe("taking a backup", () => {
     expect(readFileSync(join(dataDir, "theirs", "keep.txt"), "utf8")).toBe("theirs-v2");
   });
 
+  test("refuses to restore over a folder another app has started using", async () => {
+    const id = await backUp();
+    otherBinds = [join(dataDir, "config")];
+    await writeFile(join(dataDir, "config", "settings.json"), "data-v2");
+    ran = [];
+    const { job } = await runJob(ctx => runRestore(ctx, { id, system: false, apps: [APP] }));
+    expect(job.status).toBe("failed");
+    expect(job.error).toContain(APP);
+    expect(readFileSync(join(dataDir, "config", "settings.json"), "utf8")).toBe("data-v2");
+    expect(ran.some(c => c.endsWith(" stop"))).toBe(false);
+  });
+
+  test("fails rather than guess when Docker cannot say which folders other apps use", async () => {
+    dockerDown = true;
+    const { job } = await runJob(async ctx => { await runBackup(ctx, { system: false, apps: [APP] }); });
+    expect(job.status).toBe("failed");
+  });
+
   test("leaves the backups folder out of a folder that holds it", async () => {
     // A data folder that holds the backups folder: point [backups] folder inside it.
     const inside = join(dataDir, "config", "backups-here");
@@ -299,7 +320,7 @@ describe("restoring", () => {
     expect(existsSync(join(dataDir, "config", "added-later.txt"))).toBe(false);
     expect((await StackStore.findById(APP))!.title).toBe("Backup App");
     // Stopped (not down: anonymous volumes stay attached), then what was running started.
-    expect(ran.filter(c => c.startsWith("compose"))).toEqual([`compose ${APP} ps --status running --services`, `compose ${APP} stop`, `compose ${APP} up -d web`]);
+    expect(ran.filter(c => c.startsWith("compose"))).toEqual([`compose ${APP} ps --status running --services`, `compose ${APP} stop`, `compose ${APP} up -d --no-deps web`]);
     // The safety copies are deleted once it worked.
     expect((await readdir(config.composeFolder)).some(n => n.includes(".pre-restore-"))).toBe(false);
     expect((await readdir(config.appDataRoot)).some(n => n.includes(".pre-restore-"))).toBe(false);
@@ -319,7 +340,7 @@ describe("restoring", () => {
     expect((await StackStore.findById(APP))!.title).toBe("Renamed");
     expect((await readdir(config.appDataRoot)).some(n => n.includes(".pre-restore-"))).toBe(false);
     // It was running before, so what was running is started again, on its own files.
-    expect(ran.filter(c => c === `compose ${APP} up -d web`)).toHaveLength(2);
+    expect(ran.filter(c => c === `compose ${APP} up -d --no-deps web`)).toHaveLength(2);
     expect(ran).toContain(`compose ${APP} stop`);
   });
 
