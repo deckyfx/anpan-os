@@ -3,7 +3,7 @@
  * Docker is not reached: these backups are written by hand, and tar is the real one.
  */
 import { test, expect, describe, beforeAll, beforeEach, afterEach, afterAll, spyOn } from "bun:test";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { createApp } from "../src/app";
 import { TEST_JWT, loginAs } from "./helpers";
@@ -13,6 +13,9 @@ import { config } from "../src/config";
 const app = createApp(TEST_JWT);
 let cookie = "";
 beforeAll(async () => { cookie = await loginAs(); });
+
+// The folder these tests delete must be inside the test runtime dir, never a real one.
+if (!config.backupsFolder.startsWith(resolve("configs/anpan-test"))) throw new Error(`Refusing to run: ${config.backupsFolder}`);
 
 const ID = "20261128-093000";
 const MANIFEST = {

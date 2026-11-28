@@ -26,12 +26,18 @@ export const READY_MARKER = ".ready";
  */
 export const SYSTEM_ENTRIES = ["config.toml", "storage.db", "samba.conf", "certs"] as const;
 
+/** Suffix of a live entry moved aside while its replacement goes in. */
+const ASIDE = ".pre-restore";
+
 /**
  * Put a staged system restore in place. Returns the entries applied; none when nothing is
- * staged or the staging is incomplete.
+ * staged or the staging is incomplete. Throws when an entry cannot be put in place; the
+ * staging is then kept, so the next start tries again.
  *
- * Each entry replaces the live one by rename, so the swap of each is all or nothing. The
- * marker goes last: a start interrupted half way applies the remaining entries next time.
+ * No entry is ever missing at a moment the process could stop: each live entry is moved
+ * aside (not deleted), its replacement renamed in, and only then the aside copy removed.
+ * A start that stops half way finds the entries not yet applied still staged and applies
+ * them; the marker goes last.
  */
 export function applyPendingRestore(runtimeDir: string): string[] {
   const staged = join(runtimeDir, PENDING_DIR);
@@ -42,14 +48,16 @@ export function applyPendingRestore(runtimeDir: string): string[] {
     const from = join(staged, entry);
     if (!existsSync(from)) continue;
     const to = join(runtimeDir, entry);
-    if (entry === "storage.db") {
-      // The live database's write-ahead log belongs to the file being replaced. Left beside
-      // the restored one, SQLite would replay it into it.
-      rmSync(`${to}-wal`, { force: true });
-      rmSync(`${to}-shm`, { force: true });
+    // The database's write-ahead log and shared memory belong to the file being replaced:
+    // left beside the restored one, SQLite would replay the old log into it. They move
+    // aside with it.
+    const group = entry === "storage.db" ? [to, `${to}-wal`, `${to}-shm`] : [to];
+    for (const path of group) {
+      rmSync(path + ASIDE, { recursive: true, force: true }); // left by an earlier attempt
+      if (existsSync(path)) renameSync(path, path + ASIDE);
     }
-    rmSync(to, { recursive: true, force: true });
     renameSync(from, to);
+    for (const path of group) rmSync(path + ASIDE, { recursive: true, force: true });
     applied.push(entry);
   }
   rmSync(staged, { recursive: true, force: true });

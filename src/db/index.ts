@@ -1,11 +1,11 @@
 import { Database } from "bun:sqlite";
 import { drizzle } from "drizzle-orm/bun-sqlite";
 import { mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { config } from "../config";
 import { envConfig } from "../env-config";
 import { parseCli } from "../cli-parser";
-import { applyPendingRestore } from "../lib/pending-restore";
+import { applyPendingRestore, PENDING_DIR } from "../lib/pending-restore";
 
 /**
  * Create the runtime directory before opening the database.
@@ -36,12 +36,21 @@ try {
 // A system restore staged by a restore job goes in place before the database is opened:
 // this is the one point where nothing holds it. Only when starting the server: a
 // `--version` or `--doctor` run beside a running server must not swap files under it.
+//
+// A restore that cannot be applied stops the start. Running on with, say, the restored
+// config.toml beside the old database would mix two points in time; the staging is kept,
+// so the next start tries again once the cause is fixed.
 if (parseCli().type === "serve") {
   try {
     const applied = applyPendingRestore(envConfig.RUNTIME_CONFIG_DIR);
     if (applied.length > 0) console.log(`♻️  Restored from backup: ${applied.join(", ")}`);
   } catch (err) {
-    console.error(`❌ Could not apply the staged restore: ${err instanceof Error ? err.message : String(err)}`);
+    const staged = join(envConfig.RUNTIME_CONFIG_DIR, PENDING_DIR);
+    console.error(
+      `❌ Could not apply the staged restore: ${err instanceof Error ? err.message : String(err)}\n` +
+      `   Fix the cause and start again, or delete ${staged} to start without it.`,
+    );
+    process.exit(1);
   }
 }
 

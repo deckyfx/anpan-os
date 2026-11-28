@@ -124,7 +124,13 @@ export async function receiveChunk(
       if (request.body) {
         for await (const part of request.body) {
           if (written + part.byteLength > declared) break;
-          await fh.write(part, 0, part.byteLength, offset + written);
+          // A write may take fewer bytes than given; write the rest, so `written` counts
+          // only what is in the file.
+          for (let done = 0; done < part.byteLength;) {
+            const { bytesWritten } = await fh.write(part, done, part.byteLength - done, offset + written + done);
+            if (bytesWritten <= 0) throw new Error("Short write");
+            done += bytesWritten;
+          }
           written += part.byteLength;
         }
       }

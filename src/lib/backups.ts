@@ -22,7 +22,7 @@
  * elsewhere (a media library, `/var/run/docker.sock`) are not the app's to back up, and named
  * Docker volumes are not folders anpan-os manages; both are named in the job's log.
  */
-import { mkdir, readdir, rename, rm, stat, writeFile, chmod } from "node:fs/promises";
+import { chmod, lstat, mkdir, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { config } from "../config";
@@ -139,8 +139,16 @@ async function freeId(id: string): Promise<string> {
 
 // ─── Manifest ───────────────────────────────────────────────────────────────
 
-const ARCHIVE_RE = (name: string) => new RegExp(`^apps/${name}/(?:stack|data-\\d{1,4})\\.tar\\.gz$`);
 const DATA_DIR_RE = /^[^/\\\0]+$/;
+const DATA_ARCHIVE_RE = /^data-\d{1,4}\.tar\.gz$/;
+
+/** The stack archive's name for app `name`; nothing else is accepted in its place. */
+const stackArchive = (name: string) => `apps/${name}/stack.tar.gz`;
+/** Whether `archive` is one of app `name`'s data archives. Compared as strings, not a pattern built from the name. */
+const isDataArchive = (name: string, archive: string) => {
+  const prefix = `apps/${name}/`;
+  return archive.startsWith(prefix) && DATA_ARCHIVE_RE.test(archive.slice(prefix.length));
+};
 
 /**
  * Read a manifest, checking every field. Null when it is not one this code wrote.
@@ -169,15 +177,14 @@ export function parseManifest(text: string): BackupManifest | null {
     names.add(app.name);
     if (app.origin !== "anpan" && app.origin !== "casaos") return null;
     if (typeof app.live !== "boolean" || typeof app.wasRunning !== "boolean") return null;
-    const archive = ARCHIVE_RE(app.name);
-    if (!str(app.stack) || !archive.test(app.stack)) return null;
+    if (app.stack !== stackArchive(app.name)) return null;
     if (!Array.isArray(app.data)) return null;
     const data: BackupApp["data"] = [];
     for (const d of app.data as unknown[]) {
       const entry = d as Record<string, unknown> | null;
       if (!entry || !str(entry.dir) || !str(entry.archive)) return null;
       if (!DATA_DIR_RE.test(entry.dir) || entry.dir === "." || entry.dir === "..") return null;
-      if (!archive.test(entry.archive)) return null;
+      if (!isDataArchive(app.name, entry.archive)) return null;
       data.push({ dir: entry.dir, archive: entry.archive });
     }
     const row = app.row === null || (typeof app.row === "object" && !Array.isArray(app.row))
@@ -315,9 +322,15 @@ async function dataFolders(ctx: JobContext, name: string, dir: string): Promise<
   for (const what of [...skipped].sort()) ctx.log(`  Not included: ${what} (outside ${root})`);
 
   // Only folders that are there: a bind to a path Docker has not created yet holds nothing.
+  // And only folders that are under the data root once links are followed: tar would read
+  // through a link to another drive, and a restore would put a real folder in its place.
+  const realRoot = await realpath(root).catch(() => root);
   const present: string[] = [];
   for (const f of [...folders].sort()) {
-    if ((await stat(f).catch(() => null))?.isDirectory()) present.push(f);
+    if (!(await stat(f).catch(() => null))?.isDirectory()) continue;
+    const real = await realpath(f).catch(() => f);
+    if (within(real, realRoot)) present.push(f);
+    else ctx.log(`  Not included: ${f} (a link to ${real}, outside ${root})`);
   }
   return present;
 }
@@ -359,14 +372,16 @@ async function backUpApp(ctx: JobContext, name: string, partial: string): Promis
   await mkdir(target, { recursive: true });
 
   const stop = !live && running.length > 0;
-  if (stop) {
-    ctx.log(`  Stopping ${name} while its files are copied`);
-    await ctx.exec([...composeCommand(docker(), name, dir), "stop"], dir, "docker compose stop");
-  }
   const entry: BackupApp = {
-    name, origin, live, wasRunning: running.length > 0, stack: `apps/${name}/stack.tar.gz`, data: [], row: null,
+    name, origin, live, wasRunning: running.length > 0, stack: stackArchive(name), data: [], row: null,
   };
   try {
+    // Inside the try: a stop that fails or is cancelled half way may already have stopped
+    // some services, and the finally starts them again.
+    if (stop) {
+      ctx.log(`  Stopping ${name} while its files are copied`);
+      await ctx.exec([...composeCommand(docker(), name, dir), "stop"], dir, "docker compose stop");
+    }
     await archive(ctx, dir, join(partial, entry.stack), live);
     for (const [i, folder] of data.entries()) {
       const archiveName = `apps/${name}/data-${i}.tar.gz`;
@@ -498,13 +513,25 @@ async function stageSystem(ctx: JobContext, backup: string, m: BackupManifest): 
   const partial = `${staged}.partial`;
   await rm(partial, { recursive: true, force: true });
   await mkdir(partial, { mode: 0o700 });
+  // A restore staged earlier stays in place until this one is: moved aside, and moved back
+  // if this one cannot be put there.
+  const previous = `${staged}.previous`;
+  let movedPrevious = false;
   try {
     await extract(ctx, join(backup, m.system), partial);
+    // Without a database the "restore" would apply settings over the current data, which
+    // is not the backup's state at any moment. Only a regular file counts.
+    if (!(await lstat(join(partial, "storage.db")).catch(() => null))?.isFile()) {
+      throw new JobError("The system part of this backup has no database");
+    }
     await writeFile(join(partial, READY_MARKER), `${m.id}\n`);
-    await rm(staged, { recursive: true, force: true });
+    await rm(previous, { recursive: true, force: true });
+    if (await exists(staged)) { await rename(staged, previous); movedPrevious = true; }
     await rename(partial, staged);
+    await rm(previous, { recursive: true, force: true });
   } catch (err) {
     await rm(partial, { recursive: true, force: true });
+    if (movedPrevious && !(await exists(staged))) await rename(previous, staged).catch(() => {});
     throw err;
   }
   ctx.log("System settings and database staged: restart anpan-os to apply them");
@@ -528,7 +555,8 @@ async function restoreApp(ctx: JobContext, backup: string, m: BackupManifest, ap
   const dataDirs = app.data.map(d => ({ path: join(root, d.dir), archive: join(backup, d.archive) }));
 
   const hadStack = await Bun.file(join(dir, COMPOSE_FILE)).exists();
-  const wasRunning = hadStack && (await runningServices(ctx, app.name, dir)).length > 0;
+  // The services running now, which a failed restore starts again (those, not the rest).
+  const runningBefore = hadStack ? await runningServices(ctx, app.name, dir) : [];
   const rowBefore = await StackStore.findById(app.name);
 
   // Paths moved aside, and paths this restore wrote.
@@ -571,23 +599,33 @@ async function restoreApp(ctx: JobContext, backup: string, m: BackupManifest, ap
       await ctx.exec([...composeCommand(docker(), app.name, dir), "up", "-d"], dir, "docker compose up");
     }
   } catch (err) {
+    // Each step on its own: one that fails is reported and the rest still run, so a row
+    // that cannot be written back does not also leave the app down. The restore's own
+    // error is what the job reports. Not on the job's signal, which may be why we are here.
     ctx.log(`  Restore of ${app.name} failed: putting back what was there`);
-    const timeout = () => AbortSignal.timeout(2 * 60_000);
-    const quiet = { onLine: (line: string) => ctx.log(line) };
-    if (up) await processRunner.run([...composeCommand(docker(), app.name, dir), "down"], { cwd: dir, signal: timeout(), ...quiet }).catch(() => -1);
-    for (const path of written) await rm(path, { recursive: true, force: true });
-    for (const { path, moved } of aside) await rename(moved, path).catch(e => ctx.log(`  ⚠ Could not move ${moved} back: ${(e as Error).message}`));
+    const recover = async (what: string, step: () => Promise<unknown>) => {
+      try { await step(); } catch (e) { ctx.log(`  ⚠ Could not ${what}: ${e instanceof Error ? e.message : String(e)}`); }
+    };
+    const compose = async (args: string[]) => {
+      const code = await processRunner.run([...composeCommand(docker(), app.name, dir), ...args], {
+        cwd: dir, signal: AbortSignal.timeout(2 * 60_000), onLine: line => ctx.log(line),
+      });
+      if (code !== 0) throw new Error(`docker compose ${args[0]}: exit code ${code}`);
+    };
+    if (up) await recover("stop the restored app", () => compose(["down"]));
+    for (const path of written) await recover(`remove ${path}`, () => rm(path, { recursive: true, force: true }));
+    for (const { path, moved } of aside) await recover(`move ${moved} back to ${path}`, () => rename(moved, path));
     if (rowWritten) {
-      if (rowBefore) {
-        const { id: _id, updatedAt: _at, ...rest } = rowBefore;
-        await StackStore.restore(app.name, rest);
-      } else {
-        await StackStore.delete(app.name);
-      }
+      await recover("put the app's settings back", async () => {
+        if (rowBefore) {
+          const { id: _id, updatedAt: _at, ...rest } = rowBefore;
+          await StackStore.restore(app.name, rest);
+        } else {
+          await StackStore.delete(app.name);
+        }
+      });
     }
-    if (wasRunning) {
-      await processRunner.run([...composeCommand(docker(), app.name, dir), "up", "-d"], { cwd: dir, signal: timeout(), ...quiet }).catch(() => -1);
-    }
+    if (runningBefore.length > 0) await recover(`start ${app.name} again`, () => compose(["up", "-d", ...runningBefore]));
     throw err;
   }
   for (const { moved } of aside) await rm(moved, { recursive: true, force: true });
@@ -597,6 +635,8 @@ async function restoreApp(ctx: JobContext, backup: string, m: BackupManifest, ap
 export async function runRestore(ctx: JobContext, req: RestoreRequest): Promise<void> {
   const m = await getBackup(req.id);
   if (!m) throw new JobError("No such backup");
+  // Checked before any app is touched, not when the system's turn comes.
+  if (req.system && !m.system) throw new JobError("This backup has no system part");
   const backup = backupPath(req.id);
   const apps = req.apps.map(name => {
     const app = m.apps.find(a => a.name === name);
@@ -633,6 +673,12 @@ export async function runRestore(ctx: JobContext, req: RestoreRequest): Promise<
 
 // ─── Importing an uploaded backup ───────────────────────────────────────────
 
+/** Whether `path` is a folder (or a regular file) itself, not a link to one. */
+async function isReal(path: string, kind: "dir" | "file"): Promise<boolean> {
+  const info = await lstat(path).catch(() => null);
+  return kind === "dir" ? info?.isDirectory() === true : info?.isFile() === true;
+}
+
 /** Where an upload is received, before it is unpacked into a backup. */
 export function uploadPath(uploadId: string): string {
   return join(folder(), `.upload-${uploadId}.tar`);
@@ -655,11 +701,22 @@ export async function runImport(ctx: JobContext, uploadId: string): Promise<stri
     ctx.step("Checking the backup");
     const entries = await readdir(staging);
     const top = entries.length === 1 ? entries[0]! : null;
-    const manifest = top && BACKUP_ID_RE.test(top) ? await readManifest(join(staging, top)) : null;
-    if (!top || !manifest) throw new JobError("This is not an anpan-os backup: it must be a backup downloaded from anpan-os");
+    // The backup's own structure must be real folders and files, not links: a link would
+    // pass every check here while pointing outside the backup. (Links inside an app's data
+    // are the app's own business and stay inside its archives.)
+    const notBackup = new JobError("This is not an anpan-os backup: it must be a backup downloaded from anpan-os");
+    if (!top || !BACKUP_ID_RE.test(top) || !(await isReal(join(staging, top), "dir"))) throw notBackup;
+    const root = join(staging, top);
+    if (!(await isReal(join(root, MANIFEST), "file"))) throw notBackup;
+    const manifest = await readManifest(root);
+    if (!manifest) throw notBackup;
+    if (manifest.apps.length > 0 && !(await isReal(join(root, "apps"), "dir"))) throw notBackup;
+    for (const app of manifest.apps) {
+      if (!(await isReal(join(root, "apps", app.name), "dir"))) throw new JobError(`The backup is incomplete: apps/${app.name} is missing`);
+    }
     const parts = [...(manifest.system ? [manifest.system] : []), ...manifest.apps.flatMap(a => [a.stack, ...a.data.map(d => d.archive)])];
     for (const part of parts) {
-      if (!(await exists(join(staging, top, part)))) throw new JobError(`The backup is incomplete: ${part} is missing`);
+      if (!(await isReal(join(root, part), "file"))) throw new JobError(`The backup is incomplete: ${part} is missing`);
     }
 
     const id = await freeId(top);

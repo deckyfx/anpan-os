@@ -5,8 +5,8 @@
  * real archives, and a restore is checked by the files it puts back.
  */
 import { test, expect, describe, afterEach, afterAll, beforeEach, spyOn } from "bun:test";
-import { join } from "node:path";
-import { mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
+import { mkdir, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { JobManager, processRunner, type JobContext, type JobSummary } from "../src/lib/jobs";
 import {
@@ -26,6 +26,12 @@ const dataDir = join(config.appDataRoot, APP);
 
 const spies: Array<{ mockRestore: () => void }> = [];
 afterEach(() => { while (spies.length) spies.pop()!.mockRestore(); });
+
+// Every folder these tests delete in must be inside the test runtime dir, never a real one.
+const TEST_ROOT = resolve("configs/anpan-test");
+for (const dir of [config.backupsFolder, config.composeFolder, config.appDataRoot, envConfig.RUNTIME_CONFIG_DIR]) {
+  if (!resolve(dir).startsWith(TEST_ROOT)) throw new Error(`Refusing to run: ${dir} is not under ${TEST_ROOT}`);
+}
 
 async function clean(): Promise<void> {
   for (const name of [APP, LIVE]) {
@@ -187,6 +193,31 @@ describe("taking a backup", () => {
     expect(await listBackups()).toEqual([]);
   });
 
+  test("starts the app again when stopping it fails half way", async () => {
+    exitCodes = { [`compose ${APP} stop`]: 1 };
+    const { job } = await runJob(async ctx => { await runBackup(ctx, { system: false, apps: [APP] }); });
+    expect(job.status).toBe("failed");
+    expect(ran).toContain(`compose ${APP} start web`);
+  });
+
+  test("leaves out a data folder that is a link to outside the data root", async () => {
+    const outside = join(envConfig.RUNTIME_CONFIG_DIR, "bk-outside");
+    await rm(outside, { recursive: true, force: true });
+    await mkdir(join(outside, "config"), { recursive: true });
+    await rm(dataDir, { recursive: true });
+    await symlink(resolve(outside), dataDir);
+    try {
+      let id = "";
+      const { job, log } = await runJob(async ctx => { id = await runBackup(ctx, { system: false, apps: [APP] }); });
+      expect(job.status).toBe("done");
+      expect((await getBackup(id))!.apps[0]!.data).toEqual([]);
+      expect(log.some(l => l.includes("a link to"))).toBe(true);
+    } finally {
+      await rm(dataDir, { force: true });
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
   test("includes the system: settings and a snapshot of the database", async () => {
     const id = await backUp({ system: true, apps: [] });
     const m = (await getBackup(id))!;
@@ -242,8 +273,9 @@ describe("restoring", () => {
     expect(readFileSync(join(dataDir, "config", "settings.json"), "utf8")).toBe("data-v2");
     expect((await StackStore.findById(APP))!.title).toBe("Renamed");
     expect((await readdir(config.appDataRoot)).some(n => n.includes(".pre-restore-"))).toBe(false);
-    // It was running before, so it is started again on its own files.
-    expect(ran.filter(c => c === `compose ${APP} up -d`)).toHaveLength(2);
+    // It was running before, so what was running is started again, on its own files.
+    expect(ran.filter(c => c === `compose ${APP} up -d`)).toHaveLength(1);
+    expect(ran.at(-1)).toBe(`compose ${APP} up -d web`);
   });
 
   test("restores an app that is no longer installed", async () => {
@@ -276,6 +308,36 @@ describe("restoring", () => {
     const staged = join(envConfig.RUNTIME_CONFIG_DIR, PENDING_DIR);
     expect(existsSync(join(staged, READY_MARKER))).toBe(true);
     expect(existsSync(join(staged, "storage.db"))).toBe(true);
+  });
+});
+
+describe("staging checks", () => {
+  test("refuses a system part with no database, and keeps a restore staged before", async () => {
+    const id = await backUp({ system: true, apps: [] });
+    // Stage a good one first.
+    expect((await runJob(ctx => runRestore(ctx, { id, system: true, apps: [] }))).job.status).toBe("done");
+    // Then replace the backup's system archive with one holding only config.toml.
+    const work = join(envConfig.RUNTIME_CONFIG_DIR, "bk-sys");
+    await rm(work, { recursive: true, force: true });
+    await mkdir(work);
+    await writeFile(join(work, "config.toml"), "x = 1\n");
+    Bun.spawnSync(["tar", "-czf", join(backupPath(id), "system.tar.gz"), "-C", work, "config.toml"]);
+    await rm(work, { recursive: true });
+
+    const { job } = await runJob(ctx => runRestore(ctx, { id, system: true, apps: [] }));
+    expect(job.status).toBe("failed");
+    expect(job.error).toContain("no database");
+    const staged = join(envConfig.RUNTIME_CONFIG_DIR, PENDING_DIR);
+    expect(existsSync(join(staged, READY_MARKER))).toBe(true);
+    expect(existsSync(join(staged, "storage.db"))).toBe(true);
+  });
+
+  test("refuses the system from a backup without one before touching any app", async () => {
+    const id = await backUp();
+    ran = [];
+    const { job } = await runJob(ctx => runRestore(ctx, { id, system: true, apps: [APP] }));
+    expect(job.status).toBe("failed");
+    expect(ran).toEqual([]);
   });
 });
 
@@ -345,6 +407,18 @@ describe("importing an uploaded backup", () => {
     expect((await getBackup(added))!.id).toBe(added);
   });
 
+  test("refuses a backup whose parts are links", async () => {
+    const id = await backUp();
+    const archive = join(backupPath(id), "apps", APP, "stack.tar.gz");
+    await rm(archive);
+    await symlink("/etc/hostname", archive);
+    const upload = await asUpload(id);
+    await rm(backupPath(id), { recursive: true });
+    const { job } = await runJob(async ctx => { await runImport(ctx, upload); });
+    expect(job.status).toBe("failed");
+    expect(job.error).toContain("incomplete");
+  });
+
   test("refuses an archive that is not a backup", async () => {
     const uploadId = crypto.randomUUID();
     await mkdir(config.backupsFolder, { recursive: true });
@@ -380,6 +454,8 @@ describe("manifest", () => {
   test("refuses archive names and data folders that leave their place", () => {
     expect(parseManifest(withApp({ stack: "../../etc/passwd" }))).toBeNull();
     expect(parseManifest(withApp({ stack: "apps/other/stack.tar.gz" }))).toBeNull();
+    expect(parseManifest(withApp({ stack: "apps/jellyfin/data-0.tar.gz" }))).toBeNull();
+    expect(parseManifest(withApp({ data: [{ dir: "jellyfin", archive: "apps/jellyfin/stack.tar.gz" }] }))).toBeNull();
     expect(parseManifest(withApp({ data: [{ dir: "..", archive: "apps/jellyfin/data-0.tar.gz" }] }))).toBeNull();
     expect(parseManifest(withApp({ data: [{ dir: "a/b", archive: "apps/jellyfin/data-0.tar.gz" }] }))).toBeNull();
     expect(parseManifest(withApp({ name: "../x" }))).toBeNull();
@@ -398,5 +474,3 @@ describe("manifest", () => {
   });
 });
 
-// Keep `stat` in use for type-only builds that prune imports.
-void stat;
