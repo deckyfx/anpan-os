@@ -13,14 +13,15 @@
  * separate requests, so the first start ran without the env file, and a tab closed
  * mid-install left a stack with neither.
  */
-import { join, dirname, resolve } from "node:path";
-import { chown, mkdir, realpath, rm, rmdir, stat } from "node:fs/promises";
+import { join, dirname } from "node:path";
+import { chown, mkdir, rm, rmdir, stat } from "node:fs/promises";
 import { parse } from "yaml";
 import { config } from "../config";
 import { bins } from "./commands";
 import { DockerClient, normalizeComposePath } from "./docker";
 import { JobError, processRunner, type JobContext } from "./jobs";
 import { reservePaths } from "./path-reservations";
+import { canonicalOf } from "./path-guard";
 import { withPlatformDefaults, resolvedEnvValue } from "./app-env";
 import { resolveWithin } from "./path-guard";
 import { describeConflicts, findPortConflicts, publishedPorts } from "./port-check";
@@ -371,13 +372,17 @@ export async function runDeploy(ctx: JobContext, mode: "install" | "redeploy", r
   }
 }
 
-/** The host folders a resolved compose configuration bind-mounts, with links followed. */
+/**
+ * The host folders a resolved compose configuration bind-mounts, with links followed, as
+ * far as they exist: a folder not made yet is named through its nearest existing parent's
+ * real path, so a link above it cannot hide that it lies in a folder a restore holds.
+ */
 async function bindSources(resolved: unknown): Promise<string[]> {
   const services = (resolved as { services?: Record<string, { volumes?: { type?: string; source?: string }[] }> }).services ?? {};
   const out: string[] = [];
   for (const service of Object.values(services)) {
     for (const v of service.volumes ?? []) {
-      if (v.type === "bind" && v.source) out.push(await realpath(v.source).catch(() => resolve(v.source!)));
+      if (v.type === "bind" && v.source) out.push(canonicalOf(v.source));
     }
   }
   return out;

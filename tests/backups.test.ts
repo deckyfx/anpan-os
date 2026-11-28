@@ -300,6 +300,10 @@ describe("taking a backup", () => {
       const { job, log } = await runJob(ctx => runRestore(ctx, { id, system: false, apps: [APP] }));
       expect(job.status, log.join("\n")).toBe("done");
       expect(readFileSync(join(dataDir, "config", "settings.json"), "utf8")).toBe("data-v1");
+      // The backups folder is back in its place, the backup in it, and no safety copy left.
+      expect(existsSync(join(resolve(inside), id, "manifest.json"))).toBe(true);
+      expect((await listBackups()).map(b => b.id)).toContain(id);
+      expect((await readdir(config.appDataRoot)).some(n => n.includes(".pre-restore-"))).toBe(false);
     } finally {
       delete (config as { backupsFolder?: string }).backupsFolder;
     }

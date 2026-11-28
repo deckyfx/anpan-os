@@ -109,6 +109,43 @@ describe("containers of an app being backed up", () => {
     }
     expect((await call("POST", "/api/docker/containers/abc/start")).status).toBe(200);
   });
+
+  test("a backup cannot take an app while a start by hand is still going", async () => {
+    spies.push(spyOn(DockerClient, "inspectContainer").mockResolvedValue({
+      ok: true, data: { Config: { Labels: { "com.docker.compose.project": "bk-held" } } },
+    } as never));
+    let finishStart = () => {};
+    const startGate = new Promise<void>(r => { finishStart = r; });
+    spies.push(spyOn(DockerClient, "startContainer").mockImplementation(async () => { await startGate; return { ok: true, data: undefined } as never; }));
+
+    const starting = call("POST", "/api/docker/containers/abc/start");
+    await Bun.sleep(10);
+    let took: boolean | null = null;
+    const started = jobs.start({ kind: "backup", title: "Back up bk-held" }, async ctx => {
+      took = await ctx.withStack("bk-held", async () => {});
+    });
+    if (!started.ok) throw new Error("not started");
+    await finished(started.job.id);
+    expect(took).toBe(false);
+    finishStart();
+    expect((await starting).status).toBe(200);
+  });
+
+  test("an app being backed up cannot be deleted meanwhile", async () => {
+    let finish = () => {};
+    const gate = new Promise<void>(r => { finish = r; });
+    const started = jobs.start({ kind: "backup", title: "Back up bk-held" }, async ctx => {
+      await ctx.withStack("bk-held", () => gate);
+    });
+    if (!started.ok) throw new Error("not started");
+    try {
+      await Bun.sleep(10);
+      expect((await call("DELETE", "/api/docker/stacks/bk-held")).status).toBe(409);
+    } finally {
+      finish();
+      await finished(started.job.id);
+    }
+  });
 });
 
 describe("list, download, delete and upload", () => {

@@ -852,9 +852,27 @@ async function restoreApp(ctx: JobContext, backup: string, m: BackupManifest, ap
       if (runningBefore.length > 0) await recover(`start ${app.name} again`, () => compose(["up", "-d", "--no-deps", ...runningBefore]));
       throw err;
     }
-    // Committed: the app runs on the restored files. A safety copy that cannot be removed is
-    // named, not a reason to call the restore failed.
-    for (const { moved } of aside) await tidy(ctx, moved);
+    // Committed: the app runs on the restored files. The backups folder, when it lay inside
+    // a folder moved aside, goes back to its place first: the archives leave it out, so the
+    // restored folder does not hold it, and removing the safety copy would remove every
+    // backup with it. Where it cannot go back, the safety copy is kept, and named.
+    // A safety copy that cannot be removed is named too, not a reason to call the restore failed.
+    for (const { path, moved } of aside) {
+      const backups = folder();
+      if (backups !== path && within(backups, path)) {
+        const went = join(moved, relative(path, backups));
+        if (await exists(went)) {
+          try {
+            await mkdir(dirname(backups), { recursive: true });
+            await rename(went, backups);
+          } catch (e) {
+            ctx.log(`  ⚠ The backups folder could not go back to ${backups}; it is in ${went}, kept: ${(e as Error).message}`);
+            continue;
+          }
+        }
+      }
+      await tidy(ctx, moved);
+    }
   } finally {
     reserved.release();
   }

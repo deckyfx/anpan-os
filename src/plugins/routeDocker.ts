@@ -21,16 +21,27 @@ const originCache = new Map<string, { origin: ComposeOrigin; expiresAt: number }
 const ORIGIN_TTL  = 5 * 60 * 1000;
 
 /**
- * The backup or restore holding the stack container `id` belongs to, if any. A backup
- * stops an app for a cold copy, and a restore replaces its files: a container started by
- * hand meanwhile would write into the copy, or run on files being swapped.
+ * Hold `stack` for a quick action, so no backup or restore claims it until the action is
+ * done. A backup stops an app for a cold copy and a restore replaces its files: a
+ * container started by hand, or a stack deleted, meanwhile would write into the copy or
+ * pull files out from under it. Checking before the action is not enough; the hold lasts
+ * through it.
+ *
+ * Returns the release (a no-op when there is no stack), or the backup or restore already
+ * holding it. Another kind of job holding the stack does not stop the action, as before.
  */
-async function heldByBackup(id: string): Promise<JobSummary | null> {
+function holdForAction(stack: string | null | undefined): { ok: true; release: () => void } | { ok: false; job: JobSummary } {
+  if (!stack) return { ok: true, release: () => {} };
+  const held = jobs.hold(stack);
+  if (held.ok) return held;
+  if (held.busyWith.kind === "backup" || held.busyWith.kind === "restore") return { ok: false, job: held.busyWith };
+  return { ok: true, release: () => {} };
+}
+
+/** The compose project container `id` belongs to, if Docker says. */
+async function projectOf(id: string): Promise<string | null> {
   const found = await DockerClient.inspectContainer(id);
-  if (!found.ok) return null;
-  const project = found.data.Config.Labels?.["com.docker.compose.project"];
-  const job = project ? jobs.activeFor(project) : null;
-  return job && (job.kind === "backup" || job.kind === "restore") ? job : null;
+  return found.ok ? found.data.Config.Labels?.["com.docker.compose.project"] ?? null : null;
 }
 
 /** Invalidate a single stack's cached origin (call after create/delete/import). */
@@ -283,110 +294,120 @@ export function dockerPlugin(jwtSecret: string) {
      * holds the only copy of whatever is in it.
      */
     .delete("/stacks/:name", async ({ params, body, set }) => {
-      const containers = await DockerClient.listProjectContainers(params.name);
-      if (!containers.ok) { set.status = 502; return { error: containers.error }; }
+      // Held through the whole delete: a backup or restore claiming the stack halfway would
+      // copy, or put back, files this is removing.
+      const held = holdForAction(params.name);
+      if (!held.ok) { set.status = 409; return { error: `"${held.job.title}" is working on this app: delete it when that has finished`, job: held.job }; }
+      try {
+        return await (async () => {
+          const containers = await DockerClient.listProjectContainers(params.name);
+          if (!containers.ok) { set.status = 502; return { error: containers.error }; }
 
-      // Nothing matched. Previously this fell through the whole handler, removed nothing,
-      // and answered 200 — so a delete that could not work was indistinguishable from one
-      // that did. A stack with no containers is still legitimate when anpan-os holds
-      // metadata for it (its containers may have been removed by hand, and the row should
-      // go), so the row is what decides between "already gone" and "never existed".
-      if (containers.data.length === 0 && !(await StackStore.findById(params.name))) {
-        set.status = 404;
-        return { error: `No stack or container named "${params.name}"` };
-      }
-
-      // Judge the bind paths before removing containers — inspecting them afterwards is
-      // impossible, and the verdicts are needed both for the response and for step 5.
-      const bindVerdicts = await judgeStackBindPaths(params.name);
-
-      // Collect bind paths before removal so we can return them
-      const SKIP = new Set(["/var/run/docker.sock", "/etc/localtime", "/etc/timezone", "/etc/hosts", "/etc/hostname"]);
-      const hostPaths = new Set<string>();
-      const inspected = await Promise.all(containers.data.map(c => DockerClient.inspectContainer(c.Id)));
-      for (const r of inspected) {
-        if (!r.ok) continue;
-        for (const m of r.data.Mounts) {
-          if (m.Type === "bind" && !SKIP.has(m.Source)) hostPaths.add(m.Source);
-        }
-      }
-
-      // 1. Remove containers (force-stops running ones, removes anonymous volumes)
-      await Promise.all(containers.data.map(c => DockerClient.removeContainer(c.Id)));
-
-      // 2. Remove named volumes
-      const vols = await DockerClient.listProjectVolumes(params.name);
-      if (vols.ok && vols.data.Volumes) {
-        await Promise.all(vols.data.Volumes.map(v => DockerClient.removeVolume(v.Name)));
-      }
-
-      // 3. Remove networks (the default compose bridge network)
-      const nets = await DockerClient.listProjectNetworks(params.name);
-      if (nets.ok) {
-        await Promise.all(nets.data.map(n => DockerClient.removeNetwork(n.Id)));
-      }
-
-      // 4. Remove DB metadata row
-      await StackStore.delete(params.name);
-      invalidateOriginCache(params.name);
-
-      // 5. Remove bind paths the caller explicitly asked for, re-judging every one.
-      //    The request names paths; it does not authorise them. The list is recomputed
-      //    from Docker because the client's copy may be minutes stale, and a path that
-      //    has since become shared with another stack must not be deleted on the strength
-      //    of an older verdict.
-      const requested = new Set(body?.deletePaths ?? []);
-      const deletedPaths: string[] = [];
-      const refusedPaths: Array<{ path: string; reason: string }> = [];
-
-      if (requested.size > 0) {
-        for (const verdict of bindVerdicts) {
-          if (!requested.has(verdict.path)) continue;
-          if (!verdict.deletable) {
-            refusedPaths.push({ path: verdict.path, reason: verdict.reason });
-            continue;
+          // Nothing matched. Previously this fell through the whole handler, removed nothing,
+          // and answered 200 — so a delete that could not work was indistinguishable from one
+          // that did. A stack with no containers is still legitimate when anpan-os holds
+          // metadata for it (its containers may have been removed by hand, and the row should
+          // go), so the row is what decides between "already gone" and "never existed".
+          if (containers.data.length === 0 && !(await StackStore.findById(params.name))) {
+            set.status = 404;
+            return { error: `No stack or container named "${params.name}"` };
           }
 
-          // Re-judge immediately before removing. The first verdict was formed before the
-          // containers were removed, and another stack can start mounting a path in the
-          // interval — deleting on the strength of the older answer would take data that
-          // is now in use.
-          const fresh = await judgeBindPath(verdict.path, await otherStacksBindPaths(params.name));
-          if (!fresh.deletable) {
-            refusedPaths.push({ path: verdict.path, reason: fresh.reason });
-            continue;
+          // Judge the bind paths before removing containers — inspecting them afterwards is
+          // impossible, and the verdicts are needed both for the response and for step 5.
+          const bindVerdicts = await judgeStackBindPaths(params.name);
+
+          // Collect bind paths before removal so we can return them
+          const SKIP = new Set(["/var/run/docker.sock", "/etc/localtime", "/etc/timezone", "/etc/hosts", "/etc/hostname"]);
+          const hostPaths = new Set<string>();
+          const inspected = await Promise.all(containers.data.map(c => DockerClient.inspectContainer(c.Id)));
+          for (const r of inspected) {
+            if (!r.ok) continue;
+            for (const m of r.data.Mounts) {
+              if (m.Type === "bind" && !SKIP.has(m.Source)) hostPaths.add(m.Source);
+            }
           }
 
-          try {
-            // Delete the canonical target, not the path as written. Awaited rather than
-            // synchronous: a large tree would otherwise block every other request and all
-            // SSE traffic for the duration of the walk.
-            await rm(fresh.canonical, { recursive: true, force: true });
-            deletedPaths.push(verdict.path);
-          } catch (err) {
-            refusedPaths.push({
-              path: verdict.path,
-              reason: err instanceof Error ? err.message : String(err),
-            });
+          // 1. Remove containers (force-stops running ones, removes anonymous volumes)
+          await Promise.all(containers.data.map(c => DockerClient.removeContainer(c.Id)));
+
+          // 2. Remove named volumes
+          const vols = await DockerClient.listProjectVolumes(params.name);
+          if (vols.ok && vols.data.Volumes) {
+            await Promise.all(vols.data.Volumes.map(v => DockerClient.removeVolume(v.Name)));
           }
-        }
-        // A path asked for that is no longer a bind of this stack is refused by omission;
-        // report it so the caller is not left believing it was removed.
-        for (const p of requested) {
-          if (!bindVerdicts.some(v => v.path === p)) {
-            refusedPaths.push({ path: p, reason: "No longer a bind mount of this stack" });
+
+          // 3. Remove networks (the default compose bridge network)
+          const nets = await DockerClient.listProjectNetworks(params.name);
+          if (nets.ok) {
+            await Promise.all(nets.data.map(n => DockerClient.removeNetwork(n.Id)));
           }
-        }
+
+          // 4. Remove DB metadata row
+          await StackStore.delete(params.name);
+          invalidateOriginCache(params.name);
+
+          // 5. Remove bind paths the caller explicitly asked for, re-judging every one.
+          //    The request names paths; it does not authorise them. The list is recomputed
+          //    from Docker because the client's copy may be minutes stale, and a path that
+          //    has since become shared with another stack must not be deleted on the strength
+          //    of an older verdict.
+          const requested = new Set(body?.deletePaths ?? []);
+          const deletedPaths: string[] = [];
+          const refusedPaths: Array<{ path: string; reason: string }> = [];
+
+          if (requested.size > 0) {
+            for (const verdict of bindVerdicts) {
+              if (!requested.has(verdict.path)) continue;
+              if (!verdict.deletable) {
+                refusedPaths.push({ path: verdict.path, reason: verdict.reason });
+                continue;
+              }
+
+              // Re-judge immediately before removing. The first verdict was formed before the
+              // containers were removed, and another stack can start mounting a path in the
+              // interval — deleting on the strength of the older answer would take data that
+              // is now in use.
+              const fresh = await judgeBindPath(verdict.path, await otherStacksBindPaths(params.name));
+              if (!fresh.deletable) {
+                refusedPaths.push({ path: verdict.path, reason: fresh.reason });
+                continue;
+              }
+
+              try {
+                // Delete the canonical target, not the path as written. Awaited rather than
+                // synchronous: a large tree would otherwise block every other request and all
+                // SSE traffic for the duration of the walk.
+                await rm(fresh.canonical, { recursive: true, force: true });
+                deletedPaths.push(verdict.path);
+              } catch (err) {
+                refusedPaths.push({
+                  path: verdict.path,
+                  reason: err instanceof Error ? err.message : String(err),
+                });
+              }
+            }
+            // A path asked for that is no longer a bind of this stack is refused by omission;
+            // report it so the caller is not left believing it was removed.
+            for (const p of requested) {
+              if (!bindVerdicts.some(v => v.path === p)) {
+                refusedPaths.push({ path: p, reason: "No longer a bind mount of this stack" });
+              }
+            }
+          }
+
+          // 6. Remove managed compose directory and install log (best-effort)
+          const composeDir = join(config.composeFolder, params.name);
+          if (composeDir.startsWith(config.composeFolder)) {
+            try { await rm(composeDir, { recursive: true, force: true }); } catch { /* ignore */ }
+          }
+          try { await rm(join(envConfig.RUNTIME_CONFIG_DIR, "logs", `${params.name}.log`), { force: true }); } catch { /* ignore */ }
+
+          return { ok: true, hostPaths: [...hostPaths].sort(), deletedPaths, refusedPaths };
+        })();
+      } finally {
+        held.release();
       }
-
-      // 6. Remove managed compose directory and install log (best-effort)
-      const composeDir = join(config.composeFolder, params.name);
-      if (composeDir.startsWith(config.composeFolder)) {
-        try { await rm(composeDir, { recursive: true, force: true }); } catch { /* ignore */ }
-      }
-      try { await rm(join(envConfig.RUNTIME_CONFIG_DIR, "logs", `${params.name}.log`), { force: true }); } catch { /* ignore */ }
-
-      return { ok: true, hostPaths: [...hostPaths].sort(), deletedPaths, refusedPaths };
     }, {
       // Optional: a delete with no body removes the stack and leaves every host path,
       // which is the behaviour every existing caller expects.
@@ -402,11 +423,15 @@ export function dockerPlugin(jwtSecret: string) {
     })
 
     .post("/containers/:id/start", async ({ params, set }) => {
-      const held = await heldByBackup(params.id);
-      if (held) { set.status = 409; return { error: `"${held.title}" is working on this app: start it when that has finished`, job: held }; }
-      const result = await DockerClient.startContainer(params.id);
-      if (!result.ok) { set.status = 502; return { error: result.error }; }
-      return { ok: true };
+      const held = holdForAction(await projectOf(params.id));
+      if (!held.ok) { set.status = 409; return { error: `"${held.job.title}" is working on this app: start it when that has finished`, job: held.job }; }
+      try {
+        const result = await DockerClient.startContainer(params.id);
+        if (!result.ok) { set.status = 502; return { error: result.error }; }
+        return { ok: true };
+      } finally {
+        held.release();
+      }
     })
 
     .post("/containers/:id/stop", async ({ params, set }) => {
@@ -416,11 +441,15 @@ export function dockerPlugin(jwtSecret: string) {
     })
 
     .post("/containers/:id/restart", async ({ params, set }) => {
-      const held = await heldByBackup(params.id);
-      if (held) { set.status = 409; return { error: `"${held.title}" is working on this app: restart it when that has finished`, job: held }; }
-      const result = await DockerClient.restartContainer(params.id);
-      if (!result.ok) { set.status = 502; return { error: result.error }; }
-      return { ok: true };
+      const held = holdForAction(await projectOf(params.id));
+      if (!held.ok) { set.status = 409; return { error: `"${held.job.title}" is working on this app: restart it when that has finished`, job: held.job }; }
+      try {
+        const result = await DockerClient.restartContainer(params.id);
+        if (!result.ok) { set.status = 502; return { error: result.error }; }
+        return { ok: true };
+      } finally {
+        held.release();
+      }
     })
 
     .get(
