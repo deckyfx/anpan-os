@@ -245,6 +245,9 @@ async function prepareDataFolders(
     // never above the data root. Only those change owner.
     const missing: string[] = [];
     for (let dir = source; dir.startsWith(`${root}/`) && !(await exists(dir)); dir = dirname(dir)) missing.push(dir);
+    // The data root itself may not exist yet on a new machine. It is made, but never
+    // recorded: an undo removes the app's folders, not the root they all share.
+    await mkdir(root, { recursive: true });
     // Top down, one at a time, so `created` only ever names folders this made.
     for (const dir of [...missing].reverse()) {
       await mkdir(dir);
