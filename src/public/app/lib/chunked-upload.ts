@@ -13,6 +13,22 @@ const UPLOAD_STALL_MS = 60_000;
 /** Tries per chunk before the file is given up; the wait between them doubles from 1 s. */
 const UPLOAD_ATTEMPTS = 4;
 
+/**
+ * A new upload id, in the UUID form the server checks for.
+ *
+ * `crypto.randomUUID` exists only on secure origins (HTTPS, localhost), and anpan-os is
+ * also opened over plain HTTP on a LAN address. `getRandomValues` has no such limit, so
+ * the same version-4 UUID is made from it there.
+ */
+export function newUploadId(): string {
+  if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  const b = crypto.getRandomValues(new Uint8Array(16));
+  b[6] = (b[6]! & 0x0f) | 0x40; // version 4
+  b[8] = (b[8]! & 0x3f) | 0x80; // RFC 4122 variant
+  const hex = [...b].map(x => x.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 /** Lets the page cancel an upload: remembers the chunk in flight, and whether to stop. */
 export class UploadControl {
   private active: XMLHttpRequest | null = null;

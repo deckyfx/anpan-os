@@ -103,7 +103,17 @@ export function BackupsPage({ onNavigate }: { onNavigate: (path: string) => void
 
   const applyRestore = async () => {
     setRestarting(true);
-    const { data, error } = await api.api.backups["apply-restore"].post();
+    let answer: Awaited<ReturnType<typeof api.api.backups["apply-restore"]["post"]>>;
+    try {
+      answer = await api.api.backups["apply-restore"].post();
+    } catch (e) {
+      // A request that fails outright (the body could not be read, say) must not leave the
+      // button stuck on "Restarting…".
+      setRestarting(false);
+      useToastStore.getState().push(e instanceof Error ? e.message : "Could not restart", "error");
+      return;
+    }
+    const { data, error } = answer;
     if (error) {
       setRestarting(false);
       useToastStore.getState().push((error.value as { error?: string } | null)?.error ?? "Could not restart", "error");

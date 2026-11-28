@@ -86,12 +86,15 @@ export function checkChunkQuery(q: { id: string; offset: number; total: number }
  * Write one chunk of upload `q.id` for `dest`, from `request`'s body.
  *
  * `onFirstChunk` runs, under the upload's lock, before the first chunk is written.
+ * `mayCommit` runs under the lock right before the finished file is renamed into place;
+ * when it answers false the upload is refused (409) and the file left as it was.
  */
 export async function receiveChunk(
   dest: string,
   q: { id: string; offset: number; total: number },
   request: Request,
   onFirstChunk?: () => Promise<void>,
+  mayCommit?: () => boolean,
 ): Promise<Response | ChunkReply> {
   const refused = checkChunkQuery(q);
   if (refused) return refused;
@@ -149,6 +152,10 @@ export async function receiveChunk(
 
     const received = offset + written;
     if (received < total) return { ok: true as const, done: false, received };
+    if (mayCommit && !mayCommit()) {
+      await rm(tmp, { force: true });
+      return Response.json({ error: "This upload has already been taken", received: 0 }, { status: 409 });
+    }
     await rename(tmp, dest);
     return { ok: true as const, done: true, received };
   } catch (err) {

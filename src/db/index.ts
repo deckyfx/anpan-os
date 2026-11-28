@@ -1,11 +1,11 @@
 import { Database } from "bun:sqlite";
 import { drizzle } from "drizzle-orm/bun-sqlite";
 import { mkdirSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
 import { config } from "../config";
 import { envConfig } from "../env-config";
 import { parseCli } from "../cli-parser";
-import { applyPendingRestore, PENDING_DIR } from "../lib/pending-restore";
+import { abandonInstructions, applyPendingRestore } from "../lib/pending-restore";
 
 /**
  * Create the runtime directory before opening the database.
@@ -45,11 +45,9 @@ if (parseCli().type === "serve") {
     const applied = applyPendingRestore(envConfig.RUNTIME_CONFIG_DIR);
     if (applied.length > 0) console.log(`♻️  Restored from backup: ${applied.join(", ")}`);
   } catch (err) {
-    const staged = join(envConfig.RUNTIME_CONFIG_DIR, PENDING_DIR);
     console.error(
       `❌ Could not apply the staged restore: ${err instanceof Error ? err.message : String(err)}\n` +
-      `   Fix the cause and start again. To start without the restore instead, first put back any\n` +
-      `   file listed above as moved aside (ending in .pre-restore), then delete ${staged}.`,
+      `   Fix the cause and start again. ${abandonInstructions(envConfig.RUNTIME_CONFIG_DIR)}`,
     );
     process.exit(1);
   }

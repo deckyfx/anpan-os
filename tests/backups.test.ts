@@ -7,7 +7,7 @@
 import { test, expect, describe, afterEach, afterAll, beforeEach, spyOn } from "bun:test";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { mkdir, readdir, rm, symlink, writeFile } from "node:fs/promises";
-import { existsSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, renameSync, writeFileSync, readFileSync } from "node:fs";
 import { JobManager, processRunner, type JobContext, type JobSummary } from "../src/lib/jobs";
 import {
   backupIdFor, backupPath, getBackup, listBackups, parseManifest, prepareUploads, runBackup, runImport, runRestore, uploadPath,
@@ -63,6 +63,10 @@ let exitCodes: Record<string, number> = {};
 let otherBinds: string[] = [];
 /** Docker cannot be read. */
 let dockerDown = false;
+/** Exit codes for successive `up` runs, first one first; then `exitCodes` applies. */
+let upResults: number[] = [];
+/** The app's settings.json as each `up` found it. */
+let seenAtUp: string[] = [];
 
 function record(argv: string[]): string {
   if (argv[0]!.endsWith("tar")) return "tar";
@@ -93,6 +97,8 @@ beforeEach(async () => {
   exitCodes = {};
   otherBinds = [];
   dockerDown = false;
+  upResults = [];
+  seenAtUp = [];
   spies.push(spyOn(DockerClient, "listContainers").mockImplementation(async () => dockerDown ? { ok: false as const, error: "no socket" } as never : ({
     ok: true as const,
     data: otherBinds.length === 0 ? [] : [{ Id: "other", Labels: { "com.docker.compose.project": "other-app" } }] as never,
@@ -114,6 +120,10 @@ beforeEach(async () => {
     if (cmd === "tar") {
       const proc = Bun.spawn(argv, { cwd: opts.cwd, stdout: "pipe", stderr: "pipe" });
       return proc.exited;
+    }
+    if (cmd.startsWith(`compose ${APP} up`)) {
+      seenAtUp.push(readFileSync(join(dataDir, "config", "settings.json"), "utf8"));
+      if (upResults.length > 0) return upResults.shift()!;
     }
     return Object.entries(exitCodes).find(([prefix]) => cmd.startsWith(prefix))?.[1] ?? 0;
   }));
@@ -331,12 +341,16 @@ describe("restoring", () => {
     const id = await backUp();
     await writeFile(join(dataDir, "config", "settings.json"), "data-v2");
     await StackStore.updateMeta(APP, { title: "Renamed" });
-    exitCodes = { [`compose ${APP} up`]: 1 };
+    // The restored app fails to start; starting it again on its own files works.
+    upResults = [1, 0];
     ran = [];
 
-    const { job } = await runJob(ctx => runRestore(ctx, { id, system: false, apps: [APP] }));
+    const { job, log } = await runJob(ctx => runRestore(ctx, { id, system: false, apps: [APP] }));
     expect(job.status).toBe("failed");
     expect(job.error).toContain(APP);
+    // The first up saw the backup's files, the second the files put back.
+    expect(seenAtUp).toEqual(["data-v1", "data-v2"]);
+    expect(log.some(l => l.includes("Could not"))).toBe(false);
     expect(readFileSync(join(dataDir, "config", "settings.json"), "utf8")).toBe("data-v2");
     expect((await StackStore.findById(APP))!.title).toBe("Renamed");
     expect((await readdir(config.appDataRoot)).some(n => n.includes(".pre-restore-"))).toBe(false);
@@ -404,7 +418,7 @@ describe("staging checks", () => {
     const work = join(envConfig.RUNTIME_CONFIG_DIR, "bk-sys");
     await rm(work, { recursive: true, force: true });
     await mkdir(work);
-    new Database(join(work, "storage.db")).close();
+    copyTestDatabase(join(work, "storage.db"));
     await symlink("/etc/hostname", join(work, ".ready"));
     await writeFile(join(work, "extra.txt"), "x");
     Bun.spawnSync(["tar", "-czf", join(backupPath(id), "system.tar.gz"), "-C", work, "storage.db", ".ready", "extra.txt"]);
@@ -435,6 +449,24 @@ describe("staging checks", () => {
     const { job } = await runJob(ctx => runRestore(ctx, { id, system: true, apps: [] }));
     expect(job.status).toBe("failed");
     expect(job.error).toContain("cannot be used");
+    expect(existsSync(join(envConfig.RUNTIME_CONFIG_DIR, PENDING_DIR))).toBe(false);
+  });
+
+  test("refuses a database this build cannot start on", async () => {
+    const id = await backUp({ system: true, apps: [] });
+    const work = join(envConfig.RUNTIME_CONFIG_DIR, "bk-sys");
+    await rm(work, { recursive: true, force: true });
+    await mkdir(work);
+    // From a newer build: one migration more than this one knows.
+    copyTestDatabase(join(work, "storage.db"));
+    const db = new Database(join(work, "storage.db"));
+    db.run("INSERT INTO __drizzle_migrations (hash, created_at) VALUES ('future', 99999999999999)");
+    db.close();
+    Bun.spawnSync(["tar", "-czf", join(backupPath(id), "system.tar.gz"), "-C", work, "storage.db"]);
+    await rm(work, { recursive: true });
+    const { job } = await runJob(ctx => runRestore(ctx, { id, system: true, apps: [] }));
+    expect(job.status).toBe("failed");
+    expect(job.error).toContain("this version of anpan-os");
     expect(existsSync(join(envConfig.RUNTIME_CONFIG_DIR, PENDING_DIR))).toBe(false);
   });
 
@@ -470,11 +502,46 @@ describe("applying a staged system restore", () => {
 
   test("finishes a start that stopped part way", () => {
     writeFileSync(join(dir, PENDING_DIR, READY_MARKER), "x");
-    // As left by a start that moved config.toml aside and then stopped.
-    Bun.spawnSync(["mv", join(dir, "config.toml"), join(dir, "config.toml.pre-restore")]);
+    // As left by a start that moved config.toml into .originals, put the new one in
+    // place, and then stopped.
+    mkdirSync(join(dir, PENDING_DIR, ".originals"));
+    renameSync(join(dir, "config.toml"), join(dir, PENDING_DIR, ".originals", "config.toml"));
+    renameSync(join(dir, PENDING_DIR, "config.toml"), join(dir, "config.toml"));
+    expect(applyPendingRestore(dir)).toEqual(["storage.db", "certs"]);
+    expect(readFileSync(join(dir, "config.toml"), "utf8")).toBe("new");
+    expect(readFileSync(join(dir, "storage.db"), "utf8")).toBe("new-db");
+    expect(existsSync(join(dir, PENDING_DIR))).toBe(false);
+  });
+
+  // Moving a folder to another parent needs write access to the folder itself on Linux;
+  // a read-only staged certs/ is the last entry, and fails after the others went in.
+  const canFailRename = process.platform === "linux" && process.getuid?.() !== 0;
+  test.if(canFailRename)("puts everything back when an entry cannot go in, and keeps the staging", () => {
+    writeFileSync(join(dir, PENDING_DIR, READY_MARKER), "x");
+    chmodSync(join(dir, PENDING_DIR, "certs"), 0o555);
+    try {
+      expect(() => applyPendingRestore(dir)).toThrow();
+    } finally {
+      chmodSync(join(dir, PENDING_DIR, "certs"), 0o755);
+    }
+    // The entries that went in are back in the staging, and the originals in place.
+    expect(readFileSync(join(dir, "config.toml"), "utf8")).toBe("old");
+    expect(readFileSync(join(dir, "storage.db"), "utf8")).toBe("old-db");
+    expect(readFileSync(join(dir, "storage.db-wal"), "utf8")).toBe("old-wal");
+    expect(existsSync(join(dir, "certs", "old.pem"))).toBe(true);
+    expect(readFileSync(join(dir, PENDING_DIR, "config.toml"), "utf8")).toBe("new");
+    expect(existsSync(join(dir, PENDING_DIR, READY_MARKER))).toBe(true);
+    // And the next start, with the cause fixed, applies it.
     expect(applyPendingRestore(dir)).toEqual(["config.toml", "storage.db", "certs"]);
     expect(readFileSync(join(dir, "config.toml"), "utf8")).toBe("new");
-    expect(existsSync(join(dir, "config.toml.pre-restore"))).toBe(false);
+  });
+
+  test("a restore staged over another and cut short still applies the earlier one", () => {
+    writeFileSync(join(dir, PENDING_DIR, READY_MARKER), "x");
+    renameSync(join(dir, PENDING_DIR), join(dir, `${PENDING_DIR}.previous`));
+    expect(applyPendingRestore(dir)).toEqual(["config.toml", "storage.db", "certs"]);
+    expect(readFileSync(join(dir, "config.toml"), "utf8")).toBe("new");
+    expect(existsSync(join(dir, `${PENDING_DIR}.previous`))).toBe(false);
   });
 
   test("replaces each entry, drops the old write-ahead log, and removes the staging", () => {
@@ -488,6 +555,12 @@ describe("applying a staged system restore", () => {
     expect(existsSync(join(dir, PENDING_DIR))).toBe(false);
   });
 });
+
+/** A copy of the test database: a real one, with this build's migration history. */
+function copyTestDatabase(to: string): void {
+  const db = new Database(join(envConfig.RUNTIME_CONFIG_DIR, "storage.db"));
+  try { db.run("VACUUM INTO ?", [to]); } finally { db.close(); }
+}
 
 function rmSyncSafe(path: string): void {
   Bun.spawnSync(["rm", "-rf", path]);
@@ -596,6 +669,16 @@ describe("manifest", () => {
     const m = good();
     m.apps = [...(m.apps as unknown[]), ...(m.apps as unknown[])];
     expect(parseManifest(JSON.stringify(m))).toBeNull();
+  });
+
+  test("lists backups of one second in order, -10 after -9", async () => {
+    for (const id of ["20261128-093000", "20261128-093000-2", "20261128-093000-9", "20261128-093000-10", "20261128-093001"]) {
+      await mkdir(backupPath(id), { recursive: true });
+      await writeFile(join(backupPath(id), "manifest.json"), JSON.stringify({ ...good(), id, system: null, apps: [] }));
+    }
+    expect((await listBackups()).map(b => b.id)).toEqual(
+      ["20261128-093001", "20261128-093000-10", "20261128-093000-9", "20261128-093000-2", "20261128-093000"],
+    );
   });
 
   test("names a backup by its UTC time", () => {

@@ -3,7 +3,7 @@
  * Sets RUNTIME_CONFIG_DIR to an isolated temp directory so tests use
  * a separate SQLite database instead of the dev database.
  */
-import { mkdirSync } from "node:fs";
+import { lstatSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
 import { drizzle } from "drizzle-orm/bun-sqlite";
@@ -11,6 +11,11 @@ import { migrate } from "drizzle-orm/bun-sqlite/migrator";
 
 const TEST_DIR = "./configs/anpan-test";
 mkdirSync(TEST_DIR, { recursive: true });
+// Tests delete freely under this folder. A link here would aim that at whatever it points
+// to (a real runtime dir, say), so refuse one before anything opens or deletes in it.
+if (lstatSync(TEST_DIR).isSymbolicLink()) {
+  throw new Error(`${TEST_DIR} is a symbolic link; tests need a real folder there`);
+}
 
 // Must be set before any src/ module is imported so db/index.ts picks it up.
 process.env.RUNTIME_CONFIG_DIR = TEST_DIR;

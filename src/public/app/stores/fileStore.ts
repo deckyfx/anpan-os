@@ -3,7 +3,7 @@ import { api } from "../lib/api";
 import type { FileEntry, ViewMode, UploadItem, CtxMenu, SambaShare, ShareBackend, FileBrowserConfig } from "../pages/files/types";
 import { normalizePath, parentPath } from "../pages/files/helpers";
 import { useToastStore } from "./toastStore";
-import { UploadControl, uploadInChunks } from "../lib/chunked-upload";
+import { UploadControl, newUploadId, uploadInChunks } from "../lib/chunked-upload";
 
 function debounce<T extends unknown[]>(fn: (...args: T) => void, ms: number) {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -243,7 +243,7 @@ const upload = new UploadControl();
  * it stopped — in which case the server's partial copy has been asked to go.
  */
 function uploadFile(dir: string, file: File, onProgress: (loaded: number) => void): Promise<string | null> {
-  const base = `/api/files/upload?path=${encodeURIComponent(dir)}&name=${encodeURIComponent(file.name)}&id=${crypto.randomUUID()}`;
+  const base = `/api/files/upload?path=${encodeURIComponent(dir)}&name=${encodeURIComponent(file.name)}&id=${newUploadId()}`;
   return uploadInChunks(base, file, onProgress, upload);
 }
 

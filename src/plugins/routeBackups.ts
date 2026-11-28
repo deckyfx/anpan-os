@@ -150,8 +150,11 @@ export function backupsPlugin(jwtSecret: string) {
     .put("/upload", async ({ query, request }) => {
       const refused = checkChunkQuery(query);
       if (refused) return refused;
+      // An upload an import or an abandon has taken gets no more writes: refused here, and
+      // again under the upload's lock right before its file would be replaced.
+      if (claimedUploads.has(query.id)) return Response.json({ error: "This upload has already been taken" }, { status: 409 });
       const dest = uploadPath(query.id);
-      return receiveChunk(dest, query, request, prepareUploads);
+      return receiveChunk(dest, query, request, prepareUploads, () => !claimedUploads.has(query.id));
     }, {
       // Read the body ourselves, after the auth guard.
       parse: "none",

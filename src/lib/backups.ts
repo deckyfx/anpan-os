@@ -35,7 +35,8 @@ import type { NewStack } from "../db/schema";
 import { bins } from "./commands";
 import { composeCommand, COMPOSE_FILE } from "./compose-cmd";
 import { JobError, processRunner, type JobContext } from "./jobs";
-import { PENDING_DIR, READY_MARKER, SYSTEM_ENTRIES } from "./pending-restore";
+import { PENDING_DIR, PREVIOUS_SUFFIX, READY_MARKER, SYSTEM_ENTRIES } from "./pending-restore";
+import { MigrationManager } from "../db/migration-manager";
 import { CASAOS_APPS_DIR } from "./platform";
 import { stackDir } from "./stack-ops";
 import { STACK_NAME_RE } from "../constants/stack";
@@ -139,6 +140,20 @@ async function tidy(ctx: JobContext, path: string): Promise<void> {
 export function backupIdFor(date: Date): string {
   const iso = date.toISOString(); // 2026-11-28T09:30:00.000Z
   return `${iso.slice(0, 10).replaceAll("-", "")}-${iso.slice(11, 19).replaceAll(":", "")}`;
+}
+
+/**
+ * Order backup ids oldest first: by time, then by suffix as a number, an id without one
+ * being the first of its second (so `-10` comes after `-9`, not before `-2`).
+ */
+function compareIds(a: string, b: string): number {
+  const split = (id: string): [string, number] => {
+    const m = /^(\d{8}-\d{6})(?:-(\d+))?$/.exec(id);
+    return m ? [m[1]!, m[2] ? Number(m[2]) : 1] : [id, 0];
+  };
+  const [ta, na] = split(a);
+  const [tb, nb] = split(b);
+  return ta === tb ? na - nb : ta.localeCompare(tb);
 }
 
 /** `base`, or `base-2`, `base-3`… whichever is free in the backups folder. */
@@ -274,7 +289,7 @@ export async function listBackups(): Promise<BackupSummary[]> {
       size: sizes.reduce((sum, n) => sum + n, 0),
     });
   }
-  return out.sort((a, b) => b.id.localeCompare(a.id));
+  return out.sort((a, b) => compareIds(b.id, a.id));
 }
 
 /** The manifest of backup `id`, or null when there is no such backup. */
@@ -322,8 +337,8 @@ function within(child: string, parent: string): boolean {
 }
 
 /**
- * Bind mounts of every container but `stack`'s, by source, from Docker: what other apps
- * use, so one app's backup and restore leave it alone.
+ * Bind mounts of every container but `stack`'s, by source with links followed, from
+ * Docker: what other apps use, so one app's backup and restore leave it alone.
  *
  * Throws when Docker cannot say: an empty answer would make every folder look like this
  * app's alone, and a restore could then replace another app's data.
@@ -335,9 +350,19 @@ async function otherAppsBinds(stack: string): Promise<string[]> {
   const foreign = containers.data.filter(c => (c.Labels?.["com.docker.compose.project"] ?? "") !== stack);
   for (const r of await Promise.all(foreign.map(c => DockerClient.inspectContainer(c.Id)))) {
     if (!r.ok) throw new JobError(`Could not read from Docker which folders other apps use: ${r.error}`);
-    for (const m of r.data.Mounts) if (m.Type === "bind") out.push(resolve(m.Source));
+    for (const m of r.data.Mounts) if (m.Type === "bind") out.push(await realExisting(m.Source));
   }
   return out;
+}
+
+/**
+ * Refuse when another app mounts `dir` or anything in or around it. Compared with links
+ * followed on both sides: a path through a link names the same files as its target.
+ */
+async function refuseShared(dir: string, others: string[], what: string): Promise<void> {
+  const real = await realExisting(dir);
+  const used = others.find(o => overlaps(o, real));
+  if (used) throw new JobError(`Another app uses ${used}, in or around ${dir}; ${what}`);
 }
 
 /** Whether `a` and `b` are one folder, or one is inside the other. */
@@ -356,7 +381,7 @@ function overlaps(a: string, b: string): boolean {
  *
  * Everything else the stack mounts is logged as not included.
  */
-async function dataFolders(ctx: JobContext, name: string, dir: string): Promise<string[]> {
+async function dataFolders(ctx: JobContext, name: string, dir: string, others: string[]): Promise<string[]> {
   const out = await processRunner.capture([...composeCommand(docker(), name, dir), "config", "--format", "json"], { cwd: dir, signal: ctx.signal });
   ctx.throwIfCancelled();
   if (out.code !== 0) {
@@ -381,18 +406,19 @@ async function dataFolders(ctx: JobContext, name: string, dir: string): Promise<
     }
   }
 
-  const others = sources.length > 0 ? await otherAppsBinds(name) : [];
   const candidates = new Set<string>();
   for (const source of sources) {
     const first = join(root, relative(root, source).split(sep)[0]!);
     // Another app's mount in the folder, or around it (one that mounts the whole data root,
-    // say): either way the folder is not this app's alone.
-    const shared = others.some(o => overlaps(o, first));
+    // say): either way the folder is not this app's alone. Links followed, as Docker does.
+    const realFirst = await realExisting(first);
+    const shared = others.some(o => overlaps(o, realFirst));
     if (!shared) { candidates.add(first); continue; }
     // Shared with another app: this app's own folder only, and only when no other app
     // uses it or anything in it. A single file cannot be replaced on its own by a
     // restore, so it is left out.
-    if (others.some(o => overlaps(o, source))) skipped.add(`${source} (another app uses it too)`);
+    const realSource = await realExisting(source);
+    if (others.some(o => overlaps(o, realSource))) skipped.add(`${source} (another app uses it too)`);
     else if ((await stat(source).catch(() => null))?.isDirectory()) candidates.add(source);
     else skipped.add(`${source} (a single file in ${first}, which other apps use too)`);
   }
@@ -406,8 +432,10 @@ async function dataFolders(ctx: JobContext, name: string, dir: string): Promise<
     if (present.some(p => within(f, p))) continue;
     if (!(await stat(f).catch(() => null))?.isDirectory()) continue;
     const real = await realpath(f).catch(() => f);
-    if (within(real, realRoot)) present.push(f);
-    else skipped.add(`${f} (a link to ${real}, outside ${root})`);
+    if (!within(real, realRoot)) { skipped.add(`${f} (a link to ${real}, outside ${root})`); continue; }
+    // A path the manifest can hold, so that the backup it goes in can be read back.
+    if (!isDataDir(relative(root, f).split(sep).join("/"))) { skipped.add(`${f} (too deep under ${root})`); continue; }
+    present.push(f);
   }
   for (const what of [...skipped].sort()) ctx.log(`  Not included: ${what}`);
   return present;
@@ -452,7 +480,9 @@ async function backUpApp(ctx: JobContext, name: string, partial: string): Promis
   const row = await StackStore.findById(name);
   const live = row?.backupLive ?? false;
 
-  const data = await dataFolders(ctx, name, dir);
+  const others = await otherAppsBinds(name);
+  await refuseShared(dir, others, `not backing up ${name}, whose stack folder that is`);
+  const data = await dataFolders(ctx, name, dir, others);
   const running = await runningServices(ctx, name, dir);
   await mkdir(join(partial, "apps", name), { recursive: true });
 
@@ -561,7 +591,7 @@ export async function runBackup(ctx: JobContext, req: BackupRequest): Promise<st
         if (ctx.signal.aborted) throw err;
         ctx.log(`  ✕ ${err instanceof Error ? err.message : String(err)}`);
         failed.push(name);
-        await rm(join(partial, "apps", name), { recursive: true, force: true });
+        await tidy(ctx, join(partial, "apps", name));
       }
       ctx.progress(++done, total);
     }
@@ -624,7 +654,7 @@ async function stageSystem(ctx: JobContext, backup: string, m: BackupManifest): 
   // A restore staged earlier stays in place until this one is: moved aside, and moved back
   // if this one cannot be put there. One an earlier attempt could not move back is put
   // back now, before anything else, rather than taken for clutter.
-  const previous = `${staged}.previous`;
+  const previous = staged + PREVIOUS_SUFFIX;
   if (!(await exists(staged)) && await exists(previous)) await rename(previous, staged);
   await rm(partial, { recursive: true, force: true });
   await mkdir(partial, { mode: 0o700 });
@@ -648,6 +678,10 @@ async function stageSystem(ctx: JobContext, backup: string, m: BackupManifest): 
     }
     // And one SQLite can open and finds sound: at the restart it replaces the live one.
     checkDatabase(join(partial, "storage.db"));
+    // And one this build can start on: the check startup makes, made now, while the live
+    // database is still there. A backup from a newer build, or another branch, is refused.
+    const problem = await MigrationManager.compatibilityProblem(join(partial, "storage.db"));
+    if (problem) throw new JobError(`The database in this backup cannot be used by this version of anpan-os: ${problem}`);
     // "wx": created here, never written through something already there.
     await writeFile(join(partial, READY_MARKER), `${m.id}\n`, { flag: "wx" });
     await rm(previous, { recursive: true, force: true });
@@ -697,12 +731,11 @@ async function restoreApp(ctx: JobContext, backup: string, m: BackupManifest, ap
     if (!within(real, realRoot)) throw new JobError(`${d.path} now leads to ${real}, outside ${root}; not restoring ${app.name}`);
   }
 
-  // A folder that was this app's alone when backed up may hold another app's data now.
-  // Checked before anything is stopped or moved.
-  if (dataDirs.length > 0) {
-    const others = await otherAppsBinds(app.name);
-    const taken = dataDirs.filter(d => others.some(o => overlaps(o, d.path))).map(d => d.path);
-    if (taken.length > 0) throw new JobError(`Another app now uses ${taken.join(", ")}; restoring ${app.name} would replace its data`);
+  // A folder that was this app's alone when backed up may hold another app's data now,
+  // the stack folder included. Checked before anything is stopped or moved.
+  const others = await otherAppsBinds(app.name);
+  for (const path of [dir, ...dataDirs.map(d => d.path)]) {
+    await refuseShared(path, others, `restoring ${app.name} would replace its data`);
   }
 
   const hadStack = await Bun.file(join(dir, COMPOSE_FILE)).exists();

@@ -205,9 +205,13 @@ export class MigrationManager {
    * branch that diverged. Either way the schema contains changes this code does not know
    * about.
    */
-  private static async analyse(): Promise<{
+  private static async analyse(databasePath: string = config.databasePath): Promise<{
     pending: number;
     problem: string | null;
+    /** The database has no migration history at all (a new database, or not ours). */
+    untracked?: boolean;
+    /** The history is there but could not be read. */
+    unreadable?: string;
   }> {
     // Ordered as the journal orders them, with the same timestamp Drizzle records as
     // created_at, so the build's sequence and the database's are directly comparable.
@@ -240,7 +244,7 @@ export class MigrationManager {
       }
     }
 
-    const sqlite = new Database(config.databasePath);
+    const sqlite = new Database(databasePath);
     sqlite.run("PRAGMA busy_timeout = 15000;");
     const db = drizzle(sqlite);
     try {
@@ -248,7 +252,7 @@ export class MigrationManager {
         sql`SELECT name FROM sqlite_master WHERE type = 'table' AND name = '__drizzle_migrations'`,
       );
       if (tracking.length === 0)
-        return { pending: buildSeq.length, problem: null };
+        return { pending: buildSeq.length, problem: null, untracked: true };
 
       let rows: Array<{ hash: string; created_at: number }>;
       try {
@@ -256,12 +260,8 @@ export class MigrationManager {
           sql`SELECT hash, created_at FROM __drizzle_migrations ORDER BY created_at ASC`,
         );
       } catch (err) {
-        console.error("❌ The migration history exists but could not be read.");
-        console.error(`💡 ${err instanceof Error ? err.message : String(err)}`);
-        console.error(
-          "💡 The database may be corrupt or written by an incompatible tool.",
-        );
-        process.exit(1);
+        const reason = err instanceof Error ? err.message : String(err);
+        return { pending: 0, problem: `the migration history could not be read (${reason})`, unreadable: reason };
       }
 
       // The applied migrations must be an ordered prefix of this build's sequence.
@@ -308,6 +308,22 @@ export class MigrationManager {
   }
 
   /**
+   * Why this build could not start on the database at `databasePath`, or null when it can
+   * (its migrations are this build's, or an earlier run of them, which startup completes).
+   *
+   * The same comparison startup makes, so that a database checked here is one startup
+   * accepts: a restored backup is checked with it before it replaces the live database.
+   * A database with no migration history at all is refused too: startup would take it for
+   * a new one and try to create tables it already has.
+   */
+  static async compatibilityProblem(databasePath: string): Promise<string | null> {
+    const { problem, untracked } = await this.analyse(databasePath);
+    if (problem) return problem;
+    if (untracked) return "it has no migration history";
+    return null;
+  }
+
+  /**
    * Refuse to proceed when the build and the database cannot work together.
    *
    * Shared by init() and runMigrations() because `bun run migrate` calls the latter
@@ -323,7 +339,15 @@ export class MigrationManager {
       process.exit(1);
     }
 
-    const { pending, problem } = await this.analyse();
+    const { pending, problem, unreadable } = await this.analyse();
+    if (unreadable !== undefined) {
+      console.error("❌ The migration history exists but could not be read.");
+      console.error(`💡 ${unreadable}`);
+      console.error(
+        "💡 The database may be corrupt or written by an incompatible tool.",
+      );
+      process.exit(1);
+    }
     if (problem) {
       console.error(`❌ The database does not match this build: ${problem}.`);
       console.error(

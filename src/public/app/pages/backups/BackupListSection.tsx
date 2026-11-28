@@ -4,7 +4,7 @@ import { Section } from "../account/Section";
 import { InlineConfirm } from "../account/InlineConfirm";
 import { QUIET_BUTTON, TARGET } from "../account/styles";
 import { api } from "../../lib/api";
-import { UploadControl, uploadInChunks } from "../../lib/chunked-upload";
+import { UploadControl, newUploadId, uploadInChunks } from "../../lib/chunked-upload";
 import { useToastStore } from "../../stores/toastStore";
 import { describeContents, formatBytes, type BackupSummary } from "./types";
 
@@ -203,7 +203,7 @@ function UploadButton({ disabled, onUploaded, onUploading }: {
   const [progress, setProgress] = useState<{ name: string; loaded: number; total: number } | null>(null);
 
   const upload = async (file: File) => {
-    const id = crypto.randomUUID();
+    const id = newUploadId();
     control.current.reset();
     setProgress({ name: file.name, loaded: 0, total: file.size });
     onUploading(true);
