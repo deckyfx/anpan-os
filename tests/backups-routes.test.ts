@@ -3,19 +3,21 @@
  * Docker is not reached: these backups are written by hand, and tar is the real one.
  */
 import { test, expect, describe, beforeAll, beforeEach, afterEach, afterAll, spyOn } from "bun:test";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { createApp } from "../src/app";
 import { TEST_JWT, loginAs } from "./helpers";
 import { jobs, processRunner, type JobSummary } from "../src/lib/jobs";
 import { config } from "../src/config";
+import { uploadPath } from "../src/lib/backups";
 
 const app = createApp(TEST_JWT);
 let cookie = "";
 beforeAll(async () => { cookie = await loginAs(); });
 
 // The folder these tests delete must be inside the test runtime dir, never a real one.
-if (!config.backupsFolder.startsWith(resolve("configs/anpan-test"))) throw new Error(`Refusing to run: ${config.backupsFolder}`);
+const fromTestRoot = relative(resolve("configs/anpan-test"), config.backupsFolder);
+if (fromTestRoot.startsWith("..") || isAbsolute(fromTestRoot)) throw new Error(`Refusing to run: ${config.backupsFolder}`);
 
 const ID = "20261128-093000";
 const MANIFEST = {
@@ -83,6 +85,18 @@ describe("refusals", () => {
 });
 
 describe("list, download, delete and upload", () => {
+  test("abandoning an upload removes it, finished or not", async () => {
+    const upload = crypto.randomUUID();
+    const bytes = new TextEncoder().encode("abc");
+    await app.handle(new Request(
+      `http://localhost/api/backups/upload?id=${upload}&offset=0&total=${bytes.byteLength}`,
+      { method: "PUT", headers: { cookie, "content-length": String(bytes.byteLength) }, body: bytes },
+    ));
+    expect(await Bun.file(uploadPath(upload)).exists()).toBe(true);
+    expect((await call("DELETE", `/api/backups/upload?id=${upload}`)).status).toBe(200);
+    expect(await Bun.file(uploadPath(upload)).exists()).toBe(false);
+  });
+
   test("lists the backup", async () => {
     const { body } = await call("GET", "/api/backups");
     expect((body?.backups as { id: string }[]).map(b => b.id)).toEqual([ID]);

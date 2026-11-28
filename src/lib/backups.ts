@@ -180,11 +180,16 @@ export function parseManifest(text: string): BackupManifest | null {
     if (app.stack !== stackArchive(app.name)) return null;
     if (!Array.isArray(app.data)) return null;
     const data: BackupApp["data"] = [];
+    const dirs = new Set<string>();
     for (const d of app.data as unknown[]) {
       const entry = d as Record<string, unknown> | null;
       if (!entry || !str(entry.dir) || !str(entry.archive)) return null;
       if (!DATA_DIR_RE.test(entry.dir) || entry.dir === "." || entry.dir === "..") return null;
       if (!isDataArchive(app.name, entry.archive)) return null;
+      // One archive per folder: two unpacked into the same folder could have the first
+      // plant a link that the second then writes through.
+      if (dirs.has(entry.dir)) return null;
+      dirs.add(entry.dir);
       data.push({ dir: entry.dir, archive: entry.archive });
     }
     const row = app.row === null || (typeof app.row === "object" && !Array.isArray(app.row))
@@ -519,12 +524,23 @@ async function stageSystem(ctx: JobContext, backup: string, m: BackupManifest): 
   let movedPrevious = false;
   try {
     await extract(ctx, join(backup, m.system), partial);
+    // Only the system entries, each a real file (certs a real folder), are staged: anything
+    // else the archive held is removed, a link among them refused. An archived `.ready`, say,
+    // must not be what marks this staging ready, nor a link the marker write follows.
+    for (const name of await readdir(partial)) {
+      const entry = SYSTEM_ENTRIES.find(e => e === name);
+      if (!entry) { await rm(join(partial, name), { recursive: true, force: true }); continue; }
+      if (!(await isReal(join(partial, name), entry === "certs" ? "dir" : "file"))) {
+        throw new JobError(`The system part of this backup has an unexpected ${name}`);
+      }
+    }
     // Without a database the "restore" would apply settings over the current data, which
-    // is not the backup's state at any moment. Only a regular file counts.
-    if (!(await lstat(join(partial, "storage.db")).catch(() => null))?.isFile()) {
+    // is not the backup's state at any moment.
+    if (!(await exists(join(partial, "storage.db")))) {
       throw new JobError("The system part of this backup has no database");
     }
-    await writeFile(join(partial, READY_MARKER), `${m.id}\n`);
+    // "wx": created here, never written through something already there.
+    await writeFile(join(partial, READY_MARKER), `${m.id}\n`, { flag: "wx" });
     await rm(previous, { recursive: true, force: true });
     if (await exists(staged)) { await rename(staged, previous); movedPrevious = true; }
     await rename(partial, staged);
@@ -679,9 +695,33 @@ async function isReal(path: string, kind: "dir" | "file"): Promise<boolean> {
   return kind === "dir" ? info?.isDirectory() === true : info?.isFile() === true;
 }
 
+/** Where uploads are received: a folder of its own, private whatever the backups folder's mode. */
+function uploadsFolder(): string {
+  return join(folder(), ".uploads");
+}
+
 /** Where an upload is received, before it is unpacked into a backup. */
 export function uploadPath(uploadId: string): string {
-  return join(folder(), `.upload-${uploadId}.tar`);
+  return join(uploadsFolder(), `${uploadId}.tar`);
+}
+
+/** An upload nobody has written to for this long is not coming back. */
+const STALE_UPLOAD_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Make the uploads folder, private, and remove uploads abandoned there: a closed tab never
+ * says it stopped, and a partial backup can be gigabytes. Run before an upload's first chunk.
+ */
+export async function prepareUploads(): Promise<void> {
+  await mkdir(uploadsFolder(), { recursive: true, mode: 0o700 });
+  // mkdir leaves an existing folder's mode alone; the upload may hold the sign-in secret.
+  await chmod(uploadsFolder(), 0o700);
+  const cutoff = Date.now() - STALE_UPLOAD_MS;
+  for (const name of await readdir(uploadsFolder()).catch(() => [] as string[])) {
+    const path = join(uploadsFolder(), name);
+    const info = await stat(path).catch(() => null);
+    if (info && info.mtimeMs < cutoff) await rm(path, { recursive: true, force: true }).catch(() => {});
+  }
 }
 
 /**

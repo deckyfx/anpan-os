@@ -1,5 +1,5 @@
 import { Elysia, t } from "elysia";
-import { mkdir } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { authGuard } from "./authGuard";
 import { config } from "../config";
 import { envConfig } from "../env-config";
@@ -8,7 +8,7 @@ import { UPLOAD_ID_RE } from "../constants/http";
 import { jobs, type JobKind, type JobSummary } from "../lib/jobs";
 import {
   BACKUP_ID_RE, appFolder, backupPath, deleteBackup, getBackup, listBackups, runBackup, runImport,
-  runRestore, uploadPath,
+  prepareUploads, runRestore, uploadPath,
 } from "../lib/backups";
 import { abandonUpload, checkChunkQuery, receiveChunk } from "../lib/chunked-upload";
 import { restorePending } from "../lib/pending-restore";
@@ -103,7 +103,7 @@ export function backupsPlugin(jwtSecret: string) {
       const refused = checkChunkQuery(query);
       if (refused) return refused;
       const dest = uploadPath(query.id);
-      return receiveChunk(dest, query, request, () => mkdir(config.backupsFolder, { recursive: true, mode: 0o700 }).then(() => {}));
+      return receiveChunk(dest, query, request, prepareUploads);
     }, {
       // Read the body ourselves, after the auth guard.
       parse: "none",
@@ -115,9 +115,13 @@ export function backupsPlugin(jwtSecret: string) {
       detail: { summary: "Upload one chunk of a backup archive" },
     })
 
-    .delete("/upload", async ({ query }) => {
+    .delete("/upload", async ({ query, set }) => {
       if (!UPLOAD_ID_RE.test(query.id)) return Response.json({ error: "Invalid upload id" }, { status: 400 });
+      const running = jobs.list().find(j => j.status === "running" && j.kind === "backup-import");
+      if (running) return busy(set, running);
+      // The partial file, and the finished one if the last chunk already arrived.
       await abandonUpload(uploadPath(query.id), query.id);
+      await rm(uploadPath(query.id), { force: true });
       return { ok: true };
     }, {
       query: t.Object({ id: t.String() }),

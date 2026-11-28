@@ -5,12 +5,12 @@
  * real archives, and a restore is checked by the files it puts back.
  */
 import { test, expect, describe, afterEach, afterAll, beforeEach, spyOn } from "bun:test";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { mkdir, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { JobManager, processRunner, type JobContext, type JobSummary } from "../src/lib/jobs";
 import {
-  backupIdFor, backupPath, getBackup, listBackups, parseManifest, runBackup, runImport, runRestore, uploadPath,
+  backupIdFor, backupPath, getBackup, listBackups, parseManifest, prepareUploads, runBackup, runImport, runRestore, uploadPath,
   type BackupManifest,
 } from "../src/lib/backups";
 import { applyPendingRestore, PENDING_DIR, READY_MARKER } from "../src/lib/pending-restore";
@@ -30,7 +30,8 @@ afterEach(() => { while (spies.length) spies.pop()!.mockRestore(); });
 // Every folder these tests delete in must be inside the test runtime dir, never a real one.
 const TEST_ROOT = resolve("configs/anpan-test");
 for (const dir of [config.backupsFolder, config.composeFolder, config.appDataRoot, envConfig.RUNTIME_CONFIG_DIR]) {
-  if (!resolve(dir).startsWith(TEST_ROOT)) throw new Error(`Refusing to run: ${dir} is not under ${TEST_ROOT}`);
+  const rel = relative(TEST_ROOT, resolve(dir));
+  if (rel.startsWith("..") || isAbsolute(rel)) throw new Error(`Refusing to run: ${dir} is not under ${TEST_ROOT}`);
 }
 
 async function clean(): Promise<void> {
@@ -332,6 +333,31 @@ describe("staging checks", () => {
     expect(existsSync(join(staged, "storage.db"))).toBe(true);
   });
 
+  test("stages only the system entries, refusing links among them", async () => {
+    const id = await backUp({ system: true, apps: [] });
+    const work = join(envConfig.RUNTIME_CONFIG_DIR, "bk-sys");
+    await rm(work, { recursive: true, force: true });
+    await mkdir(work);
+    await writeFile(join(work, "storage.db"), "db");
+    await symlink("/etc/hostname", join(work, ".ready"));
+    await writeFile(join(work, "extra.txt"), "x");
+    Bun.spawnSync(["tar", "-czf", join(backupPath(id), "system.tar.gz"), "-C", work, "storage.db", ".ready", "extra.txt"]);
+
+    expect((await runJob(ctx => runRestore(ctx, { id, system: true, apps: [] }))).job.status).toBe("done");
+    const staged = join(envConfig.RUNTIME_CONFIG_DIR, PENDING_DIR);
+    expect(readFileSync(join(staged, READY_MARKER), "utf8")).toBe(`${id}\n`);
+    expect(existsSync(join(staged, "extra.txt"))).toBe(false);
+
+    // A link in place of the database is refused.
+    await rm(join(work, "storage.db"));
+    await symlink("/etc/hostname", join(work, "storage.db"));
+    Bun.spawnSync(["tar", "-czf", join(backupPath(id), "system.tar.gz"), "-C", work, "storage.db"]);
+    await rm(work, { recursive: true });
+    const { job } = await runJob(ctx => runRestore(ctx, { id, system: true, apps: [] }));
+    expect(job.status).toBe("failed");
+    expect(job.error).toContain("unexpected storage.db");
+  });
+
   test("refuses the system from a backup without one before touching any app", async () => {
     const id = await backUp();
     ran = [];
@@ -362,6 +388,15 @@ describe("applying a staged system restore", () => {
     expect(readFileSync(join(dir, "config.toml"), "utf8")).toBe("old");
   });
 
+  test("finishes a start that stopped part way", () => {
+    writeFileSync(join(dir, PENDING_DIR, READY_MARKER), "x");
+    // As left by a start that moved config.toml aside and then stopped.
+    Bun.spawnSync(["mv", join(dir, "config.toml"), join(dir, "config.toml.pre-restore")]);
+    expect(applyPendingRestore(dir)).toEqual(["config.toml", "storage.db", "certs"]);
+    expect(readFileSync(join(dir, "config.toml"), "utf8")).toBe("new");
+    expect(existsSync(join(dir, "config.toml.pre-restore"))).toBe(false);
+  });
+
   test("replaces each entry, drops the old write-ahead log, and removes the staging", () => {
     writeFileSync(join(dir, PENDING_DIR, READY_MARKER), "x");
     expect(applyPendingRestore(dir)).toEqual(["config.toml", "storage.db", "certs"]);
@@ -381,6 +416,7 @@ function rmSyncSafe(path: string): void {
 describe("importing an uploaded backup", () => {
   async function asUpload(id: string): Promise<string> {
     const uploadId = crypto.randomUUID();
+    await prepareUploads();
     const r = Bun.spawnSync(["tar", "-cf", uploadPath(uploadId), "-C", config.backupsFolder, id]);
     if (r.exitCode !== 0) throw new Error(r.stderr.toString());
     return uploadId;
@@ -421,7 +457,7 @@ describe("importing an uploaded backup", () => {
 
   test("refuses an archive that is not a backup", async () => {
     const uploadId = crypto.randomUUID();
-    await mkdir(config.backupsFolder, { recursive: true });
+    await prepareUploads();
     Bun.spawnSync(["tar", "-cf", uploadPath(uploadId), "-C", appDir, "."]);
     const { job } = await runJob(async ctx => { await runImport(ctx, uploadId); });
     expect(job.status).toBe("failed");
@@ -461,6 +497,13 @@ describe("manifest", () => {
     expect(parseManifest(withApp({ name: "../x" }))).toBeNull();
     expect(parseManifest(JSON.stringify({ ...good(), system: "/etc/shadow" }))).toBeNull();
     expect(parseManifest(JSON.stringify({ ...good(), id: "../x" }))).toBeNull();
+  });
+
+  test("refuses two archives for one data folder", () => {
+    expect(parseManifest(withApp({ data: [
+      { dir: "jellyfin", archive: "apps/jellyfin/data-0.tar.gz" },
+      { dir: "jellyfin", archive: "apps/jellyfin/data-1.tar.gz" },
+    ] }))).toBeNull();
   });
 
   test("refuses the same app twice", () => {

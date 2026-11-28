@@ -29,39 +29,65 @@ export const SYSTEM_ENTRIES = ["config.toml", "storage.db", "samba.conf", "certs
 /** Suffix of a live entry moved aside while its replacement goes in. */
 const ASIDE = ".pre-restore";
 
+/** The live paths an entry stands for: the database brings its WAL and shared memory. */
+function liveGroup(runtimeDir: string, entry: string): string[] {
+  const to = join(runtimeDir, entry);
+  // Left beside the restored database, SQLite would replay the old log into it.
+  return entry === "storage.db" ? [to, `${to}-wal`, `${to}-shm`] : [to];
+}
+
 /**
- * Put a staged system restore in place. Returns the entries applied; none when nothing is
- * staged or the staging is incomplete. Throws when an entry cannot be put in place; the
- * staging is then kept, so the next start tries again.
+ * Put a staged system restore in place, all or nothing. Returns the entries applied; none
+ * when nothing is staged or the staging is incomplete.
  *
- * No entry is ever missing at a moment the process could stop: each live entry is moved
- * aside (not deleted), its replacement renamed in, and only then the aside copy removed.
- * A start that stops half way finds the entries not yet applied still staged and applies
- * them; the marker goes last.
+ * Every live entry is moved aside first, then every staged one renamed in, then the aside
+ * copies removed. When a rename in fails, the entries already renamed go back to the
+ * staging and the aside copies back in place, and this throws: the files are as they were
+ * and the staging is still there, so the next start tries again (or the staging can be
+ * deleted to start without it).
+ *
+ * A start that stops part way (power loss) leaves aside copies and a partly emptied
+ * staging. The next start carries on from there: an aside copy already present is the
+ * original and is kept as such, and an entry no longer staged was already put in place.
  */
 export function applyPendingRestore(runtimeDir: string): string[] {
   const staged = join(runtimeDir, PENDING_DIR);
   if (!existsSync(join(staged, READY_MARKER))) return [];
+  const plan = SYSTEM_ENTRIES.filter(entry => existsSync(join(staged, entry)));
 
-  const applied: string[] = [];
-  for (const entry of SYSTEM_ENTRIES) {
-    const from = join(staged, entry);
-    if (!existsSync(from)) continue;
-    const to = join(runtimeDir, entry);
-    // The database's write-ahead log and shared memory belong to the file being replaced:
-    // left beside the restored one, SQLite would replay the old log into it. They move
-    // aside with it.
-    const group = entry === "storage.db" ? [to, `${to}-wal`, `${to}-shm`] : [to];
-    for (const path of group) {
-      rmSync(path + ASIDE, { recursive: true, force: true }); // left by an earlier attempt
-      if (existsSync(path)) renameSync(path, path + ASIDE);
+  // 1. Move the live entries aside.
+  for (const entry of plan) {
+    for (const path of liveGroup(runtimeDir, entry)) {
+      if (existsSync(path + ASIDE)) rmSync(path, { recursive: true, force: true }); // the original is already aside
+      else if (existsSync(path)) renameSync(path, path + ASIDE);
     }
-    renameSync(from, to);
-    for (const path of group) rmSync(path + ASIDE, { recursive: true, force: true });
-    applied.push(entry);
+  }
+
+  // 2. Rename the staged entries in; on a failure, undo this run.
+  const done: string[] = [];
+  try {
+    for (const entry of plan) {
+      renameSync(join(staged, entry), join(runtimeDir, entry));
+      done.push(entry);
+    }
+  } catch (err) {
+    for (const entry of done) renameSync(join(runtimeDir, entry), join(staged, entry));
+    for (const entry of plan) {
+      for (const path of liveGroup(runtimeDir, entry)) {
+        if (!existsSync(path + ASIDE)) continue;
+        rmSync(path, { recursive: true, force: true });
+        renameSync(path + ASIDE, path);
+      }
+    }
+    throw err;
+  }
+
+  // 3. Drop the aside copies (also any an interrupted earlier start left), then the staging.
+  for (const entry of SYSTEM_ENTRIES) {
+    for (const path of liveGroup(runtimeDir, entry)) rmSync(path + ASIDE, { recursive: true, force: true });
   }
   rmSync(staged, { recursive: true, force: true });
-  return applied;
+  return plan;
 }
 
 /** Whether a system restore is staged and waiting for a restart. */

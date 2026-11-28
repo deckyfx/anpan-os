@@ -96,7 +96,8 @@ export async function uploadInChunks(
   control: UploadControl,
 ): Promise<string | null> {
   const abandon = async (reason: string) => {
-    await fetch(base, { method: "DELETE" }).catch(() => {});
+    // Best effort, and bounded: a cleanup request that hangs must not keep the upload open.
+    await fetch(base, { method: "DELETE", signal: AbortSignal.timeout(10_000) }).catch(() => {});
     return reason;
   };
 

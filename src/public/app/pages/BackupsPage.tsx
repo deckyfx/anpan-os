@@ -21,7 +21,8 @@ async function reloadWhenBack(): Promise<void> {
   // Give the old process time to stop first, so the first answer is the new one's.
   await new Promise(r => setTimeout(r, 3000));
   for (let i = 0; i < 60; i++) {
-    const ok = await fetch("/api/health").then(r => r.ok, () => false);
+    // A deadline on each probe: a request caught by the restart may otherwise never settle.
+    const ok = await fetch("/api/health", { signal: AbortSignal.timeout(3000) }).then(r => r.ok, () => false);
     if (ok) { location.reload(); return; }
     await new Promise(r => setTimeout(r, 2000));
   }
@@ -56,16 +57,17 @@ export function BackupsPage({ onNavigate }: { onNavigate: (path: string) => void
   }, []);
   useEffect(() => { void load(); }, [load]);
 
-  // The backup job running now, from any tab; shown until dismissed once it ends.
-  const running = useJobsStore(s => Object.values(s.jobs).find(j => j.status === "running" && BACKUP_KINDS.has(j.kind)) ?? null);
-  const jobId = shownJob ?? running?.id ?? null;
+  // The backup job running now, from any tab, else the last one shown until dismissed. A new
+  // job replaces a finished one, so its end is what the list refreshes on.
+  const runningId = useJobsStore(s => Object.values(s.jobs).find(j => j.status === "running" && BACKUP_KINDS.has(j.kind))?.id ?? null);
+  useEffect(() => { if (runningId) setShownJob(runningId); }, [runningId]);
+  const jobId = runningId ?? shownJob;
   const job = useJobsStore(s => (jobId ? s.jobs[jobId] : undefined));
-  useEffect(() => { if (running && !shownJob) setShownJob(running.id); }, [running, shownJob]);
   // A job ending changes the list: a backup added, an import unpacked, a restore staged.
   const status = job?.status;
   useEffect(() => { if (status && status !== "running") void load(); }, [status, load]);
 
-  const busy = running !== null;
+  const busy = runningId !== null;
 
   /** Start a job and show it; a refusal is a toast. */
   const startJob = async (request: Promise<{ data: unknown; error: unknown }>) => {
