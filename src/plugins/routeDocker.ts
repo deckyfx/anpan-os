@@ -186,6 +186,7 @@ export function dockerPlugin(jwtSecret: string) {
           note:        t.Optional(t.Nullable(t.String())),
           openMode:    t.Optional(t.Nullable(t.String())),
           orderNo:     t.Optional(t.Nullable(t.Number())),
+          backupLive:  t.Optional(t.Boolean()),
         }),
       },
     )

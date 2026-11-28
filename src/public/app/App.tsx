@@ -11,6 +11,7 @@ import { useJobsStore }     from "./stores/jobsStore";
 import { ToastContainer }   from "./components/Toast";
 import { AppStorePage }     from "./pages/store/AppStorePage";
 import { AccountPage }      from "./pages/AccountPage";
+import { BackupsPage }      from "./pages/BackupsPage";
 
 export function App() {
   const { view, checkAuth, login, afterSetup } = useAuthStore();
@@ -59,6 +60,7 @@ export function App() {
   if (path.startsWith("/files"))  return <><FilesPage onNavigate={navigate} /><ToastContainer /></>;
   if (path.startsWith("/store"))  return <><AppStorePage onNavigate={navigate} /><ToastContainer /></>;
   if (path.startsWith("/account")) return <><AccountPage onNavigate={navigate} /><ToastContainer /></>;
+  if (path.startsWith("/backups")) return <><BackupsPage onNavigate={navigate} /><ToastContainer /></>;
 
   return <><HomePage onNavigate={navigate} /><ToastContainer /></>;
 }

@@ -1,6 +1,6 @@
 import { Elysia, t, sse } from "elysia";
 import { resolve, join, basename, dirname, extname } from "node:path";
-import { readdir, stat, mkdir, rename, rm, chmod, chown, open } from "node:fs/promises";
+import { readdir, stat, mkdir, rename, rm, chmod, chown } from "node:fs/promises";
 import { homedir } from "node:os";
 import { authGuard } from "./authGuard";
 import { config } from "../config";
@@ -11,10 +11,10 @@ import { bins, commands } from "../lib/commands";
 import { parseFile } from "music-metadata";
 import NodeID3 from "node-id3";
 import { StreamAggregator, drainStream } from "../lib/sse";
-import { KeyedLock } from "../lib/keyed-lock";
+import { abandonUpload, checkChunkQuery, receiveChunk, sweepStaleUploads } from "../lib/chunked-upload";
 import type { SSEMsg } from "../lib/sse";
 import { SettingsStore } from "../stores/settings-store";
-import { UPLOAD_CHUNK_MAX, UPLOAD_ID_RE } from "../constants/http";
+import { UPLOAD_ID_RE } from "../constants/http";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -213,7 +213,6 @@ function serverError() { return Response.json({ error: "Internal server error" }
 
 // ─── Upload temp files ────────────────────────────────────────────────────────
 
-/** Hidden, beside the destination: same filesystem, so the final rename is atomic. */
 /**
  * A name that is one plain path segment: not empty, no separator, not "." or "..".
  *
@@ -222,31 +221,6 @@ function serverError() { return Response.json({ error: "Internal server error" }
  */
 function isPlainFileName(name: string): boolean {
   return name !== "" && name === basename(name) && name !== "." && name !== "..";
-}
-
-function uploadTempPath(dest: string, id: string): string {
-  return join(dirname(dest), `.${basename(dest)}.${id}.part`);
-}
-
-/** A temp file nobody has written to for this long belongs to an upload that is not coming back. */
-const STALE_UPLOAD_MS = 24 * 60 * 60 * 1000;
-
-/**
- * Remove abandoned temp files for `name` in `dir`. A closed tab or a dead laptop never sends
- * the DELETE, so without this every abandoned upload would leave its partial copy behind.
- * Only files matching the temp-name pattern exactly are touched.
- */
-async function sweepStaleUploads(dir: string, name: string): Promise<void> {
-  const prefix = `.${name}.`;
-  const entries = await readdir(dir).catch(() => [] as string[]);
-  const cutoff = Date.now() - STALE_UPLOAD_MS;
-  await Promise.all(entries.map(async entry => {
-    if (!entry.startsWith(prefix) || !entry.endsWith(".part")) return;
-    if (!UPLOAD_ID_RE.test(entry.slice(prefix.length, -".part".length))) return;
-    const path = join(dir, entry);
-    const info = await stat(path).catch(() => null);
-    if (info && info.mtimeMs < cutoff) await rm(path, { force: true }).catch(() => {});
-  }));
 }
 
 // ─── Binary detection ─────────────────────────────────────────────────────────
@@ -302,21 +276,6 @@ async function listDir(dirPath: string): Promise<FileEntry[]> {
 
 // ─── Plugin ───────────────────────────────────────────────────────────────────
 
-/**
- * One upload's temp file is touched by one request at a time.
- *
- * Without this, a retry could overlap the stalled request it replaces. The client's watchdog
- * aborts a chunk after 60 s without progress and resends it, while the server may still be
- * inside the earlier request: an offset-0 retry reopened the file with "w" mid-write, and the
- * earlier handler then truncated it -- after the retry had already renamed it into place,
- * since a file handle follows its inode. The committed upload came out short.
- *
- * Holding the lock across the body read cannot hang a retry indefinitely: Bun.serve closes a
- * connection idle for 10 s (its default, which nothing here overrides), including one whose
- * request body has stalled. A retry therefore waits seconds behind a dead request, well inside
- * the client's 60 s watchdog.
- */
-const uploadLock = new KeyedLock();
 
 export function filesPlugin(jwtSecret: string) {
   return new Elysia({ prefix: "/api/files" })
@@ -514,74 +473,13 @@ export function filesPlugin(jwtSecret: string) {
     // and overwrites from there; one past its end would leave a gap, and is refused with 409
     // and the size actually held, so the client resumes from what the server has.
     .put("/upload", async ({ query, request }) => {
-      const { name, id, offset, total } = query;
+      const { name } = query;
       if (!isPlainFileName(name)) return Response.json({ error: "Invalid file name" }, { status: 400 });
-      if (!UPLOAD_ID_RE.test(id)) return Response.json({ error: "Invalid upload id" }, { status: 400 });
-      // Byte positions are whole numbers. The schema enforces only a minimum of 0, so a
-      // fractional total (10.5) passed, and could then never be reached: every chunk either
-      // left the upload short of it or was refused for running past it.
-      if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(total)) {
-        return Response.json({ error: "offset and total must be whole numbers" }, { status: 400 });
-      }
-
+      const refused = checkChunkQuery(query);
+      if (refused) return refused;
       let dest: string;
       try { dest = guardPath(join(guardPath(query.path), name)); } catch { return forbidden(); }
-      const tmp = uploadTempPath(dest, id);
-
-      const rawLength = request.headers.get("content-length");
-      if (rawLength === null) return Response.json({ error: "Content-Length is required" }, { status: 411 });
-      // Present but not a byte count is a different fault from absent: a 400, not a 411.
-      const declared = Number(rawLength);
-      if (!Number.isSafeInteger(declared) || declared < 0) {
-        return Response.json({ error: "Content-Length must be a whole number of bytes" }, { status: 400 });
-      }
-      if (declared > UPLOAD_CHUNK_MAX) return tooLarge();
-      if (offset + declared > total) return Response.json({ error: "Chunk runs past the end of the file" }, { status: 400 });
-
-      return uploadLock.run(tmp, async () => { try {
-        if (offset === 0) {
-          await sweepStaleUploads(dirname(dest), name);
-        } else {
-          const held = await stat(tmp).then(s => s.size, () => 0);
-          if (held < offset) return Response.json({ error: "Upload is out of step", received: held }, { status: 409 });
-        }
-
-        // Written as it arrives rather than buffered: reading each chunk whole put the
-        // server's memory at ~320 MB during a 4 GB upload, which a Raspberry Pi feels.
-        let written = 0;
-        const fh = await open(tmp, offset === 0 ? "w" : "r+");
-        try {
-          if (request.body) {
-            for await (const part of request.body) {
-              if (written + part.byteLength > declared) break;
-              await fh.write(part, 0, part.byteLength, offset + written);
-              written += part.byteLength;
-            }
-          }
-          // A dropped connection can end the body early without an error; the declared
-          // length is the only way to tell a short read from a short chunk. Cut the file
-          // back to what was held before, so a retry of this chunk starts clean.
-          if (written !== declared) await fh.truncate(offset);
-          else await fh.truncate(offset + written);
-        } finally {
-          await fh.close();
-        }
-        if (written !== declared) {
-          if (offset === 0) await rm(tmp, { force: true });
-          return Response.json({ error: "Upload was interrupted", received: offset }, { status: 400 });
-        }
-
-        const received = offset + written;
-        if (received < total) return { ok: true, done: false, received };
-        await rename(tmp, dest);
-        return { ok: true, done: true, received };
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code === "ENOSPC") {
-          await rm(tmp, { force: true }).catch(() => {});
-          return Response.json({ error: "Not enough space on the destination drive" }, { status: 507 });
-        }
-        return serverError();
-      } });
+      return receiveChunk(dest, query, request, () => sweepStaleUploads(dirname(dest), name));
     }, {
       // Read the body ourselves, after the auth guard.
       parse: "none",
@@ -603,8 +501,7 @@ export function filesPlugin(jwtSecret: string) {
       try { dest = guardPath(join(guardPath(query.path), name)); } catch { return forbidden(); }
       // Under the same lock as the chunks: removing the file under an in-flight write leaves
       // that request writing to an unlinked inode and failing its rename.
-      const tmp = uploadTempPath(dest, query.id);
-      await uploadLock.run(tmp, () => rm(tmp, { force: true }));
+      await abandonUpload(dest, query.id);
       return { ok: true };
     }, {
       query: t.Object({ path: t.String(), name: t.String(), id: t.String() }),

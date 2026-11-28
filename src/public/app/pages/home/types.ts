@@ -26,6 +26,8 @@ export interface StackMeta {
   openMode: string | null;
   managed: boolean | null;
   orderNo: number | null;
+  /** Back up while running instead of stopping it while its data is copied. */
+  backupLive?: boolean;
 }
 
 export type ComposeOrigin = "managed" | "casaos" | null;

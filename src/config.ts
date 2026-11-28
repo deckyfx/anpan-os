@@ -37,6 +37,10 @@ passkey_allowed_origins = []
 # pgid = 1000
 # tz = "Asia/Jakarta"           # $TZ given to apps; defaults to this machine's time zone
 
+[backups]
+# folder = "/mnt/backup/anpan"   # where backups are written; a mounted drive or share works
+#                                # defaults to <runtime dir>/backups
+
 [files]
 root = "/"   # root path the file manager is allowed to browse
 # metadata_lookup = false   # allow track lookup at iTunes / MusicBrainz (sends track and album names off-box)
@@ -84,6 +88,12 @@ interface AppsConfig {
   tz?: string;
 }
 
+/** `[backups]`: where backups are kept. */
+interface BackupsConfig {
+  /** Folder holding one folder per backup. */
+  folder?: string;
+}
+
 interface FilesConfig {
   root?: string;
   /**
@@ -107,6 +117,7 @@ interface AppConfig {
   auth:    AuthConfig;
   compose: ComposeConfig;
   apps:    AppsConfig;
+  backups: BackupsConfig;
   files:   FilesConfig;
   samba:   SambaConfig;
 }
@@ -114,7 +125,7 @@ interface AppConfig {
 /** Reads RUNTIME_CONFIG_DIR/config.toml. Creates a template on first run. */
 class Config {
   private static instance: Config;
-  private data: AppConfig = { server: {}, auth: {}, compose: {}, apps: {}, files: {}, samba: {} };
+  private data: AppConfig = { server: {}, auth: {}, compose: {}, apps: {}, backups: {}, files: {}, samba: {} };
   private configPath: string;
   private _tlsEnabled = false;
 
@@ -149,6 +160,7 @@ class Config {
       auth:    parsed.auth    ?? {},
       compose: parsed.compose ?? {},
       apps:    parsed.apps    ?? {},
+      backups: parsed.backups ?? {},
       files:   parsed.files   ?? {},
       samba:   parsed.samba   ?? {},
     };
@@ -225,6 +237,11 @@ class Config {
   /** Folder holding one data folder per app — defaults to RUNTIME_CONFIG_DIR/appdata. */
   get appDataRoot(): string {
     return resolve(this.data.apps.data_root ?? join(envConfig.RUNTIME_CONFIG_DIR, "appdata"));
+  }
+
+  /** Folder holding one folder per backup — defaults to RUNTIME_CONFIG_DIR/backups. */
+  get backupsFolder(): string {
+    return resolve(this.data.backups.folder ?? join(envConfig.RUNTIME_CONFIG_DIR, "backups"));
   }
 
   /** $PUID and $PGID for apps that ask for them. 1000 is the first regular user on most distros. */

@@ -21,7 +21,7 @@ import { join } from "node:path";
 import { Broadcast } from "./broadcast";
 import { envConfig } from "../env-config";
 
-export type JobKind = "install" | "redeploy" | "update" | "update-all" | "migrate" | "repair";
+export type JobKind = "install" | "redeploy" | "update" | "update-all" | "migrate" | "repair" | "backup" | "restore" | "backup-import";
 export type JobStatus = "running" | "done" | "failed" | "cancelled";
 
 /** What the browser is told about a job. */

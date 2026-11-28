@@ -13,6 +13,7 @@ import { bookmarksPlugin }  from "./plugins/routeBookmarks";
 import { appStorePlugin }   from "./plugins/routeAppStore";
 import { updateCheckPlugin } from "./plugins/routeUpdateCheck";
 import { jobsPlugin } from "./plugins/routeJobs";
+import { backupsPlugin }    from "./plugins/routeBackups";
 import { apiKeysPlugin }    from "./plugins/routeApiKeys";
 import { openapiPlugin }    from "./plugins/openapi";
 
@@ -100,6 +101,7 @@ export function createApp(jwtSecret: string) {
     .use(appStorePlugin(jwtSecret))
     .use(updateCheckPlugin(jwtSecret))
     .use(jobsPlugin(jwtSecret))
+    .use(backupsPlugin(jwtSecret))
     // Cookie-only key management -- not behind authGuard, which accepts keys.
     .use(apiKeysPlugin(jwtSecret))
     // GET /api/openapi.json -- the spec for API-key clients; see plugins/openapi.ts.

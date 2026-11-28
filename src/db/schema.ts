@@ -48,6 +48,11 @@ export const stacks = sqliteTable("stacks", {
   managed:     integer("managed", { mode: "boolean" }).notNull().default(false),
   /** User-defined display order (null = unset, sorted last). */
   orderNo:     integer("order_no"),
+  /**
+   * Back this app up while it runs, instead of stopping it while its data is copied. Off by
+   * default: a database written to mid-copy may not restore.
+   */
+  backupLive:  integer("backup_live", { mode: "boolean" }).notNull().default(false),
   updatedAt:   integer("updated_at", { mode: "timestamp" })
     .notNull()
     .default(sql`(unixepoch())`),

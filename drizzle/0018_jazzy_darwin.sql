@@ -1,0 +1,1 @@
+ALTER TABLE `stacks` ADD `backup_live` integer DEFAULT false NOT NULL;

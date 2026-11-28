@@ -36,7 +36,7 @@ const NAME_MAX = 64;
 const SCOPES: { value: Scope; label: string; description: string }[] = [
   { value: "read",    label: "Read",    description: "View only (GET requests). No file access." },
   { value: "operate", label: "Operate", description: "Read, plus install, start, stop and update stacks and containers, run update checks, use the App Store, bookmarks and ports. Not deleting a stack (it removes volumes), prune, files, Samba, CasaOS import or shutdown." },
-  { value: "full",    label: "Full",    description: "Everything the web UI can do, except account settings and managing API keys." },
+  { value: "full",    label: "Full",    description: "Everything the web UI can do, except account settings, backups and managing API keys." },
 ];
 
 const SCOPE_BADGE: Record<Scope, string> = {
