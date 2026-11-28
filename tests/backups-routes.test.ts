@@ -120,7 +120,7 @@ describe("containers of an app being backed up", () => {
 
     const starting = call("POST", "/api/docker/containers/abc/start");
     await Bun.sleep(10);
-    let took: boolean | null = null;
+    let took = null as boolean | null; // set in the job below; not narrowed to null
     const started = jobs.start({ kind: "backup", title: "Back up bk-held" }, async ctx => {
       took = await ctx.withStack("bk-held", async () => {});
     });
