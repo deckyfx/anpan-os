@@ -1,15 +1,12 @@
-import { Elysia, t, sse } from "elysia";
+import { Elysia, t } from "elysia";
 import { join, resolve } from "node:path";
-import { mkdirSync } from "node:fs";
 import { authGuard } from "./authGuard";
-import { readCasaOSApps, parseCasaOSMeta } from "../lib/casaos";
+import { readCasaOSApps, parseCasaOSMeta, casaosStackMeta } from "../lib/casaos";
 import { StackStore } from "../stores/stack-store";
 import { config } from "../config";
 import { bins } from "../lib/commands";
-import { StreamAggregator, drainStream } from "../lib/sse";
-import { buildComposeSourceReport, findOrphanServices } from "../lib/compose-source";
-import type { SSEMsg } from "../lib/sse";
-import { invalidateOriginCache } from "./routeDocker";
+import { jobs } from "../lib/jobs";
+import { checkComposeText, runMigrate } from "../lib/stack-ops";
 import { CASAOS_APPS_DIR as PLATFORM_CASAOS_APPS_DIR, FEATURES } from "../lib/platform";
 import { isWithinAny } from "../lib/path-guard";
 import { STACK_NAME_RE } from "../constants/stack";
@@ -20,29 +17,21 @@ import { STACK_NAME_RE } from "../constants/stack";
  */
 const CASAOS_APPS_DIR = PLATFORM_CASAOS_APPS_DIR;
 
-type MigrateMsg =
-  | { step: "reading" | "writing" | "deploying" }
-  | { log: string }
-  | { ok: true }
-  | { error: string; needPath?: true };
-
 /**
  * CasaOS compatibility routes — all protected by auth guard.
  *
  * `GET  /api/casaos/apps`           — list all local CasaOS apps parsed from compose YAMLs
  * `POST /api/casaos/import/:id`     — import x-casaos metadata into DB for a given stack
- * `POST /api/casaos/migrate/:name`  — migrate a CasaOS stack to anpan-os management (SSE stream)
+ * `POST /api/casaos/migrate/:name`  — migrate a CasaOS stack to anpan-os management (starts a job)
  *
  * The migrate endpoint:
  * 1. Requires anpan-os to run as root (rejects with an error otherwise).
  * 2. Reads the compose file from `/var/lib/casaos/apps/<name>/` (or a custom path from the body).
- * 3. Copies it into the anpan-os managed folder and redeploys via `docker compose up -d`.
- *    The same Docker project name ensures existing volumes are reused transparently.
- * 4. On success, marks the stack as `managed: true` and populates metadata from `x-casaos`.
+ * 3. Refuses if Docker runs services the file does not define (they would be removed).
+ * 4. Copies it into the anpan-os managed folder, marks the stack managed with its `x-casaos`
+ *    metadata, and redeploys. The same project name keeps existing volumes.
  */
 export function casaosPlugin(jwtSecret: string) {
-  const docker = bins.docker;
-
   return new Elysia({ prefix: "/api/casaos" })
     .use(authGuard(jwtSecret))
 
@@ -64,26 +53,34 @@ export function casaosPlugin(jwtSecret: string) {
 
     .get("/apps", () => readCasaOSApps())
 
+    /**
+     * Migrate a CasaOS stack into anpan-os. Answers 202 with the job; follow it under
+     * /api/jobs.
+     *
+     * Everything that can be checked without touching the stack is checked here, so a
+     * request that cannot work gets a status. `needPath: true` on a 422 tells the dialog to
+     * ask where the compose file really is.
+     */
     .post(
       "/migrate/:name",
-      async function*({ params, body, request }) {
+      async ({ params, body, set }) => {
         const { name } = params;
 
-        // The name becomes anpan-os's own stack folder below, join(composeFolder, name). This
-        // route's own pattern allowed dots, so ".." named the compose folder's parent -- the
-        // runtime directory -- and the migration would have written a compose file there and
-        // run it. The shared rule allows no dots, as Compose project names do not either.
-        if (!STACK_NAME_RE.test(name)) {
-          yield sse({ data: { error: "Invalid stack name" } satisfies SSEMsg });
-          return;
-        }
+        // The name becomes anpan-os's own stack folder, join(composeFolder, name). This
+        // route's own pattern once allowed dots, so ".." named the compose folder's parent.
+        // The shared rule allows no dots, as Compose project names do not either.
+        if (!STACK_NAME_RE.test(name)) { set.status = 422; return { error: "Invalid stack name" }; }
+
+        // A job already on the stack is the answer, before any file is read: a second dialog
+        // should follow the running migration, not be asked for a compose path.
+        const holder = jobs.activeFor(name);
+        if (holder) { set.status = 409; return { error: `"${holder.title}" is still running for this stack`, job: holder }; }
 
         // A custom path is a real feature: when CasaOS's own copy cannot be read, the dialog
         // asks for the file's actual location. But it is read as root, and taken straight
         // from the request it would bypass a narrowed files root. Hold it to the boundary the
         // file manager already enforces, plus CasaOS's app folder -- which usually lies
         // outside a root narrowed to, say, /DATA.
-        // Optional chaining: the body itself may be omitted, and reading through it crashed.
         const requested = body?.composePath;
         const composePath = requested
           ? resolve(requested)
@@ -91,126 +88,44 @@ export function casaosPlugin(jwtSecret: string) {
         // The default path is checked too: a symlink inside an app folder could otherwise
         // redirect the read anywhere, and the default should not be trusted just for being one.
         if (!isWithinAny(composePath, [CASAOS_APPS_DIR, config.filesRoot])) {
-          yield sse({ data: { error: "That compose file is outside CasaOS's app folder and the file manager's root", needPath: true } as MigrateMsg });
-          return;
+          set.status = 422;
+          return { error: "That compose file is outside CasaOS's app folder and the file manager's root", needPath: true };
         }
 
-        // Root check — CasaOS app dir requires root access
         if (process.getuid?.() !== 0) {
-          yield sse({ data: { error: "anpan-os must run as root to migrate CasaOS stacks" } satisfies SSEMsg });
-          return;
+          set.status = 403;
+          return { error: "anpan-os must run as root to migrate CasaOS stacks" };
         }
+        if (!bins.docker) { set.status = 503; return { error: "Docker is not available on this system" }; }
 
-        if (!docker) {
-          yield sse({ data: { error: "Docker is not available on this system" } satisfies SSEMsg });
-          return;
-        }
-
-        // Step 1: Read compose file
-        yield sse({ data: { step: "reading" } as MigrateMsg });
         let raw: string;
         try {
           raw = await Bun.file(composePath).text();
         } catch {
-          yield sse({ data: { error: "Cannot read compose file — check the path", needPath: true } as MigrateMsg });
-          return;
+          set.status = 422;
+          return { error: "Cannot read compose file — check the path", needPath: true };
         }
+        const bad = checkComposeText(raw, name);
+        if (bad) { set.status = bad.status; return { error: bad.error }; }
 
         // Parse x-casaos metadata (optional — migration proceeds even without it)
         const meta = parseCasaOSMeta(raw);
-
-        // Step 2: Write compose file to managed folder
-        yield sse({ data: { step: "writing" } as MigrateMsg });
-        const stackDir = join(config.composeFolder, name);
-        try {
-          mkdirSync(stackDir, { recursive: true });
-          await Bun.write(join(stackDir, "docker-compose.yml"), raw);
-        } catch (err) {
-          yield sse({ data: { error: err instanceof Error ? err.message : String(err) } satisfies SSEMsg });
-          return;
+        const started = jobs.start(
+          { kind: "migrate", title: `Migrate ${name} from CasaOS`, stack: name },
+          ctx => runMigrate(ctx, name, raw, composePath, casaosStackMeta(meta)),
+        );
+        if (!started.ok) {
+          set.status = 409;
+          return { error: `"${started.busyWith.title}" is still running for this stack`, job: started.busyWith };
         }
-
-        // Guard: --remove-orphans deletes any container in the project that this compose
-        // file does not define. A CasaOS project can have picked up services from another
-        // compose file over its life, and those are exactly the containers the CasaOS file
-        // omits — migrating would destroy them silently. Refuse and name them instead.
-        const orphanCheck = await findOrphanServices(await buildComposeSourceReport(name));
-        if (!orphanCheck.ok) {
-          yield sse({ data: { error: orphanCheck.error } satisfies SSEMsg });
-          return;
-        }
-        if (orphanCheck.orphans.length > 0) {
-          yield sse({ data: { error:
-            `Migration would delete these running services, which ${composePath} does not define: `
-            + `${orphanCheck.orphans.join(", ")}. Merge them into the compose file first.`
-          } satisfies SSEMsg });
-          return;
-        }
-
-        // Step 3: Deploy via docker compose up -d
-        //
-        // --force-recreate is required, not optional. Plain `up -d` only recreates
-        // containers whose service definition changed; identical ones keep running with
-        // the labels of the compose file that created them — i.e. still pointing at the
-        // CasaOS path we are migrating away from. That leaves the project split across
-        // two compose files (visible in `docker compose ls`), and once the CasaOS file is
-        // removed those containers reference a file that no longer exists.
-        yield sse({ data: { step: "deploying" } as MigrateMsg });
-
-        const agg = new StreamAggregator();
-
-        const proc = Bun.spawn([docker, "compose", "up", "-d", "--remove-orphans", "--force-recreate"], {
-          cwd: stackDir,
-          stdout: "pipe",
-          stderr: "pipe",
-        });
-
-        // Without this, a client that disconnects mid-migration leaves the producers
-        // suspended in agg.push once the buffer fills, leaking the subprocess and its pipes.
-        request.signal.addEventListener("abort", () => { proc.kill(); agg.end(); }, { once: true });
-
-        void (async () => {
-          try {
-            const [, , exitCode] = await Promise.all([
-              drainStream(proc.stdout, data => agg.push(data)),
-              drainStream(proc.stderr, data => agg.push(data)),
-              proc.exited,
-            ]);
-
-            if (exitCode === 0) {
-              // Ensure row exists, then explicitly set managed + x-casaos metadata.
-              // updateMeta is used because StackStore.upsert's ON CONFLICT SET clause
-              // does not include `managed`, so upsert alone would not persist managed=true.
-              await StackStore.upsert({ id: name });
-              await StackStore.updateMeta(name, {
-                managed:     true,
-                title:       meta?.title       || undefined,
-                icon:        meta?.icon        || undefined,
-                tagline:     meta?.tagline     || undefined,
-                note:        meta?.tips        || undefined,
-                portMap:     meta?.portMap     || undefined,
-                scheme:      meta?.scheme      || undefined,
-                indexPath:   meta?.index       || undefined,
-                mainService: meta?.mainService || undefined,
-              });
-              invalidateOriginCache(name);
-              await agg.push({ ok: true });
-            } else {
-              await agg.push({ error: `docker compose exited with code ${exitCode}` });
-            }
-          } catch (err) {
-            await agg.push({ error: err instanceof Error ? err.message : String(err) });
-          } finally {
-            agg.end();
-          }
-        })();
-
-        for await (const msg of agg) yield sse({ data: msg });
+        set.status = 202;
+        return { job: started.job };
       },
       {
         body: t.Optional(t.Object({
           composePath: t.Optional(t.String()),
         })),
+        detail: { summary: "Migrate a CasaOS stack into anpan-os (starts a job)" },
       },
     )
 

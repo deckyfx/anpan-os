@@ -403,6 +403,12 @@ passkey_allowed_origins = []
 
 [compose]
 
+[apps]
+# data_root = "/DATA/AppData"   # one data folder per app; defaults to <config dir>/appdata
+# puid = 1000                   # $PUID / $PGID / $TZ given to apps that ask for them
+# pgid = 1000
+# tz = "UTC"
+
 [files]
 root = "/"
 

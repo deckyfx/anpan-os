@@ -2,6 +2,18 @@ import { create } from "zustand";
 import { api } from "../lib/api";
 import type { AppRepo, StoreApp } from "../pages/store/types";
 
+/** Tile metadata for an App Store install, as the server derives it from x-casaos. */
+export interface InstallMeta {
+  title?:       string;
+  icon?:        string;
+  tagline?:     string;
+  note?:        string;
+  portMap?:     string;
+  scheme?:      string;
+  indexPath?:   string;
+  mainService?: string;
+}
+
 // Eden Treaty types the repos endpoint with a function overload for path params.
 // We use `as unknown as` to access the parameterised form without duplicating the full type.
 type RepoEndpoint = {
@@ -41,6 +53,8 @@ interface AppStoreState {
   // ── Install flow ──────────────────────────────────────────────────────────
   installApp:       StoreApp | null;
   installContent:   string | null;
+  /** Tile metadata the server read from the app's x-casaos block, to pre-fill App Config. */
+  installMeta:      InstallMeta | null;
 
   // ── Actions ───────────────────────────────────────────────────────────────
   loadRepos():                                        Promise<void>;
@@ -72,6 +86,7 @@ export const useAppStoreStore = create<AppStoreState>((set, get) => ({
   repoManagerOpen:  false,
   installApp:       null,
   installContent:   null,
+  installMeta:      null,
 
   async loadRepos() {
     set({ loadingRepos: true });
@@ -146,16 +161,16 @@ export const useAppStoreStore = create<AppStoreState>((set, get) => ({
   setRepoManagerOpen: (open) => set({ repoManagerOpen: open }),
 
   async startInstall(app: StoreApp) {
-    set({ installApp: app, installContent: null });
+    set({ installApp: app, installContent: null, installMeta: null });
     try {
       const { data } = await appByIds(app.repoId, app.appName).get();
-      const content = (data as { content?: string } | null)?.content ?? "";
-      set({ installContent: content });
+      const got = data as { content?: string; meta?: InstallMeta } | null;
+      set({ installContent: got?.content ?? "", installMeta: got?.meta ?? null });
     } catch (e) {
-      set({ installApp: null, installContent: null });
+      set({ installApp: null, installContent: null, installMeta: null });
       throw e;
     }
   },
 
-  clearInstall: () => set({ installApp: null, installContent: null }),
+  clearInstall: () => set({ installApp: null, installContent: null, installMeta: null }),
 }));

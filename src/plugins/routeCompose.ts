@@ -1,75 +1,86 @@
 import { Elysia, t, sse } from "elysia";
 import { join } from "node:path";
-import { mkdirSync } from "node:fs";
-import { appendFile } from "node:fs/promises";
 import { authGuard } from "./authGuard";
 import { config } from "../config";
 import { bins, commands } from "../lib/commands";
 import { StackStore } from "../stores/stack-store";
-import { envConfig } from "../env-config";
 import { StreamAggregator, drainStream } from "../lib/sse";
-import type { SSEMsg, LogWriter } from "../lib/sse";
-import { DockerClient } from "../lib/docker";
+import type { SSEMsg } from "../lib/sse";
+import { jobs, stackLogPath, type JobSummary } from "../lib/jobs";
 import {
-  buildComposeSourceReport,
-  scanComposeSources,
-  adoptComposeFile,
-  findOrphanServices,
-} from "../lib/compose-source";
+  checkInstall, checkRedeploy, runDeploy, runRepair, runUpdate, runUpdateAll, updatableDir,
+  type DeployRequest,
+} from "../lib/stack-ops";
+import { DockerClient } from "../lib/docker";
+import { buildComposeSourceReport, scanComposeSources } from "../lib/compose-source";
 import type { ComposeSourceReport } from "../lib/compose-source";
 import { CASAOS_APPS_DIR } from "../lib/platform";
 import { STACK_NAME_RE } from "../constants/stack";
+import { COMPOSE_FILE, composeCommand } from "../lib/compose-cmd";
 import { listTags } from "../lib/registry";
 import { loadDockerCredentials } from "../lib/docker-credentials";
 
 const CONTAINER_NAME_RE = /^[a-zA-Z0-9_.\-]+$/;
 
-function getLogPath(name: string): string {
-  return join(envConfig.RUNTIME_CONFIG_DIR, "logs", `${name}.log`);
-}
-
-async function openLogWriter(name: string, label: string): Promise<LogWriter> {
-  const logDir = join(envConfig.RUNTIME_CONFIG_DIR, "logs");
-  mkdirSync(logDir, { recursive: true });
-  const logPath = getLogPath(name);
-  await appendFile(logPath, `--- ${label} ${new Date().toISOString()} ---\n`);
-  return {
-    write: (s: string) => appendFile(logPath, s),
-    flush: async () => {},
-  };
-}
+/** The tile metadata an install or redeploy may set, as the stack PATCH accepts it. */
+const META_SCHEMA = t.Object({
+  title:       t.Optional(t.Nullable(t.String())),
+  icon:        t.Optional(t.Nullable(t.String())),
+  tagline:     t.Optional(t.Nullable(t.String())),
+  portMap:     t.Optional(t.Nullable(t.String())),
+  scheme:      t.Optional(t.Nullable(t.String())),
+  indexPath:   t.Optional(t.Nullable(t.String())),
+  mainService: t.Optional(t.Nullable(t.String())),
+  address:     t.Optional(t.Nullable(t.String())),
+  note:        t.Optional(t.Nullable(t.String())),
+  openMode:    t.Optional(t.Nullable(t.String())),
+});
 
 /**
- * Build the `docker compose up` arguments for deploying `name` from `stackDir`.
- *
- * Appends --force-recreate only when the project already has containers created from a
- * different compose file. Without it those containers survive the deploy untouched and
- * keep labels pointing at the old file, so the project stays split across two sources.
- * The check is skipped-on-failure, and omitted when there is no drift, so ordinary edits
- * still restart only the services that actually changed.
+ * The answer to a request that starts a job: 202 with the job, or 409 with the job already
+ * working on the stack, so the client can show that one instead.
  */
-async function composeUpArgs(name: string, stackDir: string): Promise<string[]> {
-  const args = ["compose", "up", "-d"];
-  if (await DockerClient.hasComposeDrift(name, join(stackDir, "docker-compose.yml"))) {
-    args.push("--force-recreate");
+/**
+ * 409 with the job holding `stack`, if one is. Checked before a route's own refusals, so a
+ * second install of a name that a running install has just written gets that job to follow
+ * rather than a bare "already exists".
+ */
+function busy(set: { status?: number | string }, stack: string): { error: string; job: JobSummary } | null {
+  const holder = jobs.activeFor(stack);
+  if (!holder) return null;
+  set.status = 409;
+  return { error: `"${holder.title}" is still running for this stack`, job: holder };
+}
+
+function answer(
+  set: { status?: number | string },
+  started: ReturnType<typeof jobs.start>,
+): { job: JobSummary } | { error: string; job: JobSummary } {
+  if (!started.ok) {
+    set.status = 409;
+    return { error: `"${started.busyWith.title}" is still running for this stack`, job: started.busyWith };
   }
-  return args;
+  set.status = 202;
+  return { job: started.job };
 }
 
 /**
  * Compose stack routes — all protected by auth guard.
  *
- * POST /api/compose/stacks                   — install new stack (write file + up -d)
- * PUT  /api/compose/stacks/:name/file        — update compose file + re-deploy (managed only)
- * POST /api/compose/stacks/:name/pull        — pull images + re-deploy
+ * Starting a job (202 with the job; follow it under /api/jobs):
+ * POST /api/compose/stacks                   — install a new stack
+ * PUT  /api/compose/stacks/:name/file        — replace a managed stack's files and redeploy
+ * POST /api/compose/stacks/:name/pull        — pull images and redeploy
+ * POST /api/compose/stacks/:name/repair      — re-anchor a stack on its managed file
+ * POST /api/compose/update-all               — update several stacks in sequence
+ *
+ * Immediate:
  * POST /api/compose/stacks/:name/down        — docker compose down
  * POST /api/compose/stacks/:name/restart     — docker compose restart
  * GET  /api/compose/stacks/:name/logs        — docker compose logs --tail=100
- * GET  /api/compose/stacks/:name/install-log — persisted install/pull log
- * GET  /api/compose/stacks/:name/file        — download compose file
- * POST /api/compose/fetch                    — proxy-fetch a remote compose URL
- * GET  /api/compose/templates                — list available stack templates
- * GET  /api/compose/templates/:id            — get template detail (includes composeYaml)
+ * GET  /api/compose/stacks/:name/install-log — the stack's persisted operation log
+ * GET  /api/compose/stacks/:name/file        — download the compose file
+ * GET/PUT /api/compose/stacks/:name/envfile  — read or write the stack's .env
  */
 /**
  * Compose endpoints that never invoke Docker, by method and path.
@@ -166,198 +177,129 @@ export function composePlugin(jwtSecret: string) {
       }
     })
 
+    /**
+     * Install a new stack. Answers 202 with the job; follow it under /api/jobs.
+     *
+     * The compose file, `.env` and the tile's metadata come in this one request and are all
+     * written before the first `docker compose up`. A name already in use is refused with
+     * 409 rather than overwritten.
+     */
     .post(
       "/stacks",
-      async function*({ body }) {
-        const { name, content } = body;
-        const stackDir = join(config.composeFolder, name);
-
-        try {
-          mkdirSync(stackDir, { recursive: true });
-          await Bun.write(join(stackDir, "docker-compose.yml"), content);
-        } catch (err) {
-          yield sse({ data: { error: err instanceof Error ? err.message : String(err) } satisfies SSEMsg });
-          return;
-        }
-
-        const proc = Bun.spawn([docker!, ...(await composeUpArgs(name, stackDir))], {
-          cwd: stackDir,
-          stdout: "pipe",
-          stderr: "pipe",
-        });
-
-        const logWriter = await openLogWriter(name, "install");
-        const agg = new StreamAggregator();
-
-        void (async () => {
-          try {
-            const [, , exitCode] = await Promise.all([
-              drainStream(proc.stdout, data => agg.push(data), logWriter),
-              drainStream(proc.stderr, data => agg.push(data), logWriter),
-              proc.exited,
-            ]);
-            if (exitCode === 0) {
-              try { await StackStore.upsert({ id: name, managed: true }); } catch { /* non-critical */ }
-              await agg.push({ ok: true });
-            } else {
-              await agg.push({ error: `docker compose exited with code ${exitCode}` });
-            }
-          } catch (err) {
-            await agg.push({ error: err instanceof Error ? err.message : String(err) });
-          } finally {
-            await logWriter.flush();
-            agg.end();
-          }
-        })();
-
-        for await (const msg of agg) yield sse({ data: msg });
+      async ({ body, set }) => {
+        const req: DeployRequest = { name: body.name, compose: body.content, env: body.env, meta: body.meta };
+        const holder = busy(set, req.name);
+        if (holder) return holder;
+        const refused = await checkInstall(req);
+        if (refused) { set.status = refused.status; return { error: refused.error }; }
+        return answer(set, jobs.start(
+          { kind: "install", title: `Install ${req.name}`, stack: req.name },
+          ctx => runDeploy(ctx, "install", req),
+        ));
       },
       {
         body: t.Object({
           name:    t.String({ minLength: 1 }),
-          content: t.String({ minLength: 1 }),
+          content: t.String({ minLength: 1, description: "The compose file" }),
+          env:     t.Optional(t.String({ description: "The stack's .env file" })),
+          meta:    t.Optional(META_SCHEMA),
         }),
+        detail: { summary: "Install a new stack (starts a job)" },
       },
     )
 
+    /** Replace a managed stack's compose file (and optionally .env and metadata), then redeploy. */
     .put(
       "/stacks/:name/file",
-      async function*({ params, body }) {
-        const { name } = params;
-        if (!STACK_NAME_RE.test(name)) {
-          yield sse({ data: { error: "Invalid stack name" } satisfies SSEMsg });
-          return;
-        }
-
-        const stackDir = join(config.composeFolder, name);
-
-        const composePath = join(stackDir, "docker-compose.yml");
-        if (!(await Bun.file(composePath).exists())) {
-          yield sse({ data: { error: "Stack not managed here" } satisfies SSEMsg });
-          return;
-        }
-
-        try {
-          await Bun.write(composePath, body.content);
-        } catch (err) {
-          yield sse({ data: { error: err instanceof Error ? err.message : String(err) } satisfies SSEMsg });
-          return;
-        }
-
-        const proc = Bun.spawn([docker!, ...(await composeUpArgs(name, stackDir))], {
-          cwd: stackDir,
-          stdout: "pipe",
-          stderr: "pipe",
-        });
-
-        const agg = new StreamAggregator();
-
-        void (async () => {
-          try {
-            const [, , exitCode] = await Promise.all([
-              drainStream(proc.stdout, data => agg.push(data)),
-              drainStream(proc.stderr, data => agg.push(data)),
-              proc.exited,
-            ]);
-            await agg.push(exitCode === 0 ? { ok: true } : { error: `docker compose exited with code ${exitCode}` });
-          } catch (err) {
-            await agg.push({ error: err instanceof Error ? err.message : String(err) });
-          } finally {
-            agg.end();
-          }
-        })();
-
-        for await (const msg of agg) yield sse({ data: msg });
+      async ({ params, body, set }) => {
+        const req: DeployRequest = { name: params.name, compose: body.content, env: body.env, meta: body.meta };
+        const holder = busy(set, req.name);
+        if (holder) return holder;
+        const refused = await checkRedeploy(req);
+        if (refused) { set.status = refused.status; return { error: refused.error }; }
+        return answer(set, jobs.start(
+          { kind: "redeploy", title: `Redeploy ${req.name}`, stack: req.name },
+          ctx => runDeploy(ctx, "redeploy", req),
+        ));
       },
-      { body: t.Object({ content: t.String({ minLength: 1 }) }) },
+      {
+        body: t.Object({
+          content: t.String({ minLength: 1, description: "The compose file" }),
+          env:     t.Optional(t.String({ description: "The stack's .env file; omitted keeps the current one" })),
+          meta:    t.Optional(META_SCHEMA),
+        }),
+        detail: { summary: "Replace a stack's compose file and redeploy (starts a job)" },
+      },
     )
 
-    .post("/stacks/:name/pull", async function*({ params }) {
-      const { name } = params;
-      if (!STACK_NAME_RE.test(name)) {
-        yield sse({ data: { error: "Invalid stack name" } satisfies SSEMsg });
-        return;
-      }
-
-      // Resolve stack directory (managed or CasaOS)
-      let stackDir: string | null = null;
-      const managedCompose = join(config.composeFolder, name, "docker-compose.yml");
-      if (await Bun.file(managedCompose).exists()) {
-        stackDir = join(config.composeFolder, name);
-      } else {
-        // CasaOS — requires running as root
-        const casaosCompose = `${CASAOS_APPS_DIR}/${name}/docker-compose.yml`;
-        if (await Bun.file(casaosCompose).exists()) {
-          stackDir = `${CASAOS_APPS_DIR}/${name}`;
-        }
-      }
-
-      if (!stackDir) {
-        yield sse({ data: { error: "No compose file found for this stack" } satisfies SSEMsg });
-        return;
-      }
-
-      const dir = stackDir;
-      const logWriter = await openLogWriter(name, "pull");
-      const agg = new StreamAggregator();
-
-      void (async () => {
-        try {
-          // Phase 1: pull images
-          const pullProc = Bun.spawn(
-            [docker!, "compose", "pull"],
-            { cwd: dir, stdout: "pipe", stderr: "pipe" },
-          );
-          const [, , pullExit] = await Promise.all([
-            drainStream(pullProc.stdout, data => agg.push(data), logWriter),
-            drainStream(pullProc.stderr, data => agg.push(data), logWriter),
-            pullProc.exited,
-          ]);
-
-          if (pullExit !== 0) {
-            await agg.push({ error: `docker compose pull failed with code ${pullExit}` });
-            return;
-          }
-
-          // Phase 2: re-deploy with updated images
-          const upProc = Bun.spawn(
-            [docker!, ...(await composeUpArgs(name, dir))],
-            { cwd: dir, stdout: "pipe", stderr: "pipe" },
-          );
-          const [, , upExit] = await Promise.all([
-            drainStream(upProc.stdout, data => agg.push(data), logWriter),
-            drainStream(upProc.stderr, data => agg.push(data), logWriter),
-            upProc.exited,
-          ]);
-          await agg.push(upExit === 0 ? { ok: true } : { error: `docker compose up failed with code ${upExit}` });
-        } catch (err) {
-          await agg.push({ error: err instanceof Error ? err.message : String(err) });
-        } finally {
-          await logWriter.flush();
-          agg.end();
-        }
-      })();
-
-      for await (const msg of agg) yield sse({ data: msg });
+    /** Pull a stack's images and recreate what changed. Works on CasaOS stacks too. */
+    .post("/stacks/:name/pull", async ({ params, set }) => {
+      const holder = busy(set, params.name);
+      if (holder) return holder;
+      const dir = await updatableDir(params.name);
+      if (!dir) { set.status = 404; return { error: "No compose file found for this stack" }; }
+      return answer(set, jobs.start(
+        { kind: "update", title: `Update ${params.name}`, stack: params.name },
+        ctx => runUpdate(ctx, params.name, dir),
+      ));
+    }, {
+      detail: { summary: "Pull a stack's images and redeploy (starts a job)" },
     })
 
+    /**
+     * Update several stacks, one after another, in one job.
+     *
+     * Runs in the server, so it carries on with the tab closed. It used to be a queue in the
+     * browser that also gave up on any stack after five minutes.
+     */
+    .post("/update-all", ({ body, set }) => {
+      const stacks = [...new Set(body.stacks)];
+      const bad = stacks.find(name => !STACK_NAME_RE.test(name));
+      if (bad !== undefined) { set.status = 422; return { error: `Invalid stack name: ${bad}` }; }
+      return answer(set, jobs.start(
+        { kind: "update-all", title: `Update ${stacks.length} stack${stacks.length === 1 ? "" : "s"}` },
+        ctx => runUpdateAll(ctx, stacks),
+      ));
+    }, {
+      body: t.Object({ stacks: t.Array(t.String(), { minItems: 1, maxItems: 500 }) }),
+      detail: { summary: "Update several stacks in sequence (starts a job)" },
+    })
+
+    // These three run Compose the way the jobs do (composeCommand: `-p <stack>` and the
+    // stack's own file), so `down` stops the project an install started, whatever the
+    // stack's .env says COMPOSE_PROJECT_NAME is. Stopping or restarting a stack a job is
+    // working on is refused with that job, as every other stack-changing route is.
     .post("/stacks/:name/down", async ({ params, set }) => {
+      if (!STACK_NAME_RE.test(params.name)) { set.status = 422; return { ok: false, error: "Invalid stack name" }; }
       const stackDir = join(config.composeFolder, params.name);
-      const result = await Bun.$`${docker!} compose down`.cwd(stackDir).nothrow();
+      if (!(await Bun.file(join(stackDir, COMPOSE_FILE)).exists())) { set.status = 404; return { ok: false, error: `Stack "${params.name}" is not managed by anpan-os` }; }
+      // Checked after the await above, with none between it and the command: a job that
+      // took the stack while the file was being checked is seen here.
+      const held = busy(set, params.name);
+      if (held) return { ok: false, ...held };
+      const result = await Bun.$`${composeCommand(docker!, params.name, stackDir)} down`.cwd(stackDir).nothrow().quiet();
       if (result.exitCode !== 0) return { ok: false, error: result.stderr.toString() };
       return { ok: true };
     })
 
     .post("/stacks/:name/restart", async ({ params, set }) => {
+      if (!STACK_NAME_RE.test(params.name)) { set.status = 422; return { ok: false, error: "Invalid stack name" }; }
       const stackDir = join(config.composeFolder, params.name);
-      const result = await Bun.$`${docker!} compose restart`.cwd(stackDir).nothrow();
+      if (!(await Bun.file(join(stackDir, COMPOSE_FILE)).exists())) { set.status = 404; return { ok: false, error: `Stack "${params.name}" is not managed by anpan-os` }; }
+      // Checked after the await above, with none between it and the command: a job that
+      // took the stack while the file was being checked is seen here.
+      const held = busy(set, params.name);
+      if (held) return { ok: false, ...held };
+      const result = await Bun.$`${composeCommand(docker!, params.name, stackDir)} restart`.cwd(stackDir).nothrow().quiet();
       if (result.exitCode !== 0) return { ok: false, error: result.stderr.toString() };
       return { ok: true };
     })
 
     .get("/stacks/:name/logs", async ({ params, set }) => {
+      if (!STACK_NAME_RE.test(params.name)) { set.status = 422; return { error: "Invalid stack name" }; }
       const stackDir = join(config.composeFolder, params.name);
-      const result = await Bun.$`${docker!} compose logs --tail=100`.cwd(stackDir).nothrow();
+      if (!(await Bun.file(join(stackDir, COMPOSE_FILE)).exists())) { set.status = 404; return { ok: false, error: `Stack "${params.name}" is not managed by anpan-os` }; }
+      const result = await Bun.$`${composeCommand(docker!, params.name, stackDir)} logs --tail=100`.cwd(stackDir).nothrow().quiet();
       return { logs: result.stdout.toString() };
     })
 
@@ -368,7 +310,7 @@ export function composePlugin(jwtSecret: string) {
         return { error: "Invalid stack name" };
       }
       try {
-        const text = await Bun.file(getLogPath(name)).text();
+        const text = await Bun.file(stackLogPath(name)).text();
         return { log: text };
       } catch {
         set.status = 404;
@@ -446,15 +388,10 @@ export function composePlugin(jwtSecret: string) {
      * compose file into our folder and restart every container. That takes `?adopt=1`, an
      * explicit statement of intent, rather than being reachable by stack name alone.
      */
-    .post("/stacks/:name/repair", async function*({ params, query, request }) {
+    .post("/stacks/:name/repair", async ({ params, query, set }) => {
       const { name } = params;
-      if (!STACK_NAME_RE.test(name)) {
-        yield sse({ data: { error: "Invalid stack name" } satisfies SSEMsg });
-        return;
-      }
-
-      const stackDir = join(config.composeFolder, name);
-
+      const holder = busy(set, name);
+      if (holder) return holder;
       const report = await buildComposeSourceReport(name);
 
       // Deliberately narrower than "reject whenever needsRepair is false": adopting an
@@ -462,77 +399,18 @@ export function composePlugin(jwtSecret: string) {
       // instead of being refused outright. `ok` and `unknown` have nothing to repair.
       const mayAdoptExternal = report.status === "external" && query.adopt === "1";
       if (!report.needsRepair && !mayAdoptExternal) {
-        yield sse({ data: { error: report.status === "external"
+        set.status = 409;
+        return { error: report.status === "external"
           ? `Stack "${name}" is managed outside anpan-os (${report.foreignPaths.join(", ")}). `
             + `Repairing would take it over and restart every container — resend with ?adopt=1 to confirm.`
-          : `Stack "${name}" reports status "${report.status}" and does not need repair.`
-        } satisfies SSEMsg });
-        return;
+          : `Stack "${name}" reports status "${report.status}" and does not need repair.` };
       }
-
-      const adopted = await adoptComposeFile(report);
-      if (!adopted.ok) {
-        yield sse({ data: { error: adopted.error } satisfies SSEMsg });
-        return;
-      }
-      if (adopted.adoptedFrom) {
-        yield sse({ data: { log: `Adopted ${adopted.adoptedFrom} → ${report.expected}\n` } satisfies SSEMsg });
-      }
-
-      // Guard: --remove-orphans would delete services the managed file does not define.
-      const orphanCheck = await findOrphanServices(report);
-      if (!orphanCheck.ok) {
-        yield sse({ data: { error: orphanCheck.error } satisfies SSEMsg });
-        return;
-      }
-      if (orphanCheck.orphans.length > 0) {
-        yield sse({ data: { error:
-          `Repair would delete these running services, which are missing from ${report.expected}: `
-          + `${orphanCheck.orphans.join(", ")}. Merge them into the managed compose file first.`
-        } satisfies SSEMsg });
-        return;
-      }
-
-      const logWriter = await openLogWriter(name, "repair");
-      const agg = new StreamAggregator();
-
-      const proc = Bun.spawn(
-        [docker!, "compose", "up", "-d", "--remove-orphans", "--force-recreate"],
-        { cwd: stackDir, stdout: "pipe", stderr: "pipe" },
-      );
-
-      // A disconnected client stops consuming, so once the buffer fills, every drainStream
-      // producer suspends forever inside agg.push — the subprocess, its pipes and the log
-      // writer would then leak for the lifetime of the server. Ending the aggregator
-      // releases the producers so the cleanup below can run. Repair recreates every
-      // container, so it is long enough for a disconnect to be likely.
-      request.signal.addEventListener("abort", () => { proc.kill(); agg.end(); }, { once: true });
-
-      void (async () => {
-        try {
-          const [, , exitCode] = await Promise.all([
-            drainStream(proc.stdout, data => agg.push(data), logWriter),
-            drainStream(proc.stderr, data => agg.push(data), logWriter),
-            proc.exited,
-          ]);
-          if (exitCode === 0) {
-            try {
-              await StackStore.upsert({ id: name });
-              await StackStore.updateMeta(name, { managed: true });
-            } catch { /* non-critical */ }
-            await agg.push({ ok: true });
-          } else {
-            await agg.push({ error: `docker compose exited with code ${exitCode}` });
-          }
-        } catch (err) {
-          await agg.push({ error: err instanceof Error ? err.message : String(err) });
-        } finally {
-          await logWriter.flush();
-          agg.end();
-        }
-      })();
-
-      for await (const msg of agg) yield sse({ data: msg });
+      return answer(set, jobs.start(
+        { kind: "repair", title: `Repair ${name}`, stack: name },
+        ctx => runRepair(ctx, name, mayAdoptExternal),
+      ));
+    }, {
+      detail: { summary: "Re-anchor a stack on its managed compose file (starts a job)" },
     })
 
     .get("/stacks/:name/envfile", async ({ params, set }) => {
@@ -559,6 +437,10 @@ export function composePlugin(jwtSecret: string) {
           set.status = 422;
           return { error: "Invalid stack name" };
         }
+        // A job holding the stack may have checked the current .env (ports, values) and be
+        // about to start it; a write now would change what Compose reads after the check.
+        const holder = busy(set, name);
+        if (holder) return holder;
         const envPath = join(config.composeFolder, name, ".env");
         try {
           await Bun.write(envPath, body.content);

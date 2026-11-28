@@ -119,3 +119,22 @@ export class Broadcast<T> {
     };
   }
 }
+
+/**
+ * Interleave two async iterables, yielding from whichever produces first.
+ *
+ * Needed where a stream's events and an idle keepalive are independent sources: awaiting
+ * them in sequence would stall one behind the other.
+ */
+export async function* mergeStreams<T>(...sources: AsyncGenerator<T>[]): AsyncGenerator<T> {
+  const pending = new Map<number, Promise<{ i: number; r: IteratorResult<T> }>>();
+  sources.forEach((src, i) => pending.set(i, src.next().then(r => ({ i, r }))));
+
+  while (pending.size > 0) {
+    const { i, r } = await Promise.race(pending.values());
+    if (r.done) { pending.delete(i); continue; }
+    yield r.value;
+    const src = sources[i];
+    if (src) pending.set(i, src.next().then(res => ({ i, r: res })));
+  }
+}

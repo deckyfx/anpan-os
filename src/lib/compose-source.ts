@@ -21,6 +21,7 @@ import { mkdirSync } from "node:fs";
 import { config } from "../config";
 import { bins } from "./commands";
 import { DockerClient, normalizeComposePath } from "./docker";
+import { composeCommand } from "./compose-cmd";
 
 /**
  * How a stack's containers relate to the managed compose file.
@@ -180,7 +181,7 @@ export async function findOrphanServices(
   if (!docker) return { ok: false, error: "Docker is not available on this system" };
 
   const stackDir = join(config.composeFolder, report.stack);
-  const defined = await Bun.$`${docker} compose config --services`
+  const defined = await Bun.$`${composeCommand(docker, report.stack, stackDir)} config --services`
     .cwd(stackDir)
     .nothrow()
     .quiet();

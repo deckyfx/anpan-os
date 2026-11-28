@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef, useId } from "react";
 import { Loader2, Trash2, AlertTriangle, Plus, RefreshCw } from "lucide-react";
-import { Section } from "./Section";
+import { Pane } from "./Pane";
 import { InlineConfirm } from "./InlineConfirm";
-import { INPUT, LABEL, PRIMARY_BUTTON, QUIET_BUTTON, TARGET } from "./styles";
+import { CARD, INPUT, LABEL, PRIMARY_BUTTON, QUIET_BUTTON, TARGET } from "./styles";
 import { api } from "../../lib/api";
 import { useToastStore } from "../../stores/toastStore";
 
@@ -243,8 +243,8 @@ function NewKeyPanel({ name, token, onDone }: { name: string; token: string; onD
   );
 }
 
-/** The API keys card on the Account page: list, revoke, create and the one-time token. */
-export function ApiKeysSection() {
+/** The Account screen's API keys page: list, revoke, create and the one-time token. */
+export function ApiKeysSection({ hidden }: { hidden: boolean }) {
   const [keys,       setKeys]       = useState<ApiKey[]>([]);
   const [loading,    setLoading]    = useState(true);
   const [loadError,  setLoadError]  = useState("");
@@ -291,8 +291,9 @@ export function ApiKeysSection() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Closing or reloading the tab would lose a token not yet copied. The app's router has
-  // no navigation-blocking hook, so in-app navigation away is not intercepted.
+  // Closing or reloading the tab would lose a token not yet copied. Switching to another
+  // Account page keeps this one mounted, so the token survives that; leaving the Account
+  // screen through the top bar is not intercepted, as the router has no blocking hook.
   useEffect(() => {
     if (!created) return;
     const onBeforeUnload = (e: BeforeUnloadEvent) => { e.preventDefault(); };
@@ -373,12 +374,13 @@ export function ApiKeysSection() {
   );
 
   return (
-    <Section
+    <Pane
       title="API keys"
       description="Keys let scripts and other tools call the anpan-os API as you, limited to the key's scope. Revoke a key as soon as it is no longer needed or may have leaked."
       actions={refresh}
+      hidden={hidden}
     >
-      <div className="space-y-5">
+      <div className={`${CARD} space-y-5`}>
         <div className="flex items-start gap-2 px-3 py-2.5 rounded-lg border text-xs text-amber-200 bg-amber-500/10 border-amber-500/25">
           <AlertTriangle size={14} className="text-amber-400 shrink-0 mt-0.5" aria-hidden="true" />
           <p className="leading-relaxed">
@@ -549,6 +551,6 @@ export function ApiKeysSection() {
           </div>
         </div>
       </div>
-    </Section>
+    </Pane>
   );
 }

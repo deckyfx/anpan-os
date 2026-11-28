@@ -18,3 +18,6 @@ export const PRIMARY_BUTTON = `${BUTTON} bg-blue-600 hover:bg-blue-500 text-whit
 
 /** The destructive half of an inline two-step confirm. */
 export const DANGER_BUTTON = `${BUTTON} bg-red-500/90 hover:bg-red-500 text-white`;
+
+/** A card on one of the Account pages. */
+export const CARD = "bg-gray-900 border border-gray-800 rounded-xl p-5";

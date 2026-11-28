@@ -1,16 +1,19 @@
 import { useState, useRef, useEffect } from "react";
-import { Menu, X, LayoutGrid, FolderOpen, Activity, Network, RotateCcw, PowerOff, ShoppingBag, HardDrive } from "lucide-react";
+import { Menu, X, LayoutGrid, FolderOpen, Activity, Network, RotateCcw, PowerOff, ShoppingBag, HardDrive, UserRound, LogOut, ChevronDown } from "lucide-react";
 import { api } from "../../lib/api";
 import { DoctorDialog }   from "../../components/DoctorDialog";
 import { DiskCleanupDialog } from "../../components/DiskCleanupDialog";
 import { VersionDialog }  from "../../components/VersionDialog";
 import { PortsDialog }    from "./PortsDialog";
 import { Avatar }         from "../../components/Avatar";
+import { AnchoredMenu }   from "../../components/AnchoredMenu";
+import { signOut }        from "../../lib/sign-out";
 import { TARGET }         from "../account/styles";
 import { useSystemStore } from "../../stores/systemStore";
 import { useToastStore } from "../../stores/toastStore";
 import { useAuthStore } from "../../stores/authStore";
 import { UpdatesMenu } from "./UpdatesMenu";
+import { JobsMenu } from "./JobsMenu";
 
 interface NavItem {
   icon: React.ReactNode;
@@ -36,8 +39,8 @@ const MENU_ITEMS: NavItem[] = [
  * The menu lists navigation items grouped by section (items flagged `newTab` render as
  * links that open in a new tab), exposes system power actions when allowed, and controls
  * the tool dialogs (Doctor, Disk Cleanup, Ports, Version). Account actions (Docker Hub,
- * password, passkey, API keys, sign out) live on the Account page, reached through the
- * user button at the right end of the bar.
+ * password, passkey, API keys) live on the Account page. The user button at the right end
+ * of the bar opens a short menu: Account, to go there, and Sign out.
  *
  * @param version - Application version string shown next to the branding
  * @param onNavigate - Callback invoked with a path when a navigation item, the branding or the user button is activated
@@ -68,7 +71,9 @@ export function TopBar({ version, onNavigate, currentPath = "/", showUpdates = t
   const [portsOpen,  setPortsOpen]          = useState(false);
   const [versionOpen, setVersionOpen]       = useState(false);
   const [confirm, setConfirm]       = useState<"restart" | "shutdown" | null>(null);
+  const [userMenuOpen, setUserMenuOpen]     = useState(false);
   const btnRef  = useRef<HTMLButtonElement>(null);
+  const userBtnRef = useRef<HTMLButtonElement>(null);
   const dropRef = useRef<HTMLDivElement>(null);
 
   const toggle = () => {
@@ -170,6 +175,9 @@ export function TopBar({ version, onNavigate, currentPath = "/", showUpdates = t
       {/* Updates menu — Check all / View report */}
       {showUpdates && <UpdatesMenu />}
 
+      {/* Server jobs (install, deploy, update, migrate) — shown on every page that has jobs */}
+      <JobsMenu />
+
       {/* Version badge — far right, before the user button */}
       <button
         onClick={() => setVersionOpen(true)}
@@ -184,19 +192,57 @@ export function TopBar({ version, onNavigate, currentPath = "/", showUpdates = t
         v{version}
       </button>
 
-      {/* User button — opens the Account page */}
+      {/* User button — a short menu: Account, and Sign out */}
       <button
-        onClick={() => { setOpen(false); setConfirm(null); onNavigate("/account"); }}
-        aria-label={username ? `Account: ${username}` : "Account"}
-        aria-current={onAccountPage ? "page" : undefined}
+        ref={userBtnRef}
+        type="button"
+        onClick={() => { setOpen(false); setConfirm(null); setUserMenuOpen(v => !v); }}
+        aria-haspopup="menu"
+        aria-expanded={userMenuOpen}
+        aria-label={username ? `Account menu: ${username}` : "Account menu"}
         title={username ? `Account: ${username}` : "Account"}
-        className={`ml-1 flex items-center justify-center gap-2 pl-1 pr-1 sm:pr-2.5 py-1 rounded-full transition-colors shrink-0 ${TARGET} ${
-          onAccountPage ? "bg-gray-800 text-white" : "text-gray-400 hover:text-white hover:bg-gray-800"
+        className={`ml-1 flex items-center justify-center gap-1.5 pl-1 pr-1.5 sm:pr-2 py-1 rounded-full transition-colors shrink-0 ${TARGET} ${
+          userMenuOpen || onAccountPage ? "bg-gray-800 text-white" : "text-gray-400 hover:text-white hover:bg-gray-800"
         }`}
       >
         <Avatar url={avatarUrl} username={username} size={24} alt="" />
         {username && <span className="hidden sm:inline text-xs max-w-32 truncate">{username}</span>}
+        <ChevronDown size={12} aria-hidden="true" className={`transition-transform ${userMenuOpen ? "rotate-180" : ""}`} />
       </button>
+
+      {userMenuOpen && (
+        <AnchoredMenu anchor={userBtnRef} onClose={() => setUserMenuOpen(false)} label="Account" className="w-56">
+          {/* Who is signed in. The button's name already says it, so screen readers skip it. */}
+          <div aria-hidden="true" className="flex items-center gap-2.5 px-3 py-2">
+            <Avatar url={avatarUrl} username={username} size={28} alt="" />
+            <div className="min-w-0">
+              <p className="text-sm text-white font-medium truncate">{username || "—"}</p>
+              <p className="text-[11px] text-gray-500">Signed in</p>
+            </div>
+          </div>
+          <div role="separator" className="border-t border-gray-700 my-1 mx-1" />
+          {/* A link, so it can also open in a new tab; a plain click stays in the app. */}
+          <a
+            href="/account"
+            onClick={e => {
+              if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+              e.preventDefault();
+              setUserMenuOpen(false);
+              if (!onAccountPage) onNavigate("/account");
+            }}
+            className="w-full flex items-center gap-2.5 px-3 py-1.5 rounded-lg hover:bg-gray-700 focus-visible:bg-gray-700 text-gray-200 transition-colors"
+          >
+            <UserRound size={14} aria-hidden="true" className="text-gray-400 shrink-0" /> Account
+          </a>
+          <button
+            type="button"
+            onClick={() => { setUserMenuOpen(false); void signOut(onNavigate); }}
+            className="w-full flex items-center gap-2.5 px-3 py-1.5 rounded-lg hover:bg-red-900/40 focus-visible:bg-red-900/40 text-red-400 transition-colors"
+          >
+            <LogOut size={14} aria-hidden="true" className="shrink-0" /> Sign out
+          </button>
+        </AnchoredMenu>
+      )}
 
       {/* Dropdown — fixed, anchored via JS measurement */}
       {open && (

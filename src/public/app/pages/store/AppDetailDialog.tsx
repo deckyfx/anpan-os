@@ -7,12 +7,13 @@ import { GuidedStackDialog } from "../home/GuidedStackDialog";
 import type { StoreApp } from "./types";
 
 export function AppDetailDialog() {
-  const { detailApp, setDetailApp, installApp, installContent, startInstall, clearInstall } =
+  const { detailApp, setDetailApp, installApp, installContent, installMeta, startInstall, clearInstall } =
     useAppStoreStore(useShallow(s => ({
       detailApp:      s.detailApp,
       setDetailApp:   s.setDetailApp,
       installApp:     s.installApp,
       installContent: s.installContent,
+      installMeta:    s.installMeta,
       startInstall:   s.startInstall,
       clearInstall:   s.clearInstall,
     })));
@@ -73,9 +74,14 @@ export function AppDetailDialog() {
         mode="create"
         open={isInstalling}
         initialContent={installContent ?? undefined}
+        initialMeta={installMeta ?? undefined}
         initialAppId={installApp?.id}
         onClose={clearInstall}
-        onDone={clearInstall}
+        // Nothing to refresh here: the stacks list reloads when any job ends. Clearing the
+        // install would unmount the editor even when it holds edits the install did not
+        // apply; it is closed through onClose, which the editor calls only when it holds none
+        // or the user has agreed to discard them.
+        onDone={() => {}}
       />
     </>
   );

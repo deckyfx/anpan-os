@@ -6,8 +6,12 @@ import {
   fetchRemoteComposeContent,
   parseGithubUrl,
   FetchResponseError,
+  parseCasaOSMeta,
+  casaosStackMeta,
   type RemoteCasaOSApp,
 } from "../lib/casaos";
+import { rewriteDataRoot } from "../lib/app-env";
+import type { StackMeta } from "../lib/stack-ops";
 
 const UNSIGNED_INT = /^\d+$/;
 
@@ -189,6 +193,9 @@ export function appStorePlugin(jwtSecret: string) {
     })
 
     // ── Compose file for a specific app ──────────────────────────────────────
+    // Returned ready to install: volumes under CasaOS's /DATA/AppData point at this
+    // machine's data root, and `meta` pre-fills the tile from the app's x-casaos block.
+    // $AppID, $PUID, $PGID and $TZ are left as they are; the install writes them to .env.
 
     .get(
       "/apps/:repoId/:appName/compose",
@@ -202,8 +209,7 @@ export function appStorePlugin(jwtSecret: string) {
 
         if (app) {
           try {
-            const content = await fetchRemoteComposeContent(app.composeUrl);
-            return { content };
+            return prepareForInstall(await fetchRemoteComposeContent(app.composeUrl));
           } catch (e) {
             set.status = 502;
             return { error: e instanceof Error ? e.message : String(e) };
@@ -226,8 +232,7 @@ export function appStorePlugin(jwtSecret: string) {
         for (const branch of ["master", "main"]) {
           const url = `https://raw.githubusercontent.com/${owner}/${repoName}/${branch}/Apps/${encodeURIComponent(params.appName)}/docker-compose.yml`;
           try {
-            const content = await fetchRemoteComposeContent(url);
-            return { content };
+            return prepareForInstall(await fetchRemoteComposeContent(url));
           } catch (e) {
             // Only continue to the next branch on a true 404; anything else (timeout, 5xx) is upstream failure.
             if (e instanceof FetchResponseError && e.status === 404) continue;
@@ -240,4 +245,9 @@ export function appStorePlugin(jwtSecret: string) {
       },
       { params: t.Object({ repoId: t.String(), appName: t.String() }) },
     );
+}
+
+/** An App Store compose file as the install editor should receive it. */
+function prepareForInstall(raw: string): { content: string; meta: StackMeta } {
+  return { content: rewriteDataRoot(raw), meta: casaosStackMeta(parseCasaOSMeta(raw)) };
 }

@@ -7,6 +7,7 @@ import { HomePage }         from "./pages/HomePage";
 import { FilesPage }        from "./pages/FilesPage";
 import { useAuthStore }     from "./stores/authStore";
 import { useSystemStore }   from "./stores/systemStore";
+import { useJobsStore }     from "./stores/jobsStore";
 import { ToastContainer }   from "./components/Toast";
 import { AppStorePage }     from "./pages/store/AppStorePage";
 import { AccountPage }      from "./pages/AccountPage";
@@ -33,6 +34,14 @@ export function App() {
       void useSystemStore.getState().reload();
     }
     prevViewRef.current = view;
+  }, [view]);
+
+  // Follow server-side jobs while signed in, on every page: an install started on the home
+  // page is still worth seeing from the file manager, and its end refreshes the stack list.
+  useEffect(() => {
+    if (view !== "app") return;
+    useJobsStore.getState().connect();
+    return () => { useJobsStore.getState().disconnect(); };
   }, [view]);
 
   if (view === "loading") {

@@ -1,24 +1,24 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Editor from "@monaco-editor/react";
 import { FileCode, FileText, Loader2, Wand2 } from "lucide-react";
 import { Dialog } from "../../components/Dialog";
+import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { api } from "../../lib/api";
 import { useToastStore } from "../../stores/toastStore";
+import { useJobsStore, runningJobFor, readStartAnswer, type JobSummary } from "../../stores/jobsStore";
+import type { InstallMeta } from "../../stores/appStoreStore";
+import { JobView } from "../../components/JobView";
 import type { Stack } from "./types";
 import { AppConfigTab }   from "./guided/AppConfigTab";
 import { EnvFileTab }     from "./guided/EnvFileTab";
 import { ServiceTab }     from "./guided/ServiceTab";
 import { StackConfigTab } from "./guided/StackConfigTab";
-import {
-  parseComposeDoc, serializeComposeDoc,
-  parseService,    serializeService,
-  parseStackConfig, serializeStackConfig,
-} from "./guided/composeUtils";
+import { parseComposeDoc, parseService, parseStackConfig } from "./guided/composeUtils";
+import { applyFormChanges, type FormSnapshot } from "./guided/composePatch";
 import type { AppConfigState, OpenMode, ServiceForm, StackConfig } from "./guided/types";
 
-interface SSEMsg { log?: string; ok?: boolean; error?: string }
-
-const NAME_RE = /^[a-zA-Z0-9_-]+$/;
+/** What Docker Compose accepts as a project name; the server applies the same rule. */
+const NAME_RE = /^[a-z0-9][a-z0-9_-]*$/;
 
 function toSlug(s: string): string {
   return s
@@ -49,7 +49,7 @@ const DEFAULT_YAML = `services:
     restart: unless-stopped
 `;
 
-function initForms(yaml: string, projectName = "") {
+function initForms(yaml: string, projectName = ""): FormSnapshot {
   try {
     const doc   = parseComposeDoc(yaml);
     const names = Object.keys(doc.services ?? {});
@@ -69,17 +69,21 @@ function initForms(yaml: string, projectName = "") {
   }
 }
 
-/** Build the initial AppConfigState from an existing stack's metadata, or return defaults for a new stack. */
-function initAppConfig(stack: Stack | null): AppConfigState {
+/**
+ * Build the initial AppConfigState: from an existing stack's metadata, from an App Store
+ * app's x-casaos metadata, or defaults for a new stack.
+ */
+function initAppConfig(stack: Stack | null, initial?: InstallMeta): AppConfigState {
+  const m = stack?.meta ?? initial;
   return {
-    title:     stack?.meta?.title     ?? "",
-    tagline:   stack?.meta?.tagline   ?? "",
-    icon:      stack?.meta?.icon      ?? "",
-    scheme:    stack?.meta?.scheme    ?? "http",
-    portMap:   stack?.meta?.portMap   ?? "",
-    indexPath: stack?.meta?.indexPath ?? "/",
-    address:   stack?.meta?.address   ?? "",
-    note:      stack?.meta?.note      ?? "",
+    title:     m?.title     ?? "",
+    tagline:   m?.tagline   ?? "",
+    icon:      m?.icon      ?? "",
+    scheme:    m?.scheme    ?? "http",
+    portMap:   m?.portMap   ?? "",
+    indexPath: m?.indexPath ?? "/",
+    address:   stack?.meta?.address ?? "",
+    note:      m?.note      ?? "",
     openMode:  (stack?.meta?.openMode as OpenMode | undefined) ?? "new-page",
   };
 }
@@ -93,14 +97,26 @@ type TabId = "app-config" | "stack-config" | "env-file" | "yaml" | "action-log" 
  * Forces a full remount via `key` when the target changes so all draft
  * state is reset cleanly between different stacks or App Store installs.
  */
-export function GuidedStackDialog({ mode, stack, open, onClose, onDone, initialContent, initialAppId }: {
+export function GuidedStackDialog({ mode, stack, open, onClose, onDone, initialContent, initialMeta, initialAppId }: {
   mode:             "create" | "edit";
   stack?:           Stack | null;
   open:             boolean;
+  /**
+   * Close the dialog. Called after a successful install or deploy only when no edit is left
+   * unsent, and on Cancel only once the user has agreed to discard any such edits.
+   */
   onClose:          () => void;
+  /**
+   * The stack changed on the server: refresh what shows it. Must not close or unmount the
+   * dialog. It is also called when edits made while the job ran are still unsent, and the
+   * dialog then stays open with them (after an install, as the new stack's editor, which
+   * deploys them there); closing is `onClose`'s job alone.
+   */
   onDone:           () => void;
   /** Pre-fill the YAML editor with this content when creating a new stack (e.g. from App Store). */
   initialContent?:  string;
+  /** Pre-fill App Config with this metadata when creating (from the App Store's x-casaos). */
+  initialMeta?:     InstallMeta;
   /** Unique key for the app being installed; forces remount between different App Store installs. */
   initialAppId?:    string;
 }) {
@@ -114,24 +130,31 @@ export function GuidedStackDialog({ mode, stack, open, onClose, onDone, initialC
       onClose={onClose}
       onDone={onDone}
       initialContent={initialContent}
+      initialMeta={initialMeta}
     />
   );
 }
 
 // ─── Inner component ──────────────────────────────────────────────────────────
 
-function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent }: {
+function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent, initialMeta }: {
   mode:             "create" | "edit";
   stack:            Stack | null;
   onClose:          () => void;
   onDone:           () => void;
   initialContent?:  string;
+  initialMeta?:     InstallMeta;
 }) {
-  const isEdit     = mode === "edit";
-  const startYaml  = isEdit ? "" : (initialContent ?? DEFAULT_YAML);
-  const init       = isEdit ? initForms("", stack?.name ?? "") : initForms(startYaml);
+  // The stack this dialog's install created, once it is done. Edits made while the install
+  // ran are only in this dialog, so it stays open as that stack's editor: Deploy sends them.
+  const [installed, setInstalled] = useState<string | null>(null);
+  const isEdit     = mode === "edit" || installed !== null;
+  /** The stack a deploy targets: the one being edited, or the one this dialog installed. */
+  const target     = mode === "edit" ? stack?.name ?? null : installed;
+  const startYaml  = mode === "edit" ? "" : (initialContent ?? DEFAULT_YAML);
+  const init       = mode === "edit" ? initForms("", stack?.name ?? "") : initForms(startYaml);
 
-  const [loading,              setLoading]              = useState(isEdit);
+  const [loading,              setLoading]              = useState(mode === "edit");
   const [yamlContent,          setYamlContent]          = useState(startYaml);
   const [envContent,           setEnvContent]           = useState("");
   const [envTouched,           setEnvTouched]           = useState(false);
@@ -139,35 +162,66 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent }
   const [serviceForms,         setServiceForms]         = useState<Record<string, ServiceForm>>(init.serviceForms);
   const [stackConfig,          setStackConfig]          = useState<StackConfig>(init.stackConfig);
   const [stackNameDirty,       setStackNameDirty]       = useState(false);
-  const [appConfig,            setAppConfig]            = useState<AppConfigState>(() => initAppConfig(stack));
+  const [appConfig,            setAppConfig]            = useState<AppConfigState>(() => initAppConfig(stack, initialMeta));
   const [activeTab,            setActiveTab]            = useState<TabId>("app-config");
   const [parseErrors,          setParseErrors]          = useState<string[]>([]);
-  const [busy,                 setBusy]                 = useState(false);
-  const [actionLog,            setActionLog]            = useState<string[]>([]);
+  // `starting`: a request is on its way. The work itself is a server job, `jobId`, which
+  // carries on if this dialog closes; reopening the stack's editor shows it again.
+  const [starting,             setStarting]             = useState(false);
+  const [jobId,                setJobId]                = useState<string | null>(
+    () => (stack ? runningJobFor(useJobsStore.getState().jobs, stack.name)?.id ?? null : null),
+  );
   const [installLog,           setInstallLog]           = useState<string | null>(null);
   const [installLogBusy,       setInstallLogBusy]       = useState(false);
   const [error,                setError]                = useState("");
   // Track whether anything beyond App Config has been modified (yaml, services, env, stack config)
   const [nonAppConfigTouched,  setNonAppConfigTouched]  = useState(false);
 
-  const logRef   = useRef<HTMLPreElement | null>(null);
-  const abortRef = useRef<AbortController | null>(null);
+  const jobRunning = useJobsStore(s => (jobId ? s.jobs[jobId]?.status === "running" : false));
+  /** The job this dialog's own request started; other jobs it shows are someone else's. */
+  const ownJobRef = useRef<string | null>(null);
 
-  useEffect(() => {
-    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
-  }, [actionLog]);
+  // The draft as it stands, and as it was when the own job was started. Editing stays open
+  // while a job runs, so a draft changed since then holds work the job did not apply, and
+  // the job's end must not close the dialog over it. A ref, so `takeAnswer` (run from the
+  // render that started the request) reads the draft as it was sent, syncYaml included.
+  const draft = useMemo(
+    () => JSON.stringify([yamlContent, envContent, serviceNames, serviceForms, stackConfig, appConfig]),
+    [yamlContent, envContent, serviceNames, serviceForms, stackConfig, appConfig],
+  );
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
+  const sentDraftRef = useRef<string | null>(null);
+  // Set when the own job finished without the edits made meanwhile. From then on the
+  // dialog holds work that is on the server only once a job applies all of it, and that
+  // job closes the dialog. Until then closing asks first: a later deploy that fails, is
+  // cancelled, or is still running when the dialog closes would otherwise lose them.
+  const [unsent,       setUnsent]       = useState(false);
+  const [confirmClose, setConfirmClose] = useState(false);
 
-  // Cancel any in-flight SSE when the component unmounts
+  // Reopened while this stack's job still runs: show its log first.
   useEffect(() => {
-    return () => { abortRef.current?.abort(); };
+    if (jobId) setActiveTab("action-log");
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+  const busy = starting || jobRunning;
+  // The forms as last read from (or written to) the YAML. Writing back diffs
+  // the current forms against this, so only fields the user changed are
+  // touched and everything else in the file is left as it is.
+  const formsBaseRef = useRef<FormSnapshot>(init);
 
-  // Block close while an install/deploy is streaming
-  const handleClose = useCallback(() => { if (!busy) onClose(); }, [busy, onClose]);
+  // Closing is always allowed: an install or deploy runs on the server and continues.
+  // Edits a finished job left unapplied are asked about first.
+  const handleClose = useCallback(() => {
+    if (starting) return;
+    if (unsent) setConfirmClose(true);
+    else onClose();
+  }, [starting, unsent, onClose]);
 
-  // Edit mode: load existing YAML + env file on mount
+  // Edit mode: load existing YAML + env file on mount. Not after this dialog's own install:
+  // the draft it holds is the point, and loading would replace it.
   useEffect(() => {
-    if (!isEdit || !stack) return;
+    if (mode !== "edit" || !stack) return;
     void (async () => {
       try {
         const { data: fileData, error: fileErr } =
@@ -181,13 +235,12 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent }
         setYamlContent(yaml);
 
         try {
-          const doc   = parseComposeDoc(yaml);
-          const names = Object.keys(doc.services ?? {});
-          setServiceNames(names);
-          setServiceForms(Object.fromEntries(names.map(n => [n, parseService(doc.services[n])])));
-          const cfg = parseStackConfig(doc);
-          if (!cfg.name && stack?.name) cfg.name = stack.name;
-          setStackConfig(cfg);
+          // On a parse error this is the same empty state the dialog started with
+          const loaded = initForms(yaml, stack?.name ?? "");
+          setServiceNames(loaded.serviceNames);
+          setServiceForms(loaded.serviceForms);
+          setStackConfig(loaded.stackConfig);
+          formsBaseRef.current = loaded;
         } catch { /* ignore parse errors on load */ }
 
         const envRes  = await api.api.compose.stacks({ name: stack.name }).envfile.get();
@@ -202,17 +255,23 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent }
         setLoading(false);
       }
     })();
-  }, [isEdit, stack]);
+  }, [mode, stack]);
 
   // ── Sync helpers ──────────────────────────────────────────────────────────
 
   const handleParseToForms = () => {
     try {
-      const doc   = parseComposeDoc(yamlContent);
-      const names = Object.keys(doc.services ?? {});
-      setServiceNames(names);
-      setServiceForms(Object.fromEntries(names.map(n => [n, parseService(doc.services[n])])));
-      setStackConfig(parseStackConfig(doc));
+      const doc    = parseComposeDoc(yamlContent);
+      const names  = Object.keys(doc.services ?? {});
+      const parsed: FormSnapshot = {
+        serviceNames: names,
+        serviceForms: Object.fromEntries(names.map(n => [n, parseService(doc.services[n])])),
+        stackConfig:  parseStackConfig(doc),
+      };
+      setServiceNames(parsed.serviceNames);
+      setServiceForms(parsed.serviceForms);
+      setStackConfig(parsed.stackConfig);
+      formsBaseRef.current = parsed;
       setParseErrors([]);
       if (isEdit) setNonAppConfigTouched(true);
       if (names[0]) setActiveTab(names[0]);
@@ -221,34 +280,40 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent }
     }
   };
 
+  /**
+   * Patch the current form edits into the YAML text in place and make the
+   * result the new base. Throws when the YAML does not parse.
+   */
+  const writeFormsToYaml = (): string => {
+    const now: FormSnapshot = { serviceNames, serviceForms, stackConfig };
+    const yaml = applyFormChanges(yamlContent, formsBaseRef.current, now);
+    formsBaseRef.current = now;
+    setYamlContent(yaml);
+    return yaml;
+  };
+
   const handleFormsToYaml = () => {
     try {
-      const doc      = parseComposeDoc(yamlContent);
-      const services = Object.fromEntries(
-        serviceNames.map(n => [n, serializeService(serviceForms[n] ?? parseService({}))])
-      );
-      const withCfg  = serializeStackConfig(stackConfig, { ...doc, services });
-      setYamlContent(serializeComposeDoc(withCfg));
+      writeFormsToYaml();
       setActiveTab("yaml");
     } catch (e) {
       setParseErrors([e instanceof Error ? e.message : "Failed to apply forms to YAML"]);
     }
   };
 
-  // Sync forms → YAML and return the result
-  const syncYaml = (): string => {
+  /**
+   * Write the forms into the YAML and return it, or null when the forms cannot be written
+   * (an unbalanced quote in a command, say). The error is shown and the caller must stop:
+   * falling back to the YAML as it was would deploy without the user's form edits, and say
+   * nothing about it.
+   */
+  const syncYaml = (): string | null => {
     if (serviceNames.length === 0) return yamlContent;
     try {
-      const doc      = parseComposeDoc(yamlContent);
-      const services = Object.fromEntries(
-        serviceNames.map(n => [n, serializeService(serviceForms[n] ?? parseService({}))])
-      );
-      const withCfg  = serializeStackConfig(stackConfig, { ...doc, services });
-      const yaml     = serializeComposeDoc(withCfg);
-      setYamlContent(yaml);
-      return yaml;
-    } catch {
-      return yamlContent;
+      return writeFormsToYaml();
+    } catch (e) {
+      setParseErrors([e instanceof Error ? e.message : "Failed to apply forms to YAML"]);
+      return null;
     }
   };
 
@@ -261,6 +326,76 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent }
     }
   };
 
+  /** The tile metadata, sent with the install or deploy so it is saved before the first start. */
+  const appMeta = () => ({
+    title:     appConfig.title     || undefined,
+    tagline:   appConfig.tagline   || undefined,
+    icon:      appConfig.icon      || undefined,
+    scheme:    appConfig.scheme    || undefined,
+    portMap:   appConfig.portMap   || undefined,
+    indexPath: appConfig.indexPath || undefined,
+    address:   appConfig.address   || undefined,
+    note:      appConfig.note      || undefined,
+    openMode:  appConfig.openMode  || undefined,
+  });
+
+  /** Show a started job, or the job already working on this stack, or the refusal. */
+  const takeAnswer = (data: unknown, err: unknown) => {
+    const answer = readStartAnswer(data, err);
+    if (answer.job) {
+      ownJobRef.current = answer.started ? answer.job.id : null;
+      sentDraftRef.current = answer.started ? draftRef.current : null;
+      setJobId(answer.job.id);
+      setActiveTab("action-log");
+    }
+    if (answer.error) setError(answer.error);
+  };
+
+  /**
+   * A job ended. Only the job this dialog's own Install or Deploy started closes it on
+   * success. A job that was already running, or that blocked the request, says nothing
+   * about this draft: the dialog stays open so it can be sent again.
+   */
+  const onJobFinished = (job: JobSummary) => {
+    if (job.id !== ownJobRef.current) {
+      if (job.status === "done") setError(`"${job.title}" has finished. Your changes have not been applied yet: ${isEdit ? "deploy" : "install"} again to apply them.`);
+      return;
+    }
+    if (job.status !== "done") return;
+    useToastStore.getState().push(isEdit ? "Stack updated and deployed" : "Stack installed", "success");
+    onDone();
+    if (draftRef.current !== sentDraftRef.current) {
+      // The edits are in this dialog only (the stack's editor reads the files on the
+      // server), so it stays open with them, and after an install it becomes the new
+      // stack's editor: Deploy sends them there.
+      if (!isEdit && job.stack) {
+        const name = job.stack;
+        setInstalled(name);
+        setStackConfig(prev => ({ ...prev, name }));
+        setNonAppConfigTouched(true);
+      }
+      setUnsent(true);
+      setError(isEdit
+        ? "Deployed. The edits you made while it ran are not applied yet: deploy again to apply them."
+        : "Installed. The edits you made while it ran are still here and not applied yet: Deploy to apply them to the new stack.");
+      return;
+    }
+    onClose();
+  };
+
+  // Watched here, not through JobView: that is mounted only while the action-log tab is
+  // open, so a job that ended while the user was on another tab went unnoticed (and was
+  // reported again on each return to the tab). This runs once per job, whatever the tab.
+  const shownJob = useJobsStore(s => (jobId ? s.jobs[jobId] : undefined));
+  const settledRef = useRef<string | null>(null);
+  const onJobFinishedRef = useRef(onJobFinished);
+  onJobFinishedRef.current = onJobFinished;
+  useEffect(() => {
+    if (!shownJob || shownJob.status === "running" || settledRef.current === shownJob.id) return;
+    settledRef.current = shownJob.id;
+    onJobFinishedRef.current(shownJob);
+  }, [shownJob]);
+
   // ── Create action ─────────────────────────────────────────────────────────
 
   const handleCreate = async () => {
@@ -269,67 +404,28 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent }
 
     const name = stackConfig.name.trim();
     if (!name || !NAME_RE.test(name)) {
-      setError("Stack Name is required and must only contain letters, numbers, dashes, or underscores.");
+      setError("Stack Name is required: lowercase letters, numbers, dashes or underscores, starting with a letter or number.");
       return;
     }
 
     const yaml = syncYaml();
+    if (yaml === null) return;
     if (!yaml.trim()) { setError("Compose content cannot be empty."); return; }
 
-    const controller = new AbortController();
-    abortRef.current = controller;
-    setBusy(true);
-    setActionLog([]);
-    setActiveTab("action-log");
-
+    setStarting(true);
     try {
-      const { data, error: err } = await api.api.compose.stacks.post(
-        { name, content: yaml },
-        { fetch: { signal: controller.signal } },
-      );
-      if (err) {
-        setError((err.value as { error?: string })?.error ?? "Request failed");
-        setBusy(false);
-        return;
-      }
-
-      if (!data) { setError("No stream received from server"); setBusy(false); return; }
-      for await (const event of data as AsyncIterable<{ data: SSEMsg }>) {
-        const m = event.data as SSEMsg | undefined;
-        if (!m) continue;
-        if (m.log !== undefined) {
-          setActionLog(prev => [...prev, m.log!]);
-        } else if (m.ok) {
-          await api.api.docker.stacks({ name }).patch({
-            title:     appConfig.title     || undefined,
-            tagline:   appConfig.tagline   || undefined,
-            icon:      appConfig.icon      || undefined,
-            scheme:    appConfig.scheme    || undefined,
-            portMap:   appConfig.portMap   || undefined,
-            indexPath: appConfig.indexPath || undefined,
-            address:   appConfig.address   || undefined,
-            note:      appConfig.note      || undefined,
-            openMode:  appConfig.openMode  || undefined,
-          });
-          if (envTouched && envContent.trim()) {
-            await api.api.compose.stacks({ name }).envfile.put({ content: envContent });
-          }
-          useToastStore.getState().push("Stack installed", "success");
-          onDone();
-          onClose();
-          return;
-        } else if (m.error) {
-          setError(m.error);
-          setBusy(false);
-          return;
-        }
-      }
+      // One request: the server writes the compose file, .env and tile settings, then deploys.
+      const { data, error: err } = await api.api.compose.stacks.post({
+        name,
+        content: yaml,
+        env:     envContent.trim() ? envContent : undefined,
+        meta:    appMeta(),
+      });
+      takeAnswer(data, err);
     } catch (err) {
-      if (err instanceof Error && err.name === "AbortError") return;
       setError(err instanceof Error ? err.message : String(err));
-      setBusy(false);
     } finally {
-      abortRef.current = null;
+      setStarting(false);
     }
   };
 
@@ -337,26 +433,16 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent }
 
   const handleSaveOnly = async () => {
     setError("");
-    setBusy(true);
+    setStarting(true);
     try {
-      await api.api.docker.stacks({ name: stack!.name }).patch({
-        title:     appConfig.title     || undefined,
-        tagline:   appConfig.tagline   || undefined,
-        icon:      appConfig.icon      || undefined,
-        scheme:    appConfig.scheme    || undefined,
-        portMap:   appConfig.portMap   || undefined,
-        indexPath: appConfig.indexPath || undefined,
-        address:   appConfig.address   || undefined,
-        note:      appConfig.note      || undefined,
-        openMode:  appConfig.openMode  || undefined,
-      });
+      await api.api.docker.stacks({ name: target! }).patch(appMeta());
       useToastStore.getState().push("Settings saved", "success");
       onDone();
       onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setBusy(false);
+      setStarting(false);
     }
   };
 
@@ -368,83 +454,28 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent }
     setParseErrors([]);
 
     const yaml = syncYaml();
-
-    const controller = new AbortController();
-    abortRef.current = controller;
-    setBusy(true);
-    setActionLog([]);
-    setActiveTab("action-log");
-
+    if (yaml === null) return;
+    setStarting(true);
     try {
-      if (envTouched) {
-        const { error: envErr } = await api.api.compose.stacks({ name: stack!.name }).envfile.put(
-          { content: envContent },
-          { fetch: { signal: controller.signal } },
-        );
-        if (envErr) {
-          setError((envErr.value as { error?: string })?.error ?? "Failed to save .env file");
-          setBusy(false);
-          return;
-        }
-      }
-
-      await api.api.docker.stacks({ name: stack!.name }).patch(
-        {
-          title:     appConfig.title     || undefined,
-          tagline:   appConfig.tagline   || undefined,
-          icon:      appConfig.icon      || undefined,
-          scheme:    appConfig.scheme    || undefined,
-          portMap:   appConfig.portMap   || undefined,
-          indexPath: appConfig.indexPath || undefined,
-          address:   appConfig.address   || undefined,
-          note:      appConfig.note      || undefined,
-          openMode:  appConfig.openMode  || undefined,
-        },
-        { fetch: { signal: controller.signal } },
-      );
-
-      const { data: sseData, error: sseErr } =
-        await api.api.compose.stacks({ name: stack!.name }).file.put(
-          { content: yaml },
-          { fetch: { signal: controller.signal } },
-        );
-      if (sseErr) {
-        setError((sseErr.value as { error?: string })?.error ?? "Request failed");
-        setBusy(false);
-        return;
-      }
-
-      if (!sseData) { setError("No stream received from server"); setBusy(false); return; }
-      for await (const event of sseData as AsyncIterable<{ data: SSEMsg }>) {
-        const m = event.data as SSEMsg | undefined;
-        if (!m) continue;
-        if (m.log !== undefined) {
-          setActionLog(prev => [...prev, m.log!]);
-        } else if (m.ok) {
-          useToastStore.getState().push("Stack updated and deployed", "success");
-          onDone();
-          onClose();
-          return;
-        } else if (m.error) {
-          setError(m.error);
-          setBusy(false);
-          return;
-        }
-      }
+      const { data, error: err } = await api.api.compose.stacks({ name: target! }).file.put({
+        content: yaml,
+        // Omitted keeps the stack's current .env on the server.
+        env:     envTouched ? envContent : undefined,
+        meta:    appMeta(),
+      });
+      takeAnswer(data, err);
     } catch (err) {
-      if (err instanceof Error && err.name === "AbortError") return;
       setError(err instanceof Error ? err.message : String(err));
-      setBusy(false);
     } finally {
-      abortRef.current = null;
+      setStarting(false);
     }
   };
 
   // ── UI ────────────────────────────────────────────────────────────────────
 
-  const title = isEdit
+  const title = mode === "edit"
     ? `Edit (Guided) — ${stack!.meta?.title ?? stack!.name}`
-    : "New Stack";
+    : installed !== null ? `Edit (Guided) — ${appConfig.title || installed}` : "New Stack";
 
   const staticTabs: Array<{ id: TabId; label: string; icon: React.ReactNode }> = [
     { id: "app-config",   label: "App Config",   icon: <Wand2 size={12} /> },
@@ -516,6 +547,7 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent }
   }
 
   return (
+    <>
     <Dialog
       open
       title={title}
@@ -557,7 +589,7 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent }
             </button>
           ))}
 
-          {(busy || actionLog.length > 0) && (
+          {(starting || jobId) && (
             <button
               onClick={() => setActiveTab("action-log")}
               className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-t-md whitespace-nowrap transition-colors
@@ -577,7 +609,7 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent }
                 setActiveTab("install-log");
                 if (installLog === null && !installLogBusy) {
                   setInstallLogBusy(true);
-                  api.api.compose.stacks({ name: stack!.name })["install-log"].get()
+                  api.api.compose.stacks({ name: target! })["install-log"].get()
                     .then(({ data }) => {
                       const d = data as { log?: string; error?: string } | null;
                       setInstallLog(d?.log ?? d?.error ?? "(empty)");
@@ -663,17 +695,11 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent }
             </div>
           ))}
 
-          {/* Action log (live stream — install for create, deploy for edit) */}
+          {/* The install or deploy job: install for create, deploy for edit */}
           {activeTab === "action-log" && (
-            <pre
-              ref={logRef}
-              className="h-full bg-black rounded-lg border border-gray-700 p-3 text-xs text-green-400 font-mono overflow-y-auto whitespace-pre-wrap"
-            >
-              {actionLog.length === 0
-                ? <span className="text-gray-600">Waiting for output…</span>
-                : actionLog.join("\n")
-              }
-            </pre>
+            jobId
+              ? <JobView jobId={jobId} logHeight="h-[50vh]" />
+              : <p className="flex items-center gap-2 text-sm text-gray-400"><Loader2 size={14} className="animate-spin" /> Starting…</p>
           )}
 
           {/* Persisted install log — edit mode only */}
@@ -688,5 +714,17 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent }
         </div>
       </div>
     </Dialog>
+    {/* After the editor: dialogs stack in page order, so this one shows on top. */}
+    <ConfirmDialog
+      open={confirmClose}
+      title="Discard unsent edits?"
+      message="This editor holds edits that are not applied to the stack yet, and they are kept nowhere else. Closing discards them."
+      confirmLabel="Discard"
+      cancelLabel="Keep editing"
+      danger
+      onConfirm={() => { setConfirmClose(false); onClose(); }}
+      onCancel={() => setConfirmClose(false)}
+    />
+    </>
   );
 }

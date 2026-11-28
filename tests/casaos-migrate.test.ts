@@ -4,9 +4,9 @@ import { FEATURES } from "../src/lib/platform";
 import { TEST_JWT, loginAs } from "./helpers";
 
 /**
- * The migrate route streams its progress as SSE. These pin down how it refuses bad input:
- * always as an error event on the stream, never as a crash. Whether the run would then
- * succeed depends on root and Docker, which tests do not assume — so they assert only on
+ * The migrate route checks what it can, then starts a job. These pin down how it refuses
+ * bad input: with a status and an error, never with a crash. Whether the run would then
+ * succeed depends on root and Docker, which tests do not assume, so they assert only on
  * the refusals, which come before either.
  *
  * CasaOS exists only on Linux, and elsewhere the plugin answers 501 before anything else —
@@ -17,32 +17,36 @@ const app = createApp(TEST_JWT);
 let cookie: string;
 beforeAll(async () => { cookie = await loginAs(); });
 
-/** POST to the migrate route and read the whole event stream. */
+/** POST to the migrate route and read the answer. */
 async function migrate(name: string, body?: unknown) {
   const res = await app.handle(new Request(`http://localhost/api/casaos/migrate/${encodeURIComponent(name)}`, {
     method: "POST",
     headers: { cookie, ...(body === undefined ? {} : { "content-type": "application/json" }) },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   }));
-  return { status: res.status, stream: await res.text() };
+  return { status: res.status, text: await res.text() };
 }
 
 describe.skipIf(!FEATURES.casaosMigration)("CasaOS migrate", () => {
-  test("a request with no body is answered on the stream, not with a crash", async () => {
+  test("a request with no body is refused with a status, not a crash", async () => {
     // Reading `composePath` through an omitted body threw before the default path was chosen.
-    const { status, stream } = await migrate("some-app");
-    expect(status).toBe(200);
-    expect(stream).toContain('"error"');
-    expect(stream).not.toContain("undefined is not an object");
+    // Here the refusal is "not root" (403) or "cannot read" (422), depending on who runs the
+    // tests; never a 500 and never a started job.
+    // A name no CasaOS install will have, so even a root test host with CasaOS and Docker
+    // cannot find a real app there and start a migration.
+    const { status, text } = await migrate(`no-such-app-${crypto.randomUUID().slice(0, 8)}`);
+    expect([403, 422, 503]).toContain(status);
+    expect(text).toContain('"error"');
+    expect(text).not.toContain("undefined is not an object");
+    expect(text).not.toContain('"job"');
   });
 
   test("a dotted stack name is refused before anything is read or written", async () => {
     // The route's own pattern allowed dots. The name becomes a Compose project name, which
     // Compose rejects with a dot, and a stack folder the compose routes refuse to manage.
-    const { status, stream } = await migrate("a.b", {});
-    expect(status).toBe(200);
-    expect(stream).toContain("Invalid stack name");
-    expect(stream).not.toContain('"step"');              // refused before the first step
+    const { status, text } = await migrate("a.b", {});
+    expect(status).toBe(422);
+    expect(text).toContain("Invalid stack name");
   });
 
 });

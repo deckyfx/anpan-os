@@ -5,6 +5,8 @@ import {
 import { Dialog } from "./Dialog";
 import { api } from "../lib/api";
 import { useToastStore } from "../stores/toastStore";
+import { useJobsStore, runningJobFor, readStartAnswer } from "../stores/jobsStore";
+import { JobView } from "./JobView";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -25,8 +27,6 @@ interface ComposeSourceReport {
   }>;
   foreignPaths: string[];
 }
-
-interface SSEMsg { log?: string; ok?: boolean; error?: string }
 
 // ─── Status presentation ──────────────────────────────────────────────────────
 
@@ -52,48 +52,31 @@ function StackRow({ report, onRepaired }: {
   report: ComposeSourceReport;
   onRepaired: () => void;
 }) {
-  const [busy, setBusy]   = useState(false);
-  const [log,  setLog]    = useState<string[]>([]);
+  const alreadyRunning    = useJobsStore(s => {
+    const job = runningJobFor(s.jobs, report.stack);
+    return job?.kind === "repair" ? job : null;
+  });
+  const [jobId, setJobId] = useState<string | null>(alreadyRunning?.id ?? null);
+  const [starting, setStarting] = useState(false);
   const [err,  setErr]    = useState("");
-  const logRef            = useRef<HTMLPreElement | null>(null);
+  const job               = useJobsStore(s => (jobId ? s.jobs[jobId] : undefined));
+  const busy              = starting || job?.status === "running";
   const meta              = STATUS_META[report.status];
 
-  useEffect(() => {
-    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
-  }, [log]);
-
   const repair = async () => {
-    setBusy(true);
-    setLog([]);
+    setStarting(true);
     setErr("");
-
     try {
       const { data, error } = await api.api.compose.stacks({ name: report.stack }).repair.post();
-      if (error) {
-        setErr((error.value as { error?: string })?.error ?? "Request failed");
-        setBusy(false);
-        return;
-      }
-
-      for await (const event of data as AsyncIterable<{ data: SSEMsg }>) {
-        const m = event.data as SSEMsg;
-        if (m.log !== undefined) {
-          setLog(prev => [...prev, m.log!]);
-        } else if (m.ok) {
-          useToastStore.getState().push(`Repaired ${report.stack}`, "success");
-          setBusy(false);
-          onRepaired();
-          return;
-        } else if (m.error) {
-          setErr(m.error);
-          setBusy(false);
-          return;
-        }
-      }
-      setBusy(false);
+      const answer = readStartAnswer(data, error);
+      // A job that blocked the repair is named in the error; the Repair button stays, to be
+      // pressed again once it ends.
+      if (answer.job && answer.started) setJobId(answer.job.id);
+      else setErr(answer.error ?? "Request failed");
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
-      setBusy(false);
+    } finally {
+      setStarting(false);
     }
   };
 
@@ -144,13 +127,20 @@ function StackRow({ report, onRepaired }: {
         </div>
       )}
 
-      {log.length > 0 && (
-        <pre
-          ref={logRef}
-          className="ml-6 mt-2 max-h-32 overflow-y-auto bg-black/40 border border-gray-800 rounded-lg p-2 text-[10px] font-mono text-gray-500 whitespace-pre-wrap"
-        >
-          {log.join("")}
-        </pre>
+      {jobId && (
+        <div className="ml-6 mt-2">
+          <JobView
+            jobId={jobId}
+            logHeight="max-h-40"
+            onFinished={finished => {
+              // Another operation may have held the stack; only a repair's success is one.
+              // Repair stays available, so it can be run once that operation has ended.
+              if (finished.status !== "done" || finished.kind !== "repair") return;
+              useToastStore.getState().push(`Repaired ${report.stack}`, "success");
+              onRepaired();
+            }}
+          />
+        </div>
       )}
 
       {err && (
