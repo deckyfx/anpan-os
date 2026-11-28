@@ -631,6 +631,14 @@ describe("applyFormChanges — aliases and hand-added rows", () => {
     expect(parse(applyFormChanges(withRow, base, next)).services.app.ports).toEqual(["80:80"]);
   });
 
+  test("deleting a row whose anchor a hand-added row uses keeps that row, as a copy", () => {
+    const yaml = "services:\n  app:\n    image: nginx\n    ports:\n      - &p \"80:80\"\n      - \"81:81\"\n";
+    const base = snapshot(yaml);
+    const handAdded = yaml + "      - *p\n";
+    const next = editService(base, "app", f => ({ ...f, ports: [f.ports[1]!] }));
+    expect(parse(applyFormChanges(handAdded, base, next)).services.app.ports).toEqual(["81:81", "80:80"]);
+  });
+
   test("deleting the form's only row keeps a row added by hand; with none, the key goes", () => {
     const yaml = "services:\n  app:\n    image: nginx\n    ports:\n      - \"80:80\"\n";
     const base = snapshot(yaml);

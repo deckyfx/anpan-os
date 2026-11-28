@@ -20,7 +20,7 @@ import { config } from "../config";
 import { bins } from "./commands";
 import { DockerClient, normalizeComposePath } from "./docker";
 import { JobError, processRunner, type JobContext } from "./jobs";
-import { withPlatformDefaults, envValue } from "./app-env";
+import { withPlatformDefaults, resolvedEnvValue } from "./app-env";
 import { resolveWithin } from "./path-guard";
 import { describeConflicts, findPortConflicts, publishedPorts } from "./port-check";
 import { StackStore } from "../stores/stack-store";
@@ -192,12 +192,13 @@ async function resolveConfig(ctx: JobContext, name: string, dir: string): Promis
  *
  * Compose takes a variable from its own environment before `.env`, and it runs with
  * anpan-os's environment. So a `PUID` anpan-os was started with wins over the stack's
- * `.env`, here as in Compose. A value that is not a plain number (empty, say) falls back.
+ * `.env`, here as in Compose. References in `.env` are substituted the same way
+ * (`PUID=${APP_UID:-2001}`). A value that is not a plain number (empty, say) falls back.
  */
 export function ownerFor(env: string, shell: Record<string, string | undefined> = process.env): { puid: number; pgid: number } {
   const fallback = config.appIds;
   const read = (key: string, dflt: number) => {
-    const raw = shell[key] ?? envValue(env, key);
+    const raw = shell[key] ?? resolvedEnvValue(env, key, shell);
     return raw !== null && /^\d+$/.test(raw.trim()) ? Number(raw.trim()) : dflt;
   };
   return { puid: read("PUID", fallback.puid), pgid: read("PGID", fallback.pgid) };

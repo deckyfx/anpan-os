@@ -271,10 +271,12 @@ export function composePlugin(jwtSecret: string) {
     // working on is refused with that job, as every other stack-changing route is.
     .post("/stacks/:name/down", async ({ params, set }) => {
       if (!STACK_NAME_RE.test(params.name)) { set.status = 422; return { ok: false, error: "Invalid stack name" }; }
-      const held = busy(set, params.name);
-      if (held) return { ok: false, ...held };
       const stackDir = join(config.composeFolder, params.name);
       if (!(await Bun.file(join(stackDir, COMPOSE_FILE)).exists())) { set.status = 404; return { ok: false, error: `Stack "${params.name}" is not managed by anpan-os` }; }
+      // Checked after the await above, with none between it and the command: a job that
+      // took the stack while the file was being checked is seen here.
+      const held = busy(set, params.name);
+      if (held) return { ok: false, ...held };
       const result = await Bun.$`${composeCommand(docker!, params.name, stackDir)} down`.cwd(stackDir).nothrow().quiet();
       if (result.exitCode !== 0) return { ok: false, error: result.stderr.toString() };
       return { ok: true };
@@ -282,10 +284,12 @@ export function composePlugin(jwtSecret: string) {
 
     .post("/stacks/:name/restart", async ({ params, set }) => {
       if (!STACK_NAME_RE.test(params.name)) { set.status = 422; return { ok: false, error: "Invalid stack name" }; }
-      const held = busy(set, params.name);
-      if (held) return { ok: false, ...held };
       const stackDir = join(config.composeFolder, params.name);
       if (!(await Bun.file(join(stackDir, COMPOSE_FILE)).exists())) { set.status = 404; return { ok: false, error: `Stack "${params.name}" is not managed by anpan-os` }; }
+      // Checked after the await above, with none between it and the command: a job that
+      // took the stack while the file was being checked is seen here.
+      const held = busy(set, params.name);
+      if (held) return { ok: false, ...held };
       const result = await Bun.$`${composeCommand(docker!, params.name, stackDir)} restart`.cwd(stackDir).nothrow().quiet();
       if (result.exitCode !== 0) return { ok: false, error: result.stderr.toString() };
       return { ok: true };

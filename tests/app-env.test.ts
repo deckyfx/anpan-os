@@ -3,7 +3,7 @@
  * root rewrite for App Store installs.
  */
 import { test, expect, describe } from "bun:test";
-import { referencedVariables, envKeys, envValue, withPlatformDefaults, rewriteDataRoot, platformValues } from "../src/lib/app-env";
+import { referencedVariables, envKeys, envValue, resolvedEnvValue, withPlatformDefaults, rewriteDataRoot, platformValues } from "../src/lib/app-env";
 
 const CASAOS = `name: jellyfin
 services:
@@ -127,6 +127,21 @@ describe("reading .env as Compose does", () => {
     expect(envValue(env, "NOTES")).toBe("header\nTZ=Europe/Berlin\nfooter");
     const { added } = withPlatformDefaults(env, "services:\n  a:\n    environment:\n      TZ: $TZ\n", "app");
     expect(added).toContain("TZ");
+  });
+
+  test("an escaped quote does not end a quoted value", () => {
+    const env = "NOTES='it\\'s\nTZ=Europe/Berlin\nfooter'\nA=1\n";
+    expect(envKeys(env)).toEqual(new Set(["NOTES", "A"]));
+  });
+
+  test("references are substituted as Compose does: shell first, then earlier lines; single quotes stay literal", () => {
+    expect(resolvedEnvValue("PUID=${APP_UID:-2001}\n", "PUID", {})).toBe("2001");
+    expect(resolvedEnvValue("PUID=${APP_UID:-2001}\n", "PUID", { APP_UID: "3000" })).toBe("3000");
+    expect(resolvedEnvValue("BASE=4000\nPUID=$BASE\n", "PUID", {})).toBe("4000");
+    expect(resolvedEnvValue('PUID="${A-${B:-5}}"\n', "PUID", {})).toBe("5");
+    expect(resolvedEnvValue("PUID='${APP_UID:-2001}'\n", "PUID", {})).toBe("${APP_UID:-2001}");
+    expect(resolvedEnvValue("P=$$HOME\n", "P", {})).toBe("$HOME");
+    expect(resolvedEnvValue("A=1\n", "PUID", {})).toBeNull();
   });
 
   test("a real TZ assignment still counts as set", () => {

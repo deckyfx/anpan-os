@@ -42,13 +42,24 @@ export function referencedVariables(compose: string): Set<string> {
   return names;
 }
 
-/** Where the quote closing a value opened with `quote` is in `body`, or -1. `\"` does not close. */
+/**
+ * Where the quote closing a value opened with `quote` is in `body`, or -1.
+ *
+ * Compose's rule, for both kinds of quote: a quote right after a backslash does not close
+ * the value, so `'it\'s'` is one value.
+ */
 function closingQuote(body: string, quote: string): number {
   for (let i = 0; i < body.length; i++) {
-    if (quote === '"' && body[i] === "\\") { i++; continue; }
-    if (body[i] === quote) return i;
+    if (body[i] === quote && body[i - 1] !== "\\") return i;
   }
   return -1;
+}
+
+/** One `.env` assignment, its value as written (quotes removed), and how it was quoted. */
+interface Assignment {
+  key:   string;
+  value: string;
+  quote: '"' | "'" | null;
 }
 
 /**
@@ -60,10 +71,11 @@ function closingQuote(body: string, quote: string): number {
  *   part of the value, not assignments: `NOTES='a\nTZ=x\nb'` does not set TZ.
  * - In an unquoted value, ` #` starts a comment: `PUID=2001 # app user` is 2001. A quoted
  *   value keeps its `#`.
- * Escapes inside double quotes are not expanded; nothing here needs them.
+ * Values are as written: `${VAR}` references are left for {@link resolvedEnvValue}, and
+ * escapes inside double quotes are not expanded, which nothing here needs.
  */
-function envAssignments(env: string): Array<[string, string]> {
-  const out: Array<[string, string]> = [];
+function envAssignments(env: string): Assignment[] {
+  const out: Assignment[] = [];
   const lines = env.split("\n");
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!.trim().replace(/^export\s+/, "");
@@ -71,34 +83,96 @@ function envAssignments(env: string): Array<[string, string]> {
     const m = /^([A-Za-z_][A-Za-z0-9_.-]*)\s*(?:=|:(?=\s|$))\s*(.*)$/.exec(line);
     if (!m) continue;
     const rest = m[2] ?? "";
-    const quote = rest[0];
-    let value: string;
-    if (quote === '"' || quote === "'") {
+    const first = rest[0];
+    if (first === '"' || first === "'") {
       let body = rest.slice(1);
-      let end = closingQuote(body, quote);
+      let end = closingQuote(body, first);
       while (end < 0 && i + 1 < lines.length) {
         body += `\n${lines[++i]}`;
-        end = closingQuote(body, quote);
+        end = closingQuote(body, first);
       }
-      value = end < 0 ? body : body.slice(0, end);
+      out.push({ key: m[1]!, value: end < 0 ? body : body.slice(0, end), quote: first });
     } else {
-      value = rest.split(" #")[0]!.trimEnd();
+      out.push({ key: m[1]!, value: rest.split(" #")[0]!.trimEnd(), quote: null });
     }
-    out.push([m[1]!, value]);
   }
   return out;
 }
 
 /** Keys an `.env` file sets. */
 export function envKeys(env: string): Set<string> {
-  return new Set(envAssignments(env).map(([key]) => key));
+  return new Set(envAssignments(env).map(a => a.key));
 }
 
-/** The value `.env` gives `key`; the last assignment wins, as in Compose. Null when unset. */
+/** The value `.env` gives `key`, as written; the last assignment wins, as in Compose. Null when unset. */
 export function envValue(env: string, key: string): string | null {
   let value: string | null = null;
-  for (const [k, v] of envAssignments(env)) if (k === key) value = v;
+  for (const a of envAssignments(env)) if (a.key === key) value = a.value;
   return value;
+}
+
+/**
+ * The value Compose ends up with for `key` from `.env`, references substituted:
+ * `PUID=${APP_UID:-2001}` is 2001 when APP_UID is set nowhere.
+ *
+ * Substituted Compose's way: a name is looked up in `shell` (the environment Compose runs
+ * with) first, then in the assignments above it in the file. A single-quoted value is
+ * literal. Null when `.env` does not set `key`.
+ */
+export function resolvedEnvValue(env: string, key: string, shell: Record<string, string | undefined> = process.env): string | null {
+  const earlier = new Map<string, string>();
+  let value: string | null = null;
+  for (const a of envAssignments(env)) {
+    const v = a.quote === "'" ? a.value : interpolate(a.value, name => shell[name] ?? earlier.get(name));
+    earlier.set(a.key, v);
+    if (a.key === key) value = v;
+  }
+  return value;
+}
+
+/**
+ * Substitute `$VAR`, `${VAR}` and the default forms `${VAR:-x}`, `${VAR-x}`, `${VAR:+x}`,
+ * `${VAR+x}` in `text`, and turn `$$` into `$`. A default may hold references of its own.
+ * `${VAR:?msg}` gives the value, or nothing: Compose would refuse the file, and its own
+ * check reports that.
+ */
+export function interpolate(text: string, lookup: (name: string) => string | undefined): string {
+  let out = "";
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]!;
+    if (c !== "$") { out += c; continue; }
+    const next = text[i + 1];
+    if (next === "$") { out += "$"; i++; continue; }
+    if (next === "{") {
+      // The matching brace, counting nested ones inside a default.
+      let depth = 1;
+      let j = i + 2;
+      for (; j < text.length && depth > 0; j++) {
+        if (text[j] === "{") depth++;
+        else if (text[j] === "}") depth--;
+      }
+      if (depth > 0) { out += text.slice(i); break; }
+      const m = /^([A-Za-z_][A-Za-z0-9_]*)(?:(:?[-+?])([\s\S]*))?$/.exec(text.slice(i + 2, j - 1));
+      if (m) {
+        const [, name, op, arg = ""] = m;
+        const v = lookup(name!);
+        const empty = v === undefined || v === "";
+        if (op === ":-")     out += empty ? interpolate(arg, lookup) : v;
+        else if (op === "-") out += v === undefined ? interpolate(arg, lookup) : v;
+        else if (op === ":+") out += empty ? "" : interpolate(arg, lookup);
+        else if (op === "+") out += v === undefined ? "" : interpolate(arg, lookup);
+        else out += v ?? "";
+      } else {
+        out += text.slice(i, j);
+      }
+      i = j - 1;
+      continue;
+    }
+    const name = /^[A-Za-z_][A-Za-z0-9_]*/.exec(text.slice(i + 1))?.[0];
+    if (name) { out += lookup(name) ?? ""; i += name.length; continue; }
+    out += c;
+  }
+  return out;
 }
 
 /**

@@ -215,6 +215,10 @@ describe("install", () => {
     expect(ownerFor("PUID=1000\nPGID=1000\n", { PUID: "2000" })).toEqual({ puid: 2000, pgid: 1000 });
   });
 
+  test("an .env reference is resolved before it is used as an owner", () => {
+    expect(ownerFor("PUID=${APP_UID:-2001}\nPGID=${APP_GID:-2001}\n", {})).toEqual({ puid: 2001, pgid: 2001 });
+  });
+
   test("an install name Compose cannot use as a project name is refused before anything runs", async () => {
     for (const bad of ["Photos", "-photos", "_x"]) {
       expect((await checkInstall({ name: bad, compose: COMPOSE }))?.status).toBe(422);

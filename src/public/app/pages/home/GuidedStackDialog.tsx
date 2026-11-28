@@ -326,6 +326,19 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent, 
     onClose();
   };
 
+  // Watched here, not through JobView: that is mounted only while the action-log tab is
+  // open, so a job that ended while the user was on another tab went unnoticed (and was
+  // reported again on each return to the tab). This runs once per job, whatever the tab.
+  const shownJob = useJobsStore(s => (jobId ? s.jobs[jobId] : undefined));
+  const settledRef = useRef<string | null>(null);
+  const onJobFinishedRef = useRef(onJobFinished);
+  onJobFinishedRef.current = onJobFinished;
+  useEffect(() => {
+    if (!shownJob || shownJob.status === "running" || settledRef.current === shownJob.id) return;
+    settledRef.current = shownJob.id;
+    onJobFinishedRef.current(shownJob);
+  }, [shownJob]);
+
   // ── Create action ─────────────────────────────────────────────────────────
 
   const handleCreate = async () => {
@@ -627,7 +640,7 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent, 
           {/* The install or deploy job: install for create, deploy for edit */}
           {activeTab === "action-log" && (
             jobId
-              ? <JobView jobId={jobId} logHeight="h-[50vh]" onFinished={onJobFinished} />
+              ? <JobView jobId={jobId} logHeight="h-[50vh]" />
               : <p className="flex items-center gap-2 text-sm text-gray-400"><Loader2 size={14} className="animate-spin" /> Starting…</p>
           )}
 

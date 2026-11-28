@@ -15,7 +15,7 @@
  *      original text, so untouched lines stay byte-for-byte.
  */
 import {
-  isAlias, isMap, isNode, isPair, isScalar, isSeq, parse, parseDocument,
+  isAlias, isMap, isNode, isPair, isScalar, isSeq, parse, parseDocument, visit,
   Scalar, YAMLMap, YAMLSeq,
   type Document, type Pair, type ToStringOptions,
 } from "yaml";
@@ -71,10 +71,12 @@ export function applyFormChanges(
   if (!isMap(doc.contents)) throw new Error("Invalid compose file: expected a mapping at the top level");
 
   const before = JSON.stringify(doc.toJS());
+  const anchored = anchoredValues(doc);
   patchStackName(doc, base.stackConfig.name, next.stackConfig.name);
   patchServices(doc, base, next, renames);
   patchTopLevelNetworks(doc, base.stackConfig.networks, next.stackConfig.networks);
   patchTopLevelVolumes(doc, base.stackConfig.volumes, next.stackConfig.volumes);
+  keepAliasesWhole(doc, anchored);
   if (JSON.stringify(doc.toJS()) === before) return yamlText;
 
   return printPreservingSource(yamlText, doc);
@@ -97,6 +99,40 @@ function coerceLike(prev: unknown, value: Prim): Prim {
   if (typeof prev === "number" && String(Number(value)) === value) return Number(value);
   if (typeof prev === "boolean" && (value === "true" || value === "false")) return value === "true";
   return value;
+}
+
+/** The value of every anchored node (`&p "80:80"`), by anchor, before any edit. */
+function anchoredValues(doc: Doc): Map<string, unknown> {
+  const values = new Map<string, unknown>();
+  visit(doc, {
+    Node(_, node) {
+      if (node.anchor) values.set(node.anchor, js(doc, node));
+    },
+  });
+  return values;
+}
+
+/**
+ * Replace each alias whose anchor an edit removed with a copy of the value it named.
+ *
+ * A row the form deleted can carry an anchor that a row added by hand still uses
+ * (`- &p "80:80"` and later `- *p`). The hand-added row is kept, and without its anchor
+ * the document could not be read again, so the edit would fail. The alias becomes what it
+ * stood for.
+ */
+function keepAliasesWhole(doc: Doc, anchored: ReadonlyMap<string, unknown>): void {
+  const present = new Set<string>();
+  visit(doc, {
+    Node(_, node) {
+      if (node.anchor) present.add(node.anchor);
+    },
+  });
+  visit(doc, {
+    Alias(_, node) {
+      if (present.has(node.source) || !anchored.has(node.source)) return;
+      return doc.createNode(anchored.get(node.source), { aliasDuplicateObjects: false });
+    },
+  });
 }
 
 /** A new scalar node styled like a sibling (e.g. double-quoted like its neighbours). */
