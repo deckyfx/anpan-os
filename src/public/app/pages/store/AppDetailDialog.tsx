@@ -79,7 +79,8 @@ export function AppDetailDialog() {
         onClose={clearInstall}
         // Nothing to refresh here: the stacks list reloads when any job ends. Clearing the
         // install would unmount the editor even when it holds edits the install did not
-        // apply; it is closed through onClose, which the editor calls only when it holds none.
+        // apply; it is closed through onClose, which the editor calls only when it holds none
+        // or the user has agreed to discard them.
         onDone={() => {}}
       />
     </>

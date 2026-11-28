@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Editor from "@monaco-editor/react";
 import { FileCode, FileText, Loader2, Wand2 } from "lucide-react";
 import { Dialog } from "../../components/Dialog";
+import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { api } from "../../lib/api";
 import { useToastStore } from "../../stores/toastStore";
 import { useJobsStore, runningJobFor, readStartAnswer, type JobSummary } from "../../stores/jobsStore";
@@ -100,12 +101,16 @@ export function GuidedStackDialog({ mode, stack, open, onClose, onDone, initialC
   mode:             "create" | "edit";
   stack?:           Stack | null;
   open:             boolean;
-  /** Close the dialog. Called after a successful install or deploy only when no edit is left unsent. */
+  /**
+   * Close the dialog. Called after a successful install or deploy only when no edit is left
+   * unsent, and on Cancel only once the user has agreed to discard any such edits.
+   */
   onClose:          () => void;
   /**
    * The stack changed on the server: refresh what shows it. Must not close or unmount the
    * dialog. It is also called when edits made while the job ran are still unsent, and the
-   * dialog then stays open with them; closing is `onClose`'s job alone.
+   * dialog then stays open with them (after an install, as the new stack's editor, which
+   * deploys them there); closing is `onClose`'s job alone.
    */
   onDone:           () => void;
   /** Pre-fill the YAML editor with this content when creating a new stack (e.g. from App Store). */
@@ -140,11 +145,16 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent, 
   initialContent?:  string;
   initialMeta?:     InstallMeta;
 }) {
-  const isEdit     = mode === "edit";
-  const startYaml  = isEdit ? "" : (initialContent ?? DEFAULT_YAML);
-  const init       = isEdit ? initForms("", stack?.name ?? "") : initForms(startYaml);
+  // The stack this dialog's install created, once it is done. Edits made while the install
+  // ran are only in this dialog, so it stays open as that stack's editor: Deploy sends them.
+  const [installed, setInstalled] = useState<string | null>(null);
+  const isEdit     = mode === "edit" || installed !== null;
+  /** The stack a deploy targets: the one being edited, or the one this dialog installed. */
+  const target     = mode === "edit" ? stack?.name ?? null : installed;
+  const startYaml  = mode === "edit" ? "" : (initialContent ?? DEFAULT_YAML);
+  const init       = mode === "edit" ? initForms("", stack?.name ?? "") : initForms(startYaml);
 
-  const [loading,              setLoading]              = useState(isEdit);
+  const [loading,              setLoading]              = useState(mode === "edit");
   const [yamlContent,          setYamlContent]          = useState(startYaml);
   const [envContent,           setEnvContent]           = useState("");
   const [envTouched,           setEnvTouched]           = useState(false);
@@ -182,6 +192,11 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent, 
   const draftRef = useRef(draft);
   draftRef.current = draft;
   const sentDraftRef = useRef<string | null>(null);
+  // Set when the own job finished without the edits made meanwhile; until they are sent,
+  // closing asks first, since they exist nowhere else.
+  const [leftOver,     setLeftOver]     = useState(false);
+  const [confirmClose, setConfirmClose] = useState(false);
+  const unsent = leftOver && draft !== sentDraftRef.current;
 
   // Reopened while this stack's job still runs: show its log first.
   useEffect(() => {
@@ -195,11 +210,17 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent, 
   const formsBaseRef = useRef<FormSnapshot>(init);
 
   // Closing is always allowed: an install or deploy runs on the server and continues.
-  const handleClose = useCallback(() => { if (!starting) onClose(); }, [starting, onClose]);
+  // Edits a finished job left unapplied are asked about first.
+  const handleClose = useCallback(() => {
+    if (starting) return;
+    if (unsent) setConfirmClose(true);
+    else onClose();
+  }, [starting, unsent, onClose]);
 
-  // Edit mode: load existing YAML + env file on mount
+  // Edit mode: load existing YAML + env file on mount. Not after this dialog's own install:
+  // the draft it holds is the point, and loading would replace it.
   useEffect(() => {
-    if (!isEdit || !stack) return;
+    if (mode !== "edit" || !stack) return;
     void (async () => {
       try {
         const { data: fileData, error: fileErr } =
@@ -233,7 +254,7 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent, 
         setLoading(false);
       }
     })();
-  }, [isEdit, stack]);
+  }, [mode, stack]);
 
   // ── Sync helpers ──────────────────────────────────────────────────────────
 
@@ -323,6 +344,7 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent, 
     if (answer.job) {
       ownJobRef.current = answer.started ? answer.job.id : null;
       sentDraftRef.current = answer.started ? draftRef.current : null;
+      if (answer.started) setLeftOver(false);
       setJobId(answer.job.id);
       setActiveTab("action-log");
     }
@@ -343,9 +365,19 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent, 
     useToastStore.getState().push(isEdit ? "Stack updated and deployed" : "Stack installed", "success");
     onDone();
     if (draftRef.current !== sentDraftRef.current) {
+      // The edits are in this dialog only (the stack's editor reads the files on the
+      // server), so it stays open with them, and after an install it becomes the new
+      // stack's editor: Deploy sends them there.
+      if (!isEdit && job.stack) {
+        const name = job.stack;
+        setInstalled(name);
+        setStackConfig(prev => ({ ...prev, name }));
+        setNonAppConfigTouched(true);
+      }
+      setLeftOver(true);
       setError(isEdit
         ? "Deployed. The edits you made while it ran are not applied yet: deploy again to apply them."
-        : "Installed. The edits you made while it ran are not applied: open the stack's editor to deploy them.");
+        : "Installed. The edits you made while it ran are still here and not applied yet: Deploy to apply them to the new stack.");
       return;
     }
     onClose();
@@ -403,7 +435,7 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent, 
     setError("");
     setStarting(true);
     try {
-      await api.api.docker.stacks({ name: stack!.name }).patch(appMeta());
+      await api.api.docker.stacks({ name: target! }).patch(appMeta());
       useToastStore.getState().push("Settings saved", "success");
       onDone();
       onClose();
@@ -425,7 +457,7 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent, 
     if (yaml === null) return;
     setStarting(true);
     try {
-      const { data, error: err } = await api.api.compose.stacks({ name: stack!.name }).file.put({
+      const { data, error: err } = await api.api.compose.stacks({ name: target! }).file.put({
         content: yaml,
         // Omitted keeps the stack's current .env on the server.
         env:     envTouched ? envContent : undefined,
@@ -441,9 +473,9 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent, 
 
   // ── UI ────────────────────────────────────────────────────────────────────
 
-  const title = isEdit
+  const title = mode === "edit"
     ? `Edit (Guided) — ${stack!.meta?.title ?? stack!.name}`
-    : "New Stack";
+    : installed !== null ? `Edit (Guided) — ${appConfig.title || installed}` : "New Stack";
 
   const staticTabs: Array<{ id: TabId; label: string; icon: React.ReactNode }> = [
     { id: "app-config",   label: "App Config",   icon: <Wand2 size={12} /> },
@@ -515,6 +547,7 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent, 
   }
 
   return (
+    <>
     <Dialog
       open
       title={title}
@@ -576,7 +609,7 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent, 
                 setActiveTab("install-log");
                 if (installLog === null && !installLogBusy) {
                   setInstallLogBusy(true);
-                  api.api.compose.stacks({ name: stack!.name })["install-log"].get()
+                  api.api.compose.stacks({ name: target! })["install-log"].get()
                     .then(({ data }) => {
                       const d = data as { log?: string; error?: string } | null;
                       setInstallLog(d?.log ?? d?.error ?? "(empty)");
@@ -681,5 +714,17 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent, 
         </div>
       </div>
     </Dialog>
+    {/* After the editor: dialogs stack in page order, so this one shows on top. */}
+    <ConfirmDialog
+      open={confirmClose}
+      title="Discard unsent edits?"
+      message="The edits you made while the last install or deploy ran are only in this editor and are not applied yet. Closing discards them."
+      confirmLabel="Discard"
+      cancelLabel="Keep editing"
+      danger
+      onConfirm={() => { setConfirmClose(false); onClose(); }}
+      onCancel={() => setConfirmClose(false)}
+    />
+    </>
   );
 }
