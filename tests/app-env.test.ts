@@ -134,6 +134,13 @@ describe("reading .env as Compose does", () => {
     expect(envKeys(env)).toEqual(new Set(["NOTES", "A"]));
   });
 
+  test("paired backslashes escape each other, so the quote after them closes the value", () => {
+    const env = 'NOTES="C:\\\\"\nPUID=2001\nPGID=2001\n';
+    expect(envValue(env, "NOTES")).toBe("C:\\\\");
+    expect(envValue(env, "PUID")).toBe("2001");
+    expect(envKeys(env)).toEqual(new Set(["NOTES", "PUID", "PGID"]));
+  });
+
   test("references are substituted as Compose does: shell first, then earlier lines; single quotes stay literal", () => {
     expect(resolvedEnvValue("PUID=${APP_UID:-2001}\n", "PUID", {})).toBe("2001");
     expect(resolvedEnvValue("PUID=${APP_UID:-2001}\n", "PUID", { APP_UID: "3000" })).toBe("3000");

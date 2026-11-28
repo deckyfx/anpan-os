@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Editor from "@monaco-editor/react";
 import { FileCode, FileText, Loader2, Wand2 } from "lucide-react";
 import { Dialog } from "../../components/Dialog";
@@ -165,6 +165,18 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent, 
   /** The job this dialog's own request started; other jobs it shows are someone else's. */
   const ownJobRef = useRef<string | null>(null);
 
+  // The draft as it stands, and as it was when the own job was started. Editing stays open
+  // while a job runs, so a draft changed since then holds work the job did not apply, and
+  // the job's end must not close the dialog over it. A ref, so `takeAnswer` (run from the
+  // render that started the request) reads the draft as it was sent, syncYaml included.
+  const draft = useMemo(
+    () => JSON.stringify([yamlContent, envContent, serviceNames, serviceForms, stackConfig, appConfig]),
+    [yamlContent, envContent, serviceNames, serviceForms, stackConfig, appConfig],
+  );
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
+  const sentDraftRef = useRef<string | null>(null);
+
   // Reopened while this stack's job still runs: show its log first.
   useEffect(() => {
     if (jobId) setActiveTab("action-log");
@@ -304,6 +316,7 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent, 
     const answer = readStartAnswer(data, err);
     if (answer.job) {
       ownJobRef.current = answer.started ? answer.job.id : null;
+      sentDraftRef.current = answer.started ? draftRef.current : null;
       setJobId(answer.job.id);
       setActiveTab("action-log");
     }
@@ -323,6 +336,12 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent, 
     if (job.status !== "done") return;
     useToastStore.getState().push(isEdit ? "Stack updated and deployed" : "Stack installed", "success");
     onDone();
+    if (draftRef.current !== sentDraftRef.current) {
+      setError(isEdit
+        ? "Deployed. The edits you made while it ran are not applied yet: deploy again to apply them."
+        : "Installed. The edits you made while it ran are not applied: open the stack's editor to deploy them.");
+      return;
+    }
     onClose();
   };
 

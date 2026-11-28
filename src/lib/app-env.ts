@@ -45,12 +45,14 @@ export function referencedVariables(compose: string): Set<string> {
 /**
  * Where the quote closing a value opened with `quote` is in `body`, or -1.
  *
- * Compose's rule, for both kinds of quote: a quote right after a backslash does not close
- * the value, so `'it\'s'` is one value.
+ * Compose's rule, for both kinds of quote: a backslash escapes the next character, so
+ * `'it\'s'` is one value. Backslashes pair up: in `"C:\\\\"` the last quote closes it,
+ * since the two backslashes escape each other, not the quote.
  */
 function closingQuote(body: string, quote: string): number {
   for (let i = 0; i < body.length; i++) {
-    if (body[i] === quote && body[i - 1] !== "\\") return i;
+    if (body[i] === "\\") { i++; continue; }
+    if (body[i] === quote) return i;
   }
   return -1;
 }
