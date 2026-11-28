@@ -77,7 +77,10 @@ export function AppDetailDialog() {
         initialMeta={installMeta ?? undefined}
         initialAppId={installApp?.id}
         onClose={clearInstall}
-        onDone={clearInstall}
+        // Nothing to refresh here: the stacks list reloads when any job ends. Clearing the
+        // install would unmount the editor even when it holds edits the install did not
+        // apply; it is closed through onClose, which the editor calls only when it holds none.
+        onDone={() => {}}
       />
     </>
   );

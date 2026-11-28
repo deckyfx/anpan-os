@@ -100,7 +100,13 @@ export function GuidedStackDialog({ mode, stack, open, onClose, onDone, initialC
   mode:             "create" | "edit";
   stack?:           Stack | null;
   open:             boolean;
+  /** Close the dialog. Called after a successful install or deploy only when no edit is left unsent. */
   onClose:          () => void;
+  /**
+   * The stack changed on the server: refresh what shows it. Must not close or unmount the
+   * dialog. It is also called when edits made while the job ran are still unsent, and the
+   * dialog then stays open with them; closing is `onClose`'s job alone.
+   */
   onDone:           () => void;
   /** Pre-fill the YAML editor with this content when creating a new stack (e.g. from App Store). */
   initialContent?:  string;
