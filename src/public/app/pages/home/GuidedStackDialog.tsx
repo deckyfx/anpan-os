@@ -192,11 +192,12 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent, 
   const draftRef = useRef(draft);
   draftRef.current = draft;
   const sentDraftRef = useRef<string | null>(null);
-  // Set when the own job finished without the edits made meanwhile; until they are sent,
-  // closing asks first, since they exist nowhere else.
-  const [leftOver,     setLeftOver]     = useState(false);
+  // Set when the own job finished without the edits made meanwhile. From then on the
+  // dialog holds work that is on the server only once a job applies all of it, and that
+  // job closes the dialog. Until then closing asks first: a later deploy that fails, is
+  // cancelled, or is still running when the dialog closes would otherwise lose them.
+  const [unsent,       setUnsent]       = useState(false);
   const [confirmClose, setConfirmClose] = useState(false);
-  const unsent = leftOver && draft !== sentDraftRef.current;
 
   // Reopened while this stack's job still runs: show its log first.
   useEffect(() => {
@@ -344,7 +345,6 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent, 
     if (answer.job) {
       ownJobRef.current = answer.started ? answer.job.id : null;
       sentDraftRef.current = answer.started ? draftRef.current : null;
-      if (answer.started) setLeftOver(false);
       setJobId(answer.job.id);
       setActiveTab("action-log");
     }
@@ -374,7 +374,7 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent, 
         setStackConfig(prev => ({ ...prev, name }));
         setNonAppConfigTouched(true);
       }
-      setLeftOver(true);
+      setUnsent(true);
       setError(isEdit
         ? "Deployed. The edits you made while it ran are not applied yet: deploy again to apply them."
         : "Installed. The edits you made while it ran are still here and not applied yet: Deploy to apply them to the new stack.");
@@ -718,7 +718,7 @@ function GuidedStackDialogInner({ mode, stack, onClose, onDone, initialContent, 
     <ConfirmDialog
       open={confirmClose}
       title="Discard unsent edits?"
-      message="The edits you made while the last install or deploy ran are only in this editor and are not applied yet. Closing discards them."
+      message="This editor holds edits that are not applied to the stack yet, and they are kept nowhere else. Closing discards them."
       confirmLabel="Discard"
       cancelLabel="Keep editing"
       danger
