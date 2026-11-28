@@ -21,7 +21,7 @@ import { join } from "node:path";
 import { Broadcast } from "./broadcast";
 import { envConfig } from "../env-config";
 
-export type JobKind = "install" | "redeploy" | "update" | "update-all" | "migrate" | "repair";
+export type JobKind = "install" | "redeploy" | "update" | "update-all" | "migrate" | "repair" | "backup" | "restore" | "backup-import";
 export type JobStatus = "running" | "done" | "failed" | "cancelled";
 
 /** What the browser is told about a job. */
@@ -231,6 +231,8 @@ export class JobManager {
   private readonly all = new Map<string, Job>();
   /** Stack name → id of the job holding it. */
   private readonly holders = new Map<string, string>();
+  /** Stack name → how many quick actions (not jobs) hold it now; see {@link hold}. */
+  private readonly quick = new Map<string, number>();
   private readonly events = new Broadcast<JobEvent>();
   private counter = 0;
 
@@ -259,7 +261,10 @@ export class JobManager {
       abort: new AbortController(),
     };
     this.all.set(id, job);
-    if (spec.stack) this.claim(spec.stack, id);
+    // Taken outright: activeFor above found no job on it. A quick action's hold (see hold)
+    // is for jobs that claim stacks as they go, a backup or restore; an install or update
+    // started meanwhile does not touch what a container start or a delete is doing.
+    if (spec.stack) this.holders.set(spec.stack, id);
     this.publish(job);
 
     const ctx = new JobContext(job, this);
@@ -331,8 +336,35 @@ export class JobManager {
     this.publish(job);
   }
 
-  /** @internal Take `stack` for job `id`; false when another job holds it. */
+  /**
+   * Hold `stack` for a quick action that is not a job (starting a container by hand,
+   * deleting the stack), so that no job claims it until the action has finished. Returns
+   * the release, or the running job that holds the stack already.
+   *
+   * Held this way, a stack is refused to a job's {@link JobContext.withStack} (a backup
+   * skips it and says so) rather than waited for: the action takes a moment, and a check
+   * made only before the action would leave a gap in which a backup could stop the app
+   * and copy it while the action starts it again.
+   */
+  hold(stack: string): { ok: true; release: () => void } | { ok: false; busyWith: JobSummary } {
+    const busyWith = this.activeFor(stack);
+    if (busyWith) return { ok: false, busyWith };
+    this.quick.set(stack, (this.quick.get(stack) ?? 0) + 1);
+    let released = false;
+    return {
+      ok: true,
+      release: () => {
+        if (released) return;
+        released = true;
+        const n = (this.quick.get(stack) ?? 1) - 1;
+        if (n > 0) this.quick.set(stack, n); else this.quick.delete(stack);
+      },
+    };
+  }
+
+  /** @internal Take `stack` for job `id`; false when another job, or a quick action, holds it. */
   claim(stack: string, id: string): boolean {
+    if (this.quick.has(stack)) return false;
     const holder = this.holders.get(stack);
     if (holder && holder !== id && this.all.get(holder)?.summary.status === "running") return false;
     this.holders.set(stack, id);

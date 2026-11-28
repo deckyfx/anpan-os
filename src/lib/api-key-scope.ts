@@ -52,6 +52,12 @@ export const API_KEY_RULES: readonly ApiKeyRule[] = [
             "A key that could register a passkey or change the password could take the " +
             "account over; passkey registration in particular sits behind authGuard.",
   },
+  {
+    prefix: "/api/backups", methods: "*", minScope: null,
+    reason: "A system backup holds the password hash and the secret sessions are signed " +
+            "with, and restoring one brings back old keys and sessions. A key that could " +
+            "download one could sign in after it was revoked.",
+  },
 
   // ── Exceptions carved out of the grants below ────────────────────────────────
   {

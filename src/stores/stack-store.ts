@@ -80,6 +80,20 @@ export class StackStore {
     return result[0];
   }
 
+  /**
+   * Put a stack's row back as a backup recorded it: every given field, `managed` included,
+   * whether or not the row exists now.
+   */
+  static async restore(id: string, fields: Partial<Omit<NewStack, "id">>): Promise<Stack> {
+    const result = await db
+      .insert(stacks)
+      .values({ ...fields, id })
+      .onConflictDoUpdate({ target: stacks.id, set: { ...fields, updatedAt: new Date() } })
+      .returning();
+    if (!result[0]) throw new Error(`restore failed for stack ${id}`);
+    return result[0];
+  }
+
   static async updateMeta(id: string, patch: Partial<Omit<NewStack, "id">>): Promise<Stack | null> {
     const result = await db
       .update(stacks)

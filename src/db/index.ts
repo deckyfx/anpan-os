@@ -4,6 +4,8 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { config } from "../config";
 import { envConfig } from "../env-config";
+import { parseCli } from "../cli-parser";
+import { abandonInstructions, applyPendingRestore } from "../lib/pending-restore";
 
 /**
  * Create the runtime directory before opening the database.
@@ -29,6 +31,26 @@ try {
     `   Create it and make it writable, or point RUNTIME_CONFIG_DIR somewhere else.`,
   );
   process.exit(1);
+}
+
+// A system restore staged by a restore job goes in place before the database is opened:
+// this is the one point where nothing holds it. Only when starting the server: a
+// `--version` or `--doctor` run beside a running server must not swap files under it.
+//
+// A restore that cannot be applied stops the start. Running on with, say, the restored
+// config.toml beside the old database would mix two points in time; the staging is kept,
+// so the next start tries again once the cause is fixed.
+if (parseCli().type === "serve") {
+  try {
+    const applied = applyPendingRestore(envConfig.RUNTIME_CONFIG_DIR);
+    if (applied.length > 0) console.log(`♻️  Restored from backup: ${applied.join(", ")}`);
+  } catch (err) {
+    console.error(
+      `❌ Could not apply the staged restore: ${err instanceof Error ? err.message : String(err)}\n` +
+      `   Fix the cause and start again. ${abandonInstructions(envConfig.RUNTIME_CONFIG_DIR)}`,
+    );
+    process.exit(1);
+  }
 }
 
 const sqlite = new Database(databasePath);
@@ -58,3 +80,14 @@ for (let attempt = 0; ; attempt++) {
 }
 
 export const db = drizzle(sqlite);
+
+/**
+ * Write a consistent copy of the database to `path`, which must not exist.
+ *
+ * `VACUUM INTO` reads in one transaction, so the copy is a single moment of the database
+ * even while requests write to it, and it carries no write-ahead log of its own. Copying
+ * the file instead could catch it between a write and its checkpoint.
+ */
+export function snapshotDatabase(path: string): void {
+  sqlite.run("VACUUM INTO ?", [path]);
+}

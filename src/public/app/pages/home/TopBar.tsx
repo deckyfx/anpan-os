@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import { Menu, X, LayoutGrid, FolderOpen, Activity, Network, RotateCcw, PowerOff, ShoppingBag, HardDrive, UserRound, LogOut, ChevronDown } from "lucide-react";
+import { Menu, X, LayoutGrid, FolderOpen, Activity, Network, RotateCcw, PowerOff, ShoppingBag, HardDrive, Archive, UserRound, LogOut, ChevronDown } from "lucide-react";
 import { api } from "../../lib/api";
 import { DoctorDialog }   from "../../components/DoctorDialog";
 import { DiskCleanupDialog } from "../../components/DiskCleanupDialog";
@@ -28,6 +28,7 @@ const MENU_ITEMS: NavItem[] = [
   { icon: <LayoutGrid   size={14} />, label: "Home",       path: "/",       section: "Navigation" },
   { icon: <FolderOpen   size={14} />, label: "Files",      path: "/files",  section: "Navigation", newTab: true },
   { icon: <ShoppingBag  size={14} />, label: "App Store",  path: "/store",  section: "Navigation" },
+  { icon: <Archive      size={14} />, label: "Backups",    path: "/backups", section: "Navigation" },
   { icon: <Activity     size={14} />, label: "Doctor",     path: "/doctor", section: "Tools"      },
   { icon: <Network      size={14} />, label: "Port Scan",  path: "/ports",  section: "Tools"      },
   { icon: <HardDrive    size={14} />, label: "Disk Cleanup", path: "/cleanup", section: "Tools"    },

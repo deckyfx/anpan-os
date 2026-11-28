@@ -656,6 +656,9 @@ passkey_allowed_origins = []
 # pgid = 1000
 # tz = "UTC"
 
+[backups]
+# folder = "/mnt/backup/anpan"   # where backups are written; defaults to <config dir>/backups
+
 [files]
 root = "/"
 

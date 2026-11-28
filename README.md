@@ -30,6 +30,12 @@ Manage Docker Compose stacks, browse files, monitor system resources, and instal
 - **Compose source doctor** — reports which compose file each container was actually created from, flagging stacks left anchored to a foreign or deleted path
 - **Compose repair** — re-anchors a drifted stack onto the managed compose folder, refusing when doing so would delete a running service the compose file does not define
 
+### Backups
+- **Back up now** — the system (settings, your account, API keys, every app's tile settings) and each app's stack folder and its data under the data root, into one folder per backup in `[backups] folder` (by default `<runtime dir>/backups`; a mounted drive or share works). When two apps use one folder under the data root, each takes only its own folders in it, so restoring one never touches the other's data. Media libraries and other folders an app mounts from outside the data root, and named Docker volumes, are not included, and the backup's log names them
+- **Consistent copies** — an app is stopped while its data is copied and started again after; switch on **Copy while running** per app to keep it up instead, at the risk that a database written during the copy does not restore
+- **Restore** — pick the system and any apps from a backup. Each app is stopped and its folders are replaced by the backup's; what was there is kept until the restore succeeds and put back if it fails. The system part is staged and applied when anpan-os restarts (**Restart now** on the Backups page)
+- **Download and upload** — download a backup as one `.tar` to keep it elsewhere, and upload one (from this machine or another) to restore from it. App data goes back under the same data root it was taken from
+
 ### App Store
 - **Browse remote apps** — search and install apps from any CasaOS-compatible GitHub repository. `$AppID`, `$PUID`, `$PGID` and `$TZ` are filled in, and `/DATA/AppData` volumes go to your configured data folder
 - **Repo manager** — add, enable/disable, and refresh multiple app sources
@@ -322,7 +328,7 @@ curl -H "Authorization: Bearer $ANPAN_API_KEY" https://anpan.local:5000/api/open
 | --- | --- |
 | `read` | GET requests, except files |
 | `operate` | `read`, plus creating, starting, stopping and updating stacks and containers (and cancelling those jobs), the update check, App Store, bookmarks and port notes. Not deleting a stack (it removes volumes), prune, files, Samba or shutdown |
-| `full` | Everything the web UI can do, except account settings and managing API keys |
+| `full` | Everything the web UI can do, except account settings, backups and managing API keys |
 
 A request outside the key's scope gets **403**; a wrong, revoked or expired key gets **401**. The rules (`src/lib/api-key-scope.ts`) are prefix and method grants, checked in order. A new route under an existing prefix inherits that prefix's grant for the methods it lists, so a new `GET /api/docker/…` is readable with a `read` key. A request that matches no grant, such as anything under a new prefix, needs `full`.
 

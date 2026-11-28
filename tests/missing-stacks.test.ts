@@ -16,7 +16,7 @@ import { createTestClient, loginAs } from "./helpers";
 
 const row = (id: string, managed: boolean, title: string | null = null): Stack => ({
   id, title, icon: null, tagline: null, portMap: null, scheme: "http", indexPath: "/",
-  mainService: null, address: null, note: null, openMode: null, managed, orderNo: null,
+  mainService: null, address: null, note: null, openMode: null, managed, orderNo: null, backupLive: false,
   updatedAt: new Date(0),
 });
 

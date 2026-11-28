@@ -14,7 +14,7 @@ import { useStacksStore } from "./stacksStore";
  * (say, after a reconnect) triggers a fresh read instead of a silently incomplete log.
  */
 
-export type JobKind = "install" | "redeploy" | "update" | "update-all" | "migrate" | "repair";
+export type JobKind = "install" | "redeploy" | "update" | "update-all" | "migrate" | "repair" | "backup" | "restore" | "backup-import";
 export type JobStatus = "running" | "done" | "failed" | "cancelled";
 
 export interface JobSummary {
