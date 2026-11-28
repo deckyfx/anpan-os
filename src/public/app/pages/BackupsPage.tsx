@@ -16,16 +16,26 @@ import { useToastStore } from "../stores/toastStore";
 /** Jobs that read or write the backups folder; the server runs one at a time. */
 const BACKUP_KINDS: ReadonlySet<JobKind> = new Set(["backup", "restore", "backup-import"]);
 
-/** Wait for the server to answer again after a restart, then reload the page. */
-async function reloadWhenBack(): Promise<void> {
-  // Give the old process time to stop first, so the first answer is the new one's.
-  await new Promise(r => setTimeout(r, 3000));
-  for (let i = 0; i < 60; i++) {
+/**
+ * Wait for the restarted server, then reload the page. False when it did not come back
+ * within two minutes, or `signal` aborted (the user left the page).
+ *
+ * The old process may still answer for a moment, so "it answers" is not the sign. The new
+ * one has applied the restore before it serves: it reports no restore pending, or, since
+ * the restored database does not know this browser's session, refuses it (401).
+ */
+async function reloadWhenRestarted(signal: AbortSignal): Promise<boolean> {
+  const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+  for (let i = 0; i < 60 && !signal.aborted; i++) {
+    await sleep(2000);
     // A deadline on each probe: a request caught by the restart may otherwise never settle.
-    const ok = await fetch("/api/health", { signal: AbortSignal.timeout(3000) }).then(r => r.ok, () => false);
-    if (ok) { location.reload(); return; }
-    await new Promise(r => setTimeout(r, 2000));
+    const res = await fetch("/api/backups", { signal: AbortSignal.any([signal, AbortSignal.timeout(3000)]) }).catch(() => null);
+    if (!res || signal.aborted) continue;
+    const restarted = res.status === 401
+      || (res.ok && !((await res.json().catch(() => null)) as { restorePending?: boolean } | null)?.restorePending);
+    if (restarted) { location.reload(); return true; }
   }
+  return false;
 }
 
 /**
@@ -41,6 +51,9 @@ export function BackupsPage({ onNavigate }: { onNavigate: (path: string) => void
   const [loadError, setLoadError] = useState("");
   const [shownJob, setShownJob] = useState<string | null>(null);
   const [restarting, setRestarting] = useState(false);
+  // Stops the wait for a restart when the user leaves the page, so it cannot reload another.
+  const pageAbort = useRef(new AbortController());
+  useEffect(() => () => pageAbort.current.abort(), []);
 
   // The top bar's version and the app list come from the stacks store.
   useEffect(() => { useStacksStore.getState().initialize(); }, []);
@@ -101,8 +114,10 @@ export function BackupsPage({ onNavigate }: { onNavigate: (path: string) => void
       useToastStore.getState().push("Restart anpan-os yourself to apply the restore: it is not running as the installed service", "error");
       return;
     }
-    await reloadWhenBack();
+    const back = await reloadWhenRestarted(pageAbort.current.signal);
+    if (pageAbort.current.signal.aborted) return;
     setRestarting(false);
+    if (!back) useToastStore.getState().push("anpan-os has not come back after the restart: check the service on the machine", "error");
   };
 
   return (

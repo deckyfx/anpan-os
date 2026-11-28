@@ -48,7 +48,8 @@ if (parseCli().type === "serve") {
     const staged = join(envConfig.RUNTIME_CONFIG_DIR, PENDING_DIR);
     console.error(
       `❌ Could not apply the staged restore: ${err instanceof Error ? err.message : String(err)}\n` +
-      `   Fix the cause and start again, or delete ${staged} to start without it.`,
+      `   Fix the cause and start again. To start without the restore instead, first put back any\n` +
+      `   file listed above as moved aside (ending in .pre-restore), then delete ${staged}.`,
     );
     process.exit(1);
   }

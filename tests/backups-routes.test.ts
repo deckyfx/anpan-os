@@ -85,6 +85,27 @@ describe("refusals", () => {
 });
 
 describe("list, download, delete and upload", () => {
+  test("a download that tar cannot finish fails instead of ending cleanly", async () => {
+    // A part tar cannot read.
+    const part = join(config.backupsFolder, ID, "apps", "bk-route", "stack.tar.gz");
+    Bun.spawnSync(["chmod", "000", part]);
+    try {
+      if (process.getuid?.() === 0) return; // root reads it anyway
+      const res = await app.handle(new Request(`http://localhost/api/backups/${ID}/download`, { headers: { cookie } }));
+      expect(res.status).toBe(200);
+      await expect(res.arrayBuffer()).rejects.toThrow();
+    } finally {
+      Bun.spawnSync(["chmod", "644", part]);
+    }
+  });
+
+  test("a backup cannot be deleted while it is downloaded", async () => {
+    const res = await app.handle(new Request(`http://localhost/api/backups/${ID}/download`, { headers: { cookie } }));
+    expect((await call("DELETE", `/api/backups/${ID}`)).status).toBe(409);
+    await res.arrayBuffer();
+    expect((await call("DELETE", `/api/backups/${ID}`)).status).toBe(200);
+  });
+
   test("abandoning an upload removes it, finished or not", async () => {
     const upload = crypto.randomUUID();
     const bytes = new TextEncoder().encode("abc");

@@ -24,6 +24,47 @@ const BACKUP_KINDS: ReadonlySet<JobKind> = new Set(["backup", "restore", "backup
  */
 const deleting = new Set<string>();
 
+/** Backups being downloaded now, with how many streams each; not deleted meanwhile. */
+const downloading = new Map<string, number>();
+
+/**
+ * Uploads taken by an import, or being abandoned. Each route checks and claims without an
+ * await between, so an abandon cannot remove a file an import has just accepted, nor an
+ * import accept one an abandon is removing.
+ */
+const claimedUploads = new Set<string>();
+
+/**
+ * `proc`'s stdout as a response body that fails, rather than ends cleanly, when the process
+ * exits non-zero: a tar that could not read a part must not look like a whole download.
+ */
+function checkedStream(proc: Bun.Subprocess<"ignore", "pipe", "pipe">, what: string, onEnd: () => void): ReadableStream<Uint8Array> {
+  const reader = proc.stdout.getReader();
+  let ended = false;
+  const end = () => { if (!ended) { ended = true; onEnd(); } };
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const { done, value } = await reader.read();
+        if (!done) { controller.enqueue(value); return; }
+        const code = await proc.exited;
+        end();
+        if (code === 0) { controller.close(); return; }
+        const detail = (await new Response(proc.stderr).text()).trim().split("\n").slice(-2).join(" ");
+        console.error(`[backups] ${what} failed: tar exit code ${code}${detail ? `: ${detail}` : ""}`);
+        controller.error(new Error(`${what} failed`));
+      } catch (err) {
+        end();
+        controller.error(err);
+      }
+    },
+    cancel() {
+      proc.kill();
+      end();
+    },
+  });
+}
+
 /** The backup, restore or import job running now, if any. */
 function backupJobRunning(): JobSummary | null {
   return jobs.list().find(j => j.status === "running" && BACKUP_KINDS.has(j.kind)) ?? null;
@@ -125,11 +166,15 @@ export function backupsPlugin(jwtSecret: string) {
     .delete("/upload", async ({ query, set }) => {
       if (!UPLOAD_ID_RE.test(query.id)) return Response.json({ error: "Invalid upload id" }, { status: 400 });
       // The partial file, and the finished one if the last chunk already arrived, unless an
-      // import has taken it: checked after the await, right before the removal.
-      await abandonUpload(uploadPath(query.id), query.id);
-      const running = jobs.list().find(j => j.status === "running" && j.kind === "backup-import");
-      if (running) return busy(set, running);
-      await rm(uploadPath(query.id), { force: true });
+      // import has taken it.
+      if (claimedUploads.has(query.id)) { set.status = 409; return { error: "This upload is being added as a backup" }; }
+      claimedUploads.add(query.id);
+      try {
+        await abandonUpload(uploadPath(query.id), query.id);
+        await rm(uploadPath(query.id), { force: true });
+      } finally {
+        claimedUploads.delete(query.id);
+      }
       return { ok: true };
     }, {
       query: t.Object({ id: t.String() }),
@@ -139,12 +184,17 @@ export function backupsPlugin(jwtSecret: string) {
     .post("/import", async ({ body, set }) => {
       if (!UPLOAD_ID_RE.test(body.upload)) { set.status = 400; return { error: "Invalid upload id" }; }
       if (!(await Bun.file(uploadPath(body.upload)).exists())) { set.status = 404; return { error: "No finished upload with that id" }; }
+      if (claimedUploads.has(body.upload)) { set.status = 409; return { error: "This upload is already being added or removed" }; }
       const running = backupJobRunning();
       if (running) return busy(set, running);
-      return answer(set, jobs.start(
+      const started = jobs.start(
         { kind: "backup-import", title: "Add an uploaded backup" },
-        async ctx => { await runImport(ctx, body.upload); },
-      ));
+        async ctx => {
+          try { await runImport(ctx, body.upload); } finally { claimedUploads.delete(body.upload); }
+        },
+      );
+      if (started.ok) claimedUploads.add(body.upload);
+      return answer(set, started);
     }, {
       body: t.Object({ upload: t.String() }),
       detail: { summary: "Unpack an uploaded backup archive into the backups folder (starts a job)" },
@@ -209,6 +259,7 @@ export function backupsPlugin(jwtSecret: string) {
       const running = backupJobRunning();
       if (running) return busy(set, running);
       if (deleting.has(params.id)) { set.status = 409; return { error: "This backup is already being deleted" }; }
+      if (downloading.has(params.id)) { set.status = 409; return { error: "This backup is being downloaded: try again when that has finished" }; }
       deleting.add(params.id);
       try {
         if (!(await deleteBackup(params.id))) { set.status = 404; return { error: "No such backup" }; }
@@ -228,12 +279,19 @@ export function backupsPlugin(jwtSecret: string) {
       if (!(await getBackup(params.id))) { set.status = 404; return { error: "No such backup" }; }
       const tar = Bun.which("tar");
       if (!tar) { set.status = 503; return { error: "tar is not installed on this system" }; }
-      const proc = Bun.spawn([tar, "-cf", "-", "-C", config.backupsFolder, params.id], {
-        cwd: backupPath(params.id), stdout: "pipe", stderr: "ignore",
+      if (deleting.has(params.id)) { set.status = 404; return { error: "No such backup" }; }
+      const id = params.id;
+      const proc = Bun.spawn([tar, "-cf", "-", "-C", config.backupsFolder, id], {
+        cwd: backupPath(id), stdin: "ignore", stdout: "pipe", stderr: "pipe",
       });
+      downloading.set(id, (downloading.get(id) ?? 0) + 1);
+      const release = () => {
+        const n = (downloading.get(id) ?? 1) - 1;
+        if (n > 0) downloading.set(id, n); else downloading.delete(id);
+      };
       // A download cancelled in the browser stops the tar.
       request.signal.addEventListener("abort", () => proc.kill(), { once: true });
-      return new Response(proc.stdout, {
+      return new Response(checkedStream(proc, `Download of backup ${id}`, release), {
         headers: {
           "Content-Type":        "application/x-tar",
           "Content-Disposition": `attachment; filename="anpan-backup-${params.id}.tar"`,

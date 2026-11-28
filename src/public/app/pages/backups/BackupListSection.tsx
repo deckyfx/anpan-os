@@ -166,7 +166,8 @@ function RestorePanel({ backup, busy, onClose, onRestore }: {
 
       <p className="text-xs text-gray-400 leading-relaxed">
         Each app chosen is stopped, and its stack folder and data are replaced by the backup's; anything added since is
-        removed. What is there now is kept until the restore succeeds and put back if it fails.
+        removed. Apps are restored one at a time: what an app has now is kept until its restore succeeds and put back if
+        it fails, and an app that fails does not undo the others.
       </p>
       <div className="flex justify-end">
         <InlineConfirm

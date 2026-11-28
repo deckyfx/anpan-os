@@ -64,7 +64,11 @@ function sendChunk(url: string, body: Blob, onProgress: (loaded: number) => void
     xhr.upload.onprogress = (e) => { arm(); onProgress(e.loaded); };
     xhr.onload = () => {
       let reply: { error?: string; received?: number } = {};
-      try { reply = JSON.parse(xhr.responseText); } catch { /* not JSON */ }
+      try {
+        const parsed: unknown = JSON.parse(xhr.responseText);
+        // JSON, but `null` or a bare value: no fields to read; the status decides.
+        if (typeof parsed === "object" && parsed !== null) reply = parsed;
+      } catch { /* not JSON */ }
       if (xhr.status >= 200 && xhr.status < 300 && typeof reply.received === "number") {
         return done({ kind: "ok", received: reply.received });
       }

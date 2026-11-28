@@ -24,7 +24,8 @@
  */
 import { chmod, lstat, mkdir, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { hostname } from "node:os";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { Database } from "bun:sqlite";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { config } from "../config";
 import { envConfig } from "../env-config";
 import { snapshotDatabase } from "../db";
@@ -124,6 +125,14 @@ function docker(): string {
 
 function exists(path: string): Promise<boolean> {
   return stat(path).then(() => true, () => false);
+}
+
+/**
+ * Remove `path` as cleanup: a failure is logged, never thrown, so it cannot replace the
+ * error that led here, and the path is named for the user to remove.
+ */
+async function tidy(ctx: JobContext, path: string): Promise<void> {
+  await rm(path, { recursive: true, force: true }).catch(e => ctx.log(`⚠ Could not remove ${path}: ${(e as Error).message}`));
 }
 
 /** The folder name for a backup taken at `date`: `YYYYMMDD-HHMMSS`, UTC. */
@@ -376,7 +385,9 @@ async function dataFolders(ctx: JobContext, name: string, dir: string): Promise<
   const candidates = new Set<string>();
   for (const source of sources) {
     const first = join(root, relative(root, source).split(sep)[0]!);
-    const shared = others.some(o => within(o, first));
+    // Another app's mount in the folder, or around it (one that mounts the whole data root,
+    // say): either way the folder is not this app's alone.
+    const shared = others.some(o => overlaps(o, first));
     if (!shared) { candidates.add(first); continue; }
     // Shared with another app: this app's own folder only, and only when no other app
     // uses it or anything in it. A single file cannot be replaced on its own by a
@@ -499,7 +510,7 @@ async function backUpSystem(ctx: JobContext, partial: string): Promise<void> {
     argv.push("-C", snapshotDir, "storage.db");
     await ctx.exec(argv, partial, "tar");
   } finally {
-    await rm(snapshotDir, { recursive: true, force: true });
+    await tidy(ctx, snapshotDir);
   }
 }
 
@@ -566,7 +577,7 @@ export async function runBackup(ctx: JobContext, req: BackupRequest): Promise<st
     if (problems.length > 0) throw new JobError(`Backup ${id} ${problems.join("; ")}`);
     return id;
   } catch (err) {
-    await rm(partial, { recursive: true, force: true });
+    await tidy(ctx, partial);
     throw err;
   }
 }
@@ -592,15 +603,31 @@ async function extract(ctx: JobContext, archivePath: string, into: string): Prom
  * Unpacked beside the staging folder and renamed onto it, so a half-unpacked staging is
  * never taken as ready.
  */
+/** Throw unless `path` is a SQLite database that passes a quick integrity check. */
+function checkDatabase(path: string): void {
+  let db: Database | null = null;
+  try {
+    db = new Database(path, { readonly: true });
+    const row = db.query("PRAGMA quick_check").get() as Record<string, unknown> | null;
+    if (Object.values(row ?? {})[0] !== "ok") throw new Error("integrity check failed");
+  } catch (e) {
+    throw new JobError(`The database in this backup cannot be used: ${e instanceof Error ? e.message : String(e)}`);
+  } finally {
+    db?.close();
+  }
+}
+
 async function stageSystem(ctx: JobContext, backup: string, m: BackupManifest): Promise<void> {
   if (!m.system) throw new JobError("This backup has no system part");
   const staged = join(runtimeDir(), PENDING_DIR);
   const partial = `${staged}.partial`;
+  // A restore staged earlier stays in place until this one is: moved aside, and moved back
+  // if this one cannot be put there. One an earlier attempt could not move back is put
+  // back now, before anything else, rather than taken for clutter.
+  const previous = `${staged}.previous`;
+  if (!(await exists(staged)) && await exists(previous)) await rename(previous, staged);
   await rm(partial, { recursive: true, force: true });
   await mkdir(partial, { mode: 0o700 });
-  // A restore staged earlier stays in place until this one is: moved aside, and moved back
-  // if this one cannot be put there.
-  const previous = `${staged}.previous`;
   let movedPrevious = false;
   try {
     await extract(ctx, join(backup, m.system), partial);
@@ -619,6 +646,8 @@ async function stageSystem(ctx: JobContext, backup: string, m: BackupManifest): 
     if (!(await exists(join(partial, "storage.db")))) {
       throw new JobError("The system part of this backup has no database");
     }
+    // And one SQLite can open and finds sound: at the restart it replaces the live one.
+    checkDatabase(join(partial, "storage.db"));
     // "wx": created here, never written through something already there.
     await writeFile(join(partial, READY_MARKER), `${m.id}\n`, { flag: "wx" });
     await rm(previous, { recursive: true, force: true });
@@ -629,11 +658,11 @@ async function stageSystem(ctx: JobContext, backup: string, m: BackupManifest): 
     if (movedPrevious && !(await exists(staged))) {
       await rename(previous, staged).catch(e => ctx.log(`⚠ Could not put back the restore staged before (it is in ${previous}): ${(e as Error).message}`));
     }
-    await rm(partial, { recursive: true, force: true }).catch(() => {});
+    await tidy(ctx, partial);
     throw err;
   }
   // Committed: the new staging is in place. The earlier one is only clutter now.
-  await rm(previous, { recursive: true, force: true }).catch(() => {});
+  await tidy(ctx, previous);
   ctx.log("System settings and database staged: restart anpan-os to apply them");
 }
 
@@ -659,6 +688,14 @@ async function restoreApp(ctx: JobContext, backup: string, m: BackupManifest, ap
     );
   }
   const dataDirs = app.data.map(d => ({ path: join(root, d.dir), archive: join(backup, d.archive) }));
+
+  // Each folder must still be under the data root once links are followed: a folder on
+  // the way to it that is now a link elsewhere would have the restore replace files there.
+  const realRoot = await realpath(root).catch(() => root);
+  for (const d of dataDirs) {
+    const real = await realExisting(d.path);
+    if (!within(real, realRoot)) throw new JobError(`${d.path} now leads to ${real}, outside ${root}; not restoring ${app.name}`);
+  }
 
   // A folder that was this app's alone when backed up may hold another app's data now.
   // Checked before anything is stopped or moved.
@@ -743,7 +780,9 @@ async function restoreApp(ctx: JobContext, backup: string, m: BackupManifest, ap
     if (runningBefore.length > 0) await recover(`start ${app.name} again`, () => compose(["up", "-d", "--no-deps", ...runningBefore]));
     throw err;
   }
-  for (const { moved } of aside) await rm(moved, { recursive: true, force: true });
+  // Committed: the app runs on the restored files. A safety copy that cannot be removed is
+  // named, not a reason to call the restore failed.
+  for (const { moved } of aside) await tidy(ctx, moved);
 }
 
 /** Restore apps, and stage the system part, from backup `req.id`. */
@@ -787,6 +826,23 @@ export async function runRestore(ctx: JobContext, req: RestoreRequest): Promise<
 }
 
 // ─── Importing an uploaded backup ───────────────────────────────────────────
+
+/**
+ * `path` with links followed as far as it exists: the real path of its nearest existing
+ * ancestor, with the rest appended.
+ */
+async function realExisting(path: string): Promise<string> {
+  const rest: string[] = [];
+  let at = resolve(path);
+  for (;;) {
+    const real = await realpath(at).catch(() => null);
+    if (real) return join(real, ...rest.reverse());
+    const parent = dirname(at);
+    if (parent === at) return resolve(path);
+    rest.push(basename(at));
+    at = parent;
+  }
+}
 
 /** Whether `path` is a folder (or a regular file) itself, not a link to one. */
 async function isReal(path: string, kind: "dir" | "file"): Promise<boolean> {
@@ -869,7 +925,7 @@ export async function runImport(ctx: JobContext, uploadId: string): Promise<stri
     ctx.log(`Backup ${id} added`);
     return id;
   } finally {
-    await rm(staging, { recursive: true, force: true });
-    await rm(upload, { force: true });
+    await tidy(ctx, staging);
+    await tidy(ctx, upload);
   }
 }

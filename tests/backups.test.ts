@@ -19,6 +19,7 @@ import { StackStore } from "../src/stores/stack-store";
 import { DockerClient } from "../src/lib/docker";
 import { config } from "../src/config";
 import { envConfig } from "../src/env-config";
+import { Database } from "bun:sqlite";
 
 const APP = "bk-app";
 const LIVE = "bk-live";
@@ -403,7 +404,7 @@ describe("staging checks", () => {
     const work = join(envConfig.RUNTIME_CONFIG_DIR, "bk-sys");
     await rm(work, { recursive: true, force: true });
     await mkdir(work);
-    await writeFile(join(work, "storage.db"), "db");
+    new Database(join(work, "storage.db")).close();
     await symlink("/etc/hostname", join(work, ".ready"));
     await writeFile(join(work, "extra.txt"), "x");
     Bun.spawnSync(["tar", "-czf", join(backupPath(id), "system.tar.gz"), "-C", work, "storage.db", ".ready", "extra.txt"]);
@@ -421,6 +422,20 @@ describe("staging checks", () => {
     const { job } = await runJob(ctx => runRestore(ctx, { id, system: true, apps: [] }));
     expect(job.status).toBe("failed");
     expect(job.error).toContain("unexpected storage.db");
+  });
+
+  test("refuses a database SQLite cannot use", async () => {
+    const id = await backUp({ system: true, apps: [] });
+    const work = join(envConfig.RUNTIME_CONFIG_DIR, "bk-sys");
+    await rm(work, { recursive: true, force: true });
+    await mkdir(work);
+    await writeFile(join(work, "storage.db"), "not a database");
+    Bun.spawnSync(["tar", "-czf", join(backupPath(id), "system.tar.gz"), "-C", work, "storage.db"]);
+    await rm(work, { recursive: true });
+    const { job } = await runJob(ctx => runRestore(ctx, { id, system: true, apps: [] }));
+    expect(job.status).toBe("failed");
+    expect(job.error).toContain("cannot be used");
+    expect(existsSync(join(envConfig.RUNTIME_CONFIG_DIR, PENDING_DIR))).toBe(false);
   });
 
   test("refuses the system from a backup without one before touching any app", async () => {
